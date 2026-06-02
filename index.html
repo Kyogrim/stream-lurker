@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: https: wss:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; connect-src 'self' https: wss:; object-src 'none';">
+  <title>Stream Lurker</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="logo-area">
+        <div class="logo-icon"></div>
+        <h1>STREAM LURKER</h1>
+      </div>
+      
+      <div class="sidebar-section">
+        <h3 class="sidebar-section-title">ACTIVE STREAM LURKS</h3>
+        <div id="active-lurk-tabs" class="active-lurk-tabs">
+          <div class="no-active-lurks">No active streams open</div>
+        </div>
+      </div>
+      
+      <div class="sidebar-divider"></div>
+      
+      <nav class="nav-menu">
+        <button class="nav-btn active" data-tab="dashboard">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12H3M12 3v18"/></svg>
+          Monitor Panel
+        </button>
+        <button class="nav-btn" data-tab="logins">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Platform Logins
+        </button>
+        <button class="nav-btn" data-tab="streamers">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Manage Streamers
+        </button>
+        <button class="nav-btn" data-tab="calendar">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          Lurk Calendar
+        </button>
+        <button class="nav-btn" data-tab="extensions">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          Adblock & Extensions
+        </button>
+        <button class="nav-btn" data-tab="drops">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 12 20 22 4 22 4 12"/>
+            <rect x="2" y="7" width="20" height="5"/>
+            <line x1="12" y1="22" x2="12" y2="7"/>
+            <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/>
+            <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/>
+          </svg>
+          Drops & Inventory
+        </button>
+        <button class="nav-btn" data-tab="settings">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          System Settings
+        </button>
+      </nav>
+      
+      <div class="sidebar-footer">
+        <div class="status-indicator">
+          <span class="pulse-dot"></span>
+          <span class="status-text">Background Scanner Active</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Action Bar -->
+      <header class="top-bar">
+        <div class="timer-display">
+          <span class="timer-label">NEXT SCAN IN</span>
+          <span id="countdown-clock" class="timer-value">00:00</span>
+        </div>
+        <div class="header-actions">
+          <button id="scan-now-btn" class="btn btn-cyan btn-glow">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            Scan Now
+          </button>
+        </div>
+      </header>
+
+      <!-- Dashboard Tab (Default) -->
+      <section id="tab-dashboard" class="tab-content active">
+        <div class="dashboard-header-panel glass-panel">
+          <div class="headline-info">
+            <h2>Lurk Dashboard</h2>
+            <p>Real-time online stream detection & container launching.</p>
+          </div>
+          <div class="lurk-control-toggle">
+            <span class="toggle-label">Auto-Open Active Streams</span>
+            <label class="switch">
+              <input type="checkbox" id="auto-open-toggle" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="main-dashboard-grid">
+          <!-- Streams Grid (Left column) -->
+          <div class="streams-section">
+            <h3 class="section-title">STREAMERS STATUS</h3>
+            <div id="streams-grid" class="streams-grid">
+              <!-- Dynamically populated streamer cards -->
+              <div class="no-streamers-message">
+                <p>No streamers added yet. Go to the <strong>Manage Streamers</strong> panel to add your favorites.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Console & Stats (Right column) -->
+          <div class="logs-section">
+            <h3 class="section-title">LIVE ACTIVITY CONSOLE</h3>
+            <div class="console-wrapper glass-panel">
+              <div class="console-header">
+                <span class="console-dot red"></span>
+                <span class="console-dot yellow"></span>
+                <span class="console-dot green"></span>
+                <span class="console-title">lurk-agent@stream-lurker:~</span>
+              </div>
+              <div id="console-logs" class="console-logs">
+                <!-- Log messages populated dynamically -->
+              </div>
+            </div>
+            
+            <div class="stats-overview glass-panel">
+              <div class="stat-card">
+                <span class="stat-val" id="total-streamers-stat">0</span>
+                <span class="stat-lbl">Streamers Monitored</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-val text-green" id="live-streamers-stat">0</span>
+                <span class="stat-lbl">Active Streams</span>
+              </div>
+              <div class="stat-card">
+                <span class="stat-val text-cyan" id="containers-stat">0</span>
+                <span class="stat-lbl">Open Containers</span>
+              </div>
+            </div>
+
+            <!-- Watch Time Leaderboard & Stats -->
+            <div class="watch-time-leaderboard glass-panel" style="margin-top: 20px; padding: 20px; display: flex; flex-direction: column; gap: 16px;">
+              <div class="leaderboard-header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 10px;">
+                <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--cyan-color); border-bottom: none; padding-bottom: 0; margin-bottom: 0;">LURK LEADERBOARD</h3>
+                <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Top Lurked Streamers</span>
+              </div>
+              <div id="leaderboard-list" class="leaderboard-list" style="display: flex; flex-direction: column; gap: 10px;">
+                <div class="no-stats-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 10px 0;">No watch history tracked yet. Keep a stream tab open to track hours!</div>
+              </div>
+              <div class="platform-breakdown-container" style="display: flex; flex-direction: column; gap: 6px; margin-top: 10px;">
+                <span style="font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">Watch Time by Platform</span>
+                <div class="platform-bar-wrapper" style="display: flex; height: 8px; border-radius: 4px; overflow: hidden; background-color: var(--panel-border);">
+                  <div id="platform-bar-twitch" style="width: 0%; background-color: var(--twitch-color); transition: var(--transition);"></div>
+                  <div id="platform-bar-kick" style="width: 0%; background-color: var(--kick-color); transition: var(--transition);"></div>
+                  <div id="platform-bar-youtube" style="width: 0%; background-color: var(--youtube-color); transition: var(--transition);"></div>
+                  <div id="platform-bar-rumble" style="width: 0%; background-color: var(--rumble-color); transition: var(--transition);"></div>
+                </div>
+                <div class="platform-legend" style="display: flex; justify-content: space-between; font-size: 0.62rem; color: var(--text-secondary); margin-top: 4px; gap: 2px;">
+                  <span class="legend-twitch" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--twitch-color);"></span>Twitch: <span id="legend-twitch-h">0h</span></span>
+                  <span class="legend-kick" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--kick-color);"></span>Kick: <span id="legend-kick-h">0h</span></span>
+                  <span class="legend-youtube" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--youtube-color);"></span>YouTube: <span id="legend-youtube-h">0h</span></span>
+                  <span class="legend-rumble" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--rumble-color);"></span>Rumble: <span id="legend-rumble-h">0h</span></span>
+                </div>
+              </div>
+            </div>
+
+
+          </div>
+        </div>
+      </section>
+
+      <!-- Platform Logins Tab -->
+      <section id="tab-logins" class="tab-content">
+        <div class="tab-header">
+          <h2>Platform Logins</h2>
+          <p>Log in securely to Twitch, Kick, YouTube, and Rumble inside Stream Lurker. All active streams will automatically share these credentials.</p>
+        </div>
+
+        <div class="logins-grid">
+          <!-- Twitch Login Panel -->
+          <div class="glass-panel login-card twitch-login-card">
+            <div class="login-card-header">
+              <div class="platform-title-group">
+                <span class="platform-icon-purple"></span>
+                <h3>Twitch Account</h3>
+              </div>
+            </div>
+            <div class="account-card-body" style="position: relative; height: 180px; display: flex; align-items: center; justify-content: center; width: 100%;">
+              <!-- Disconnected State -->
+              <div class="account-state-container disconnected-state" id="twitch-disconnected-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; max-width: 240px; margin: 0;">Connect your Twitch account to import live channels and share sessions with active containers.</p>
+                <button class="btn btn-sm connect-account-btn" data-platform="twitch" style="padding: 8px 16px; font-weight: 700; font-size: 0.8rem; background: var(--twitch-color); border: 1px solid var(--twitch-color); color: #fff; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 10px var(--twitch-glow);">
+                  <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                  Connect Account
+                </button>
+              </div>
+
+              <!-- Connected State -->
+              <div class="account-state-container connected-state" id="twitch-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--twitch-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--twitch-color)" stroke-width="2.5">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--twitch-color); margin: 0;">Twitch Connected</h4>
+                  <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="twitch-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
+                  <button class="btn btn-sm btn-cyan reauth-btn" data-platform="twitch" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Re-authenticate
+                  </button>
+                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="twitch" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Kick Login Panel -->
+          <div class="glass-panel login-card kick-login-card">
+            <div class="login-card-header">
+              <div class="platform-title-group">
+                <span class="platform-icon-green"></span>
+                <h3>Kick Account</h3>
+              </div>
+            </div>
+            <div class="account-card-body" style="position: relative; height: 180px; display: flex; align-items: center; justify-content: center; width: 100%;">
+              <!-- Disconnected State -->
+              <div class="account-state-container disconnected-state" id="kick-disconnected-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; max-width: 240px; margin: 0;">Connect your Kick account to import live channels and share sessions with active lurk tabs.</p>
+                <button class="btn btn-sm connect-account-btn" data-platform="kick" style="padding: 8px 16px; font-weight: 700; font-size: 0.8rem; background: var(--kick-color); border: 1px solid var(--kick-color); color: #000; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 10px var(--kick-glow);">
+                  <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                  Connect Account
+                </button>
+              </div>
+
+              <!-- Connected State -->
+              <div class="account-state-container connected-state" id="kick-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--kick-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--kick-color)" stroke-width="2.5">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--kick-color); margin: 0;">Kick Connected</h4>
+                  <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="kick-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
+                  <button class="btn btn-sm btn-cyan reauth-btn" data-platform="kick" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Re-authenticate
+                  </button>
+                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="kick" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- YouTube Login Panel -->
+          <div class="glass-panel login-card youtube-login-card">
+            <div class="login-card-header">
+              <div class="platform-title-group">
+                <span class="platform-icon-red"></span>
+                <h3>YouTube Account</h3>
+              </div>
+            </div>
+            <div class="account-card-body" style="position: relative; height: 180px; display: flex; align-items: center; justify-content: center; width: 100%;">
+              <!-- Disconnected State -->
+              <div class="account-state-container disconnected-state" id="youtube-disconnected-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; max-width: 240px; margin: 0;">Connect your YouTube account to share active sessions with your dynamic lurk tabs.</p>
+                <button class="btn btn-sm connect-account-btn" data-platform="youtube" style="padding: 8px 16px; font-weight: 700; font-size: 0.8rem; background: var(--youtube-color); border: 1px solid var(--youtube-color); color: #fff; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 10px var(--youtube-glow);">
+                  <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                  Connect Account
+                </button>
+              </div>
+
+              <!-- Connected State -->
+              <div class="account-state-container connected-state" id="youtube-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--youtube-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--youtube-color)" stroke-width="2.5">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--youtube-color); margin: 0;">YouTube Connected</h4>
+                  <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="youtube-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
+                  <button class="btn btn-sm btn-cyan reauth-btn" data-platform="youtube" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Re-authenticate
+                  </button>
+                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="youtube" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Rumble Login Panel -->
+          <div class="glass-panel login-card rumble-login-card">
+            <div class="login-card-header">
+              <div class="platform-title-group">
+                <span class="platform-icon-lime"></span>
+                <h3>Rumble Account</h3>
+              </div>
+            </div>
+            <div class="account-card-body" style="position: relative; height: 180px; display: flex; align-items: center; justify-content: center; width: 100%;">
+              <!-- Disconnected State -->
+              <div class="account-state-container disconnected-state" id="rumble-disconnected-state" style="display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <p style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; max-width: 240px; margin: 0;">Connect your Rumble account to share active sessions with your dynamic lurk tabs.</p>
+                <button class="btn btn-sm connect-account-btn" data-platform="rumble" style="padding: 8px 16px; font-weight: 700; font-size: 0.8rem; background: var(--rumble-color); border: 1px solid var(--rumble-color); color: #000; border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 10px var(--rumble-glow);">
+                  <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                  Connect Account
+                </button>
+              </div>
+
+              <!-- Connected State -->
+              <div class="account-state-container connected-state" id="rumble-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--rumble-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--rumble-color)" stroke-width="2.5">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                  </svg>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--rumble-color); margin: 0;">Rumble Connected</h4>
+                  <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="rumble-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
+                  <button class="btn btn-sm btn-cyan reauth-btn" data-platform="rumble" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                    Re-authenticate
+                  </button>
+                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="rumble" style="padding: 6px 12px; font-size: 0.75rem;">
+                    <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                    Sign Out
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Manage Streamers Tab -->
+      <section id="tab-streamers" class="tab-content">
+        <div class="tab-header">
+          <h2>Manage Streamers</h2>
+          <p>Add or remove Twitch and Kick streamers from your monitoring list.</p>
+        </div>
+
+        <div class="streamer-management-grid">
+          <div class="streamer-management-left" style="display: flex; flex-direction: column; gap: 20px;">
+          <!-- Add Streamer Form -->
+          <div class="glass-panel form-card" style="flex-shrink: 0;">
+            <h3>Add New Streamer</h3>
+            <form id="add-streamer-form" class="form-container">
+              <div class="form-group">
+                <label>Platform</label>
+                <div class="platform-selector">
+                  <label class="platform-option twitch-opt">
+                    <input type="radio" name="platform" value="twitch" checked>
+                    <div class="platform-card">
+                      <span class="platform-icon twitch-logo"></span>
+                      <span>Twitch</span>
+                    </div>
+                  </label>
+                  <label class="platform-option kick-opt">
+                    <input type="radio" name="platform" value="kick">
+                    <div class="platform-card">
+                      <span class="platform-icon kick-logo"></span>
+                      <span>Kick</span>
+                    </div>
+                  </label>
+                  <label class="platform-option youtube-opt">
+                    <input type="radio" name="platform" value="youtube">
+                    <div class="platform-card">
+                      <span class="platform-icon youtube-logo"></span>
+                      <span>YouTube</span>
+                    </div>
+                  </label>
+                  <label class="platform-option rumble-opt">
+                    <input type="radio" name="platform" value="rumble">
+                    <div class="platform-card">
+                      <span class="platform-icon rumble-logo"></span>
+                      <span>Rumble</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label for="streamer-username">Channel Username</label>
+                <input type="text" id="streamer-username" placeholder="e.g. ninja, xqc, shrouds" required autocomplete="off">
+              </div>
+
+              <button type="submit" class="btn btn-cyan btn-full">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+                Add to Monitor List
+              </button>
+              
+              <div id="add-streamer-error" class="error-msg hidden"></div>
+            </form>
+          </div>
+
+            <!-- Live Channels Panel -->
+            <div class="follows-import-panel glass-panel" style="padding: 20px; display: flex; flex-direction: column; gap: 16px; flex-shrink: 0;">
+              <div class="follows-header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 10px;">
+                <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--cyan-color); border-bottom: none; padding-bottom: 0; margin-bottom: 0;">LIVE CHANNELS</h3>
+                <button id="sync-follows-btn" class="btn btn-sm btn-cyan" style="font-size: 0.75rem; padding: 4px 10px;">
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  Scan Live
+                </button>
+              </div>
+              <div class="follows-tabs-selectors" style="display: flex; gap: 8px; border-bottom: 1px solid var(--panel-border); padding-bottom: 8px;">
+                <button class="follows-tab-btn active" data-platform="twitch" style="background: none; border: none; font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; color: var(--twitch-color); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: var(--transition);">Twitch</button>
+                <button class="follows-tab-btn" data-platform="kick" style="background: none; border: none; font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; color: var(--text-muted); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: var(--transition);">Kick</button>
+              </div>
+              <div id="follows-list-container" class="follows-list-container" style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
+                <div class="no-follows-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 15px 0;">Click Scan to discover live followed channels.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Streamer List -->
+          <div class="glass-panel list-card">
+            <h3>Monitored Channels</h3>
+            <div id="monitored-channels-list" class="monitored-list">
+              <!-- Dynamically populated list items -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Lurk Calendar Tab -->
+      <section id="tab-calendar" class="tab-content">
+        <div class="tab-header">
+          <h2>Lurk Calendar</h2>
+          <p>Track automatic platform schedules and set manual lurk plans for the week.</p>
+        </div>
+
+        <div class="calendar-layout-grid" style="display: grid; grid-template-columns: 1fr 320px; gap: 24px; min-height: 0; flex-grow: 1;">
+          <!-- Calendar Days Columns (Monday to Sunday) -->
+          <div class="calendar-days-container glass-panel" style="display: flex; flex-direction: column; gap: 16px; overflow: hidden; min-height: 500px;">
+            <div class="calendar-header-row" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 12px; margin-bottom: 8px;">
+              <h3 style="font-size: 1.15rem; font-weight: 700;">Weekly Schedule</h3>
+              <button id="sync-calendar-btn" class="btn btn-cyan btn-sm">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Sync Platform Schedules
+              </button>
+            </div>
+            <div class="days-columns" style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; flex-grow: 1; overflow-x: auto; overflow-y: hidden; min-width: 800px; padding-bottom: 10px;">
+              <!-- Dynamically populated rolling calendar columns -->
+            </div>
+          </div>
+
+          <!-- Add Manual Event Form -->
+          <div class="glass-panel form-card" style="display: flex; flex-direction: column; gap: 16px;">
+            <h3 style="font-size: 1.15rem; font-weight: 700; border-bottom: 1px solid var(--panel-border); padding-bottom: 12px; margin-bottom: 8px;">Add Manual Event</h3>
+            <form id="add-event-form" class="form-container" style="display: flex; flex-direction: column; gap: 16px;">
+              <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Streamer Username</label>
+                <input type="text" id="event-streamer" placeholder="e.g. ninja" required autocomplete="off" style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.95rem;
+                  padding: 10px;
+                  border-radius: var(--radius-md);
+                  outline: none;
+                ">
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Platform</label>
+                <select id="event-platform" style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.95rem;
+                  padding: 10px;
+                  border-radius: var(--radius-md);
+                  outline: none;
+                  width: 100%;
+                  cursor: pointer;
+                ">
+                  <option value="twitch">Twitch</option>
+                  <option value="kick">Kick</option>
+                  <option value="youtube">YouTube</option>
+                  <option value="rumble">Rumble</option>
+                </select>
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Day of Week</label>
+                <select id="event-day" style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.95rem;
+                  padding: 10px;
+                  border-radius: var(--radius-md);
+                  outline: none;
+                  width: 100%;
+                  cursor: pointer;
+                ">
+                  <option value="1">Monday</option>
+                  <option value="2">Tuesday</option>
+                  <option value="3">Wednesday</option>
+                  <option value="4">Thursday</option>
+                  <option value="5">Friday</option>
+                  <option value="6">Saturday</option>
+                  <option value="0">Sunday</option>
+                </select>
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Start Time (24h format)</label>
+                <input type="time" id="event-time" required style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.95rem;
+                  padding: 10px;
+                  border-radius: var(--radius-md);
+                  outline: none;
+                  width: 100%;
+                ">
+              </div>
+              <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Title / Category (Optional)</label>
+                <input type="text" id="event-title" placeholder="e.g. Sub Sunday" autocomplete="off" style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.95rem;
+                  padding: 10px;
+                  border-radius: var(--radius-md);
+                  outline: none;
+                ">
+              </div>
+
+              <button type="submit" class="btn btn-cyan btn-full">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;"><path d="M12 5v14M5 12h14"/></svg>
+                Add Schedule Event
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Extensions Tab -->
+      <section id="tab-extensions" class="tab-content">
+        <div class="tab-header">
+          <h2>Adblock & Extensions Manager</h2>
+          <p>Manage unpacked Chrome extensions (like uBlock Origin) to load inside stream containers automatically.</p>
+        </div>
+
+        <div class="extensions-layout-grid">
+          <!-- Add Extension controls -->
+          <div class="glass-panel ext-controller-card">
+            <h3>Load Chrome Extensions</h3>
+            <p class="description">
+              Stream Lurker containers are secure, isolated browser environments. To block ads (like Twitch pre-rolls/mid-rolls) or customize layouts, you can load unpacked Chrome extensions.
+            </p>
+            
+            <div class="quick-guide">
+              <h4>Quick Guide to Install uBlock Origin (Adblock):</h4>
+              <ol>
+                <li>Download the unpacked uBlock Origin source zip from <a href="#" onclick="require('electron').shell.openExternal('https://github.com/gorhill/uBlock/releases')">uBlock Origin Releases</a> (e.g., <code>uBlock0_x.x.x.chromium.zip</code>).</li>
+                <li>Extract the ZIP file into a permanent folder on your computer.</li>
+                <li>Click the <strong>Add Unpacked Extension</strong> button below and select that extracted folder!</li>
+              </ol>
+            </div>
+
+            <button id="add-extension-btn" class="btn btn-cyan btn-full">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2zM12 11v6M9 14h6"/></svg>
+              Add Unpacked Extension Folder
+            </button>
+            <div id="extension-error" class="error-msg hidden"></div>
+          </div>
+
+          <!-- Extension List -->
+          <div class="glass-panel ext-list-card">
+            <h3>Active Extensions</h3>
+            <div id="extensions-list" class="extensions-list">
+              <!-- Dynamically populated list of extensions -->
+              <div class="no-extensions-message">
+                <p>No custom extensions added yet. Add an unpacked folder above to load extensions inside the browser containers.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Drops & Inventory Tab -->
+      <section id="tab-drops" class="tab-content">
+        <div class="tab-header">
+          <h2>Drops & Inventory Progress Dashboard</h2>
+          <p>Discover active Twitch drop campaigns, quest for rewards, and monitor auto-claim progress.</p>
+        </div>
+
+        <div class="drops-layout-grid">
+          <!-- Drops Status & Control panel -->
+          <div class="glass-panel drops-controller-card">
+            <h3>Automated Drop Agents</h3>
+            <p class="description">
+              Stream Lurker automatically intercepts drops campaign tracking inside your authenticated stream containers. When a drop is fully earned, it claims it instantly!
+            </p>
+
+            <div class="quick-guide">
+              <h4>Drops Status Summary:</h4>
+              <div class="drops-stats-row">
+                <div class="drop-stat-card glass-panel">
+                  <span class="drop-stat-val text-violet" id="active-campaigns-count">0</span>
+                  <span class="drop-stat-lbl">Active Campaigns</span>
+                </div>
+                <div class="drop-stat-card glass-panel">
+                  <span class="drop-stat-val text-lime" id="claimed-drops-count">0</span>
+                  <span class="drop-stat-lbl">Claimed Today</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="control-option-card glass-panel" style="margin-top: 16px;">
+              <div class="option-header">
+                <span class="option-title">Auto-Claim Twitch Drops</span>
+                <label class="switch">
+                  <input type="checkbox" id="auto-claim-drops-toggle" checked>
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <p class="option-desc">Automatically claims drops the moment progress reaches 100%.</p>
+            </div>
+
+            <div class="control-option-card glass-panel" style="margin-top: 12px;">
+              <div class="option-header">
+                <span class="option-title">Twitch Emote & Channel Points Claimer</span>
+                <label class="switch">
+                  <input type="checkbox" id="auto-claim-points-toggle" checked>
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <p class="option-desc">Automatically clicks and claims standard channel points chests inside Twitch webview streams.</p>
+            </div>
+
+            <!-- In-progress list (active lurks) -->
+            <div style="margin-top: 20px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;">
+              <h4 style="font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">Live Progress (Active Lurks)</h4>
+              <div id="drops-campaigns-list" class="drops-campaigns-list" style="margin-top: 4px;">
+                <div class="no-drops-message">
+                  <p>No active drops progress yet. Lurk in a drops-enabled stream to begin monitoring.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Available Campaigns Card -->
+          <div class="glass-panel drops-list-card">
+            <!-- Followed streamers currently on a campaign game -->
+            <div id="drops-followed-section" class="drops-followed-section" style="display: none;">
+              <div class="drops-available-header">
+                <h3 style="margin: 0;">Followed Streamers on Campaign Games <span class="drops-cat-count" id="followed-campaigns-count">0</span></h3>
+              </div>
+              <p class="description" style="margin: 4px 0 8px;">Streamers you follow who are live in a drop-campaign category. Prioritize one to watch them to the top of your queue and earn the rewards.</p>
+              <div id="drops-followed-list" class="drops-followed-list"></div>
+            </div>
+
+            <div class="drops-available-header">
+              <h3 style="margin: 0;">Available Drop Campaigns</h3>
+              <button id="refresh-drops-campaigns-btn" class="btn btn-sm btn-cyan" title="Refresh campaigns list">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Refresh
+              </button>
+            </div>
+
+            <div class="drops-category-tabs">
+              <button class="drops-cat-tab active" data-cat="watch">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Watch Rewards <span class="drops-cat-count" id="watch-cat-count">0</span>
+              </button>
+              <button class="drops-cat-tab" data-cat="sub">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                Sub Rewards <span class="drops-cat-count" id="sub-cat-count">0</span>
+              </button>
+            </div>
+
+            <div id="drops-available-watch" class="drops-available-list active">
+              <div class="no-drops-message">
+                <p>Loading active campaigns... Login to Twitch first if list is empty.</p>
+              </div>
+            </div>
+            <div id="drops-available-sub" class="drops-available-list">
+              <div class="no-drops-message">
+                <p>Loading active campaigns...</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings Tab -->
+      <section id="tab-settings" class="tab-content">
+        <div class="tab-header">
+          <h2>System Settings</h2>
+          <p>Configure scanning intervals, Twitch developer API keys, and notification triggers.</p>
+        </div>
+
+        <div class="settings-layout-grid">
+          <!-- System Configuration Form -->
+          <div class="glass-panel settings-card">
+            <h3>General Settings</h3>
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="interval-slider">Scanning Interval: <span id="interval-display-val">3</span> Minutes</label>
+              </div>
+              <input type="range" id="interval-slider" min="1" max="60" value="3" class="slider-input">
+              <span class="help-text">Controls how frequently the background agent queries platforms for streamer status. Recommended: 3 minutes.</span>
+            </div>
+
+            <div class="settings-group">
+              <label>Platform Service Toggles</label>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background-color: hsla(240, 5.9%, 15%, 0.15); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--panel-border);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <span class="toggle-label" style="font-size: 0.85rem;">Twitch</span>
+                  <label class="switch">
+                    <input type="checkbox" id="twitch-enabled-toggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <span class="toggle-label" style="font-size: 0.85rem;">Kick</span>
+                  <label class="switch">
+                    <input type="checkbox" id="kick-enabled-toggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <span class="toggle-label" style="font-size: 0.85rem;">YouTube</span>
+                  <label class="switch">
+                    <input type="checkbox" id="youtube-enabled-toggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <span class="toggle-label" style="font-size: 0.85rem;">Rumble</span>
+                  <label class="switch">
+                    <input type="checkbox" id="rumble-enabled-toggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+              <span class="help-text">Completely disable scanning and auto-opening for specific services to save bandwidth.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-twitch-tabs-slider">Max Twitch Lurk Tabs: <span id="max-twitch-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-twitch-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of Twitch streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-kick-tabs-slider">Max Kick Lurk Tabs: <span id="max-kick-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-kick-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of Kick streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-youtube-tabs-slider">Max YouTube Lurk Tabs: <span id="max-youtube-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-youtube-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of YouTube streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-rumble-tabs-slider">Max Rumble Lurk Tabs: <span id="max-rumble-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-rumble-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of Rumble streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <label for="quality-select">Default Stream Quality</label>
+              <select id="quality-select" style="
+                background-color: var(--panel-glass);
+                border: 1px solid var(--panel-border);
+                color: var(--text-primary);
+                font-family: var(--font-sans);
+                font-size: 0.95rem;
+                padding: 10px;
+                border-radius: var(--radius-md);
+                outline: none;
+                width: 100%;
+                cursor: pointer;
+              ">
+                <option value="160p">160p (Bandwidth Saver)</option>
+                <option value="360p">360p</option>
+                <option value="480p">480p</option>
+                <option value="720p">720p</option>
+                <option value="source">Source / Best Available</option>
+              </select>
+              <span class="help-text">Automatically applies this quality resolution inside live stream containers to conserve bandwidth.</span>
+            </div>
+
+            <div class="settings-action-row">
+              <button id="save-general-settings" class="btn btn-cyan">Save Settings</button>
+              <div id="general-settings-success" class="success-msg hidden">Settings saved!</div>
+            </div>
+          </div>
+
+          <!-- Twitch Credentials Card -->
+          <div class="glass-panel settings-card">
+            <div class="twitch-card-header">
+              <span class="twitch-header-logo"></span>
+              <h3>Twitch API Credentials</h3>
+            </div>
+            
+            <div class="help-info-box">
+              <strong>Why is this required?</strong> Official Twitch status checking requires registering a free developer application to get a Client ID & Secret. Without these, Twitch streamers cannot be checked.
+              <a href="#" onclick="require('electron').shell.openExternal('https://dev.twitch.tv/console')">Register on Twitch Dev Console</a>
+            </div>
+
+            <div class="form-group">
+              <label for="twitch-client-id">Twitch Client ID</label>
+              <input type="password" id="twitch-client-id" placeholder="Enter your Twitch Client ID" autocomplete="new-password">
+            </div>
+
+            <div class="form-group">
+              <label for="twitch-client-secret">Twitch Client Secret</label>
+              <input type="password" id="twitch-client-secret" placeholder="Enter your Twitch Client Secret" autocomplete="new-password">
+            </div>
+
+            <div class="settings-action-row">
+              <button id="save-twitch-settings" class="btn btn-violet btn-glow">Save Twitch API Keys</button>
+              <div id="twitch-settings-success" class="success-msg hidden">Twitch API keys saved!</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multi-Lurk Grid Tab -->
+      <section id="tab-multi-lurk" class="tab-content stream-tab-panel">
+        <div class="multi-lurk-header">
+          <h2 class="section-title">Active Lurk Channels</h2>
+          <div class="layout-switcher-toolbar glass-panel">
+            <span class="switcher-lbl">Grid Mode:</span>
+            <button class="switcher-btn active" id="layout-btn-auto" data-layout="auto" title="Dynamic Responsive Layout">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <line x1="9" y1="3" x2="9" y2="21"/>
+                <line x1="15" y1="3" x2="15" y2="21"/>
+              </svg>
+              <span>Auto</span>
+            </button>
+            <button class="switcher-btn" id="layout-btn-grid-2x2" data-layout="grid-2x2" title="2x2 Grid Layout">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"/>
+                <rect x="14" y="3" width="7" height="7"/>
+                <rect x="14" y="14" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/>
+              </svg>
+              <span>2x2 Grid</span>
+            </button>
+            <button class="switcher-btn" id="layout-btn-focus-1-3" data-layout="focus-1-3" title="1-Large + 3-Small Theater Focus">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="11" height="18" rx="2"/>
+                <rect x="16" y="3" width="5" height="4" rx="1"/>
+                <rect x="16" y="10" width="5" height="4" rx="1"/>
+                <rect x="16" y="17" width="5" height="4" rx="1"/>
+              </svg>
+              <span>Theater</span>
+            </button>
+            <button class="switcher-btn" id="layout-btn-pip" data-layout="pip" title="Floating Picture-in-Picture">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <rect x="12" y="12" width="7" height="7" rx="1"/>
+              </svg>
+              <span>PiP</span>
+            </button>
+            <button class="switcher-btn" id="global-ghost-btn" title="Toggle Ghost Mode (Decoder Suspension) for All Streams">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a10 10 0 0 0-10 10v9a1 1 0 0 0 1.25.96l2.12-.53a1 1 0 0 1 .48 0l2.3.57a1 1 0 0 0 .48 0l2.3-.57a1 1 0 0 1 .48 0l2.3.57a1 1 0 0 0 .48 0l2.12-.53A1 1 0 0 0 22 21v-9a10 10 0 0 0-10-10z"/>
+                <circle cx="9" cy="11" r="1"/>
+                <circle cx="15" cy="11" r="1"/>
+              </svg>
+              <span>Ghost All</span>
+            </button>
+          </div>
+        </div>
+        <div id="multi-lurk-grid" class="multi-lurk-grid" data-layout="auto">
+          <!-- Active stream webview cells dynamically appended here -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

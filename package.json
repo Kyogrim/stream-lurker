@@ -1,0 +1,56 @@
+{
+  "name": "stream-lurker",
+  "version": "1.0.0",
+  "description": "Standalone desktop application to check and automatically lurk in Twitch & Kick streams with adblock extension support.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "package": "electron-builder build --win --dir",
+    "package-linux": "electron-builder build --linux --dir",
+    "dist": "electron-builder build --win",
+    "dist-linux": "electron-builder build --linux"
+  },
+  "keywords": [
+    "twitch",
+    "kick",
+    "lurk",
+    "streamer",
+    "adblock",
+    "desktop-app"
+  ],
+  "author": "Stream Lurker Team",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.streamlurker.app",
+    "productName": "Stream Lurker",
+    "win": {
+      "target": [
+        "dir",
+        "nsis"
+      ],
+      "icon": "icon.ico"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "style.css",
+      "renderer.js",
+      "src/**/*.js",
+      "package.json"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+build/
+
+# Local agent / editor settings
+.claude/
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local env / secrets (app config actually lives in %APPDATA%, but just in case)
+.env
+.env.local
+config.json
+*.local.json
