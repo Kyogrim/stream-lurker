@@ -164,6 +164,11 @@ export function setupFollowsHandlers() {
             const res = await window.api.getTwitchFollows();
             if (res.success) {
               state.followsCache.twitch = res.follows;
+              if (res.username && state.currentConfig.accounts) {
+                state.currentConfig.accounts.twitch = res.username;
+                const usernameSpan = document.getElementById('twitch-username-val');
+                if (usernameSpan) usernameSpan.textContent = res.username;
+              }
               appendLogMessage(`[System] Synced ${res.follows.length} LIVE channels from Twitch follows list.`);
             } else {
               appendLogMessage(`[Twitch Sync] Secure GQL sync failed: ${res.error || 'Unknown error'}`);

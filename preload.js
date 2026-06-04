@@ -1,3 +1,4 @@
+console.log('=== PRELOAD.JS RUNNING ===');
 const { contextBridge, ipcRenderer } = require('electron');
 
 // Helper to safely register an IPC listener without stacking duplicates
@@ -33,12 +34,11 @@ contextBridge.exposeInMainWorld('api', {
   updateActiveTabs: (tabsList) => ipcRenderer.invoke('update-active-tabs', tabsList),
   syncPlatformSchedules: () => ipcRenderer.invoke('sync-platform-schedules'),
 
-  // Twitch Drops campaigns
-  fetchDropCampaigns: () => ipcRenderer.invoke('fetch-drop-campaigns'),
-  findDropsStream: (gameName, gameSlug, exclude) => ipcRenderer.invoke('find-drops-stream', { gameName, gameSlug, exclude }),
-  checkTwitchLive: (username) => ipcRenderer.invoke('check-twitch-live', username),
+  getTwitchAuthToken: () => ipcRenderer.invoke('get-twitch-auth-token'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
-  
+  downloadClip: (url, filename) => ipcRenderer.invoke('download-clip', url, filename),
+  openClipWindow: (url) => ipcRenderer.invoke('open-clip-window', url),
+
   // Queries
   getRecentLogs: () => ipcRenderer.invoke('get-recent-logs'),
   getActiveContainers: () => ipcRenderer.invoke('get-active-containers'),

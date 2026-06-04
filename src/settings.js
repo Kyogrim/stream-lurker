@@ -46,9 +46,7 @@ export function hydrateSettingsUI() {
   const qualitySelect = document.getElementById('quality-select');
   if (qualitySelect) qualitySelect.value = cfg.defaultQuality || '160p';
 
-  const autoClaimDropsToggle = document.getElementById('auto-claim-drops-toggle');
   const autoClaimPointsToggle = document.getElementById('auto-claim-points-toggle');
-  if (autoClaimDropsToggle) autoClaimDropsToggle.checked = cfg.autoClaimDrops !== false;
   if (autoClaimPointsToggle) autoClaimPointsToggle.checked = cfg.autoClaimPoints !== false;
 }
 
@@ -158,14 +156,8 @@ export function setupSettingsHandlers() {
     }
   });
 
-  // Drops & Channel Points toggles.
-  const autoClaimDropsToggle = document.getElementById('auto-claim-drops-toggle');
+  // Channel Points toggle.
   const autoClaimPointsToggle = document.getElementById('auto-claim-points-toggle');
-  autoClaimDropsToggle?.addEventListener('change', () => {
-    cfg().autoClaimDrops = autoClaimDropsToggle.checked;
-    window.api.saveConfig(cfg());
-    appendLogMessage(`[Drops] Auto-claim Twitch Drops set to: ${autoClaimDropsToggle.checked}`);
-  });
   autoClaimPointsToggle?.addEventListener('change', () => {
     cfg().autoClaimPoints = autoClaimPointsToggle.checked;
     window.api.saveConfig(cfg());

@@ -77,5 +77,5 @@ export function appendLogMessage(message) {
   }
 
   host.appendChild(line);
-  host.scrollTop = host.scrollHeight;
+  host.scrollTop = 10000000;
 }

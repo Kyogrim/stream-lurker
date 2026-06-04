@@ -591,46 +591,6 @@ export function autoClaimPointsScript(username) {
   `;
 }
 
-export const dropsQueryScript = `
-  (function() {
-    return new Promise((resolve) => {
-      try {
-        const token = document.cookie.match(/auth-token=([^;]+)/)?.[1];
-        if (!token) return resolve(null);
-
-        fetch('https://gql.twitch.tv/gql', {
-          method: 'POST',
-          headers: {
-            'Client-Id': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
-            'Authorization': 'OAuth ' + token,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify([{
-            operationName: "ViewerDropsDashboard",
-            variables: {},
-            query: \`query ViewerDropsDashboard {
-              currentUser {
-                dropCampaignsInProgress {
-                  id
-                  name
-                  game { name }
-                  status
-                  percentComplete
-                }
-              }
-            }\`
-          }])
-        })
-        .then(res => res.json())
-        .then(data => resolve(data[0]?.data?.currentUser?.dropCampaignsInProgress || []))
-        .catch(() => resolve(null));
-      } catch(e) {
-        resolve(null);
-      }
-    });
-  })();
-`;
-
 export const kickLiveFollowsScript = `
   (async () => {
     try {

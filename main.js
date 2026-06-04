@@ -6,6 +6,12 @@ const { exec } = require('child_process');
 // Enable extension support in Electron partitioned sessions & webviews by bypassing sandbox restrictions
 app.commandLine.appendSwitch('disable-extension-sandbox');
 
+// Disable backgrounding, occlusion, and timer throttling for hidden windows to ensure Kasada challenges run correctly
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows', 'true');
+app.commandLine.appendSwitch('disable-renderer-backgrounding', 'true');
+app.commandLine.appendSwitch('disable-background-timer-throttling', 'true');
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+
 // Constants
 const TWITCH_PUBLIC_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -14,6 +20,7 @@ const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 let mainWindow = null;
 let tray = null;
 const activeWindows = new Map(); // Key: platform:username -> true
+let activeQuestStreamer = null; // Track active quest streamer (lowercase) to prevent preemption/auto-close
 let config = {
   streamers: [],
   checkInterval: 3, // in minutes
@@ -43,6 +50,7 @@ let pollIntervalId = null;
 let countdownTimerId = null;
 let nextScanTime = 0;
 const logs = [];
+let normalizedUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // Twitch OAuth token cache
 let twitchTokenCache = { token: null, expiresAt: 0 };
@@ -399,11 +407,52 @@ function createMainWindow() {
     }
   });
 
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    addLog(`[Console - MainWindow] [Level ${level}] ${message} at ${sourceId}:${line}`);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    addLog(`[System - MainWindow] Renderer process gone! Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    addLog(`[System - MainWindow] Load failed! Error Code: ${errorCode}, Description: ${errorDescription}, URL: ${validatedURL}`);
+  });
+
+  try {
+    mainWindow.webContents.debugger.attach('1.3');
+    mainWindow.webContents.debugger.on('message', (event, method, params) => {
+      if (method === 'Runtime.exceptionThrown') {
+        const desc = params.exceptionDetails.exception ? params.exceptionDetails.exception.description : params.exceptionDetails.text;
+        addLog(`[Debugger Exception] ${desc}`);
+      }
+    });
+    mainWindow.webContents.debugger.sendCommand('Runtime.enable');
+  } catch (err) {
+    addLog(`[Debugger Error] Failed to attach: ${err.message}`);
+  }
+
   // Remove default menu bar
   mainWindow.setMenuBarVisibility(false);
 
   // Load dashboard
   mainWindow.loadFile('index.html');
+
+  // Capture screen diagnostic after load
+  setTimeout(async () => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        addLog('Capturing page screenshot...');
+        const image = await mainWindow.webContents.capturePage();
+        const png = image.toPNG();
+        const targetPath = 'C:\\Users\\tmdav\\.gemini\\antigravity-ide\\brain\\f27a3c68-36a2-4597-9c18-2840f5c9cbae\\dashboard_capture.png';
+        fs.writeFileSync(targetPath, png);
+        addLog(`Dashboard screenshot saved to: ${targetPath}`);
+      }
+    } catch (err) {
+      addLog(`Failed to save screenshot: ${err.message}`);
+    }
+  }, 10000);
 
   // Open DevTools only in development
   if (!app.isPackaged) {
@@ -571,7 +620,7 @@ async function checkTwitchStreamersGQL(streamersToCheck) {
       headers: {
         'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': normalizedUserAgent
       },
       body: JSON.stringify(batchBody)
     });
@@ -586,6 +635,20 @@ async function checkTwitchStreamersGQL(streamersToCheck) {
     return streamersToCheck.map((username, index) => {
       try {
         const resObj = data[index];
+        if (resObj && resObj.errors && resObj.errors.length) {
+          const msg = resObj.errors.map(e => e.message).join('; ');
+          return {
+            platform: 'twitch',
+            username: username,
+            isLive: false,
+            title: '',
+            viewerCount: 0,
+            category: '',
+            liveSince: '',
+            error: msg
+          };
+        }
+
         const userObj = resObj && resObj.data && resObj.data.user;
         const liveInfo = userObj && userObj.stream;
         
@@ -601,7 +664,16 @@ async function checkTwitchStreamersGQL(streamersToCheck) {
           };
         }
       } catch (innerErr) {
-        // Fall through to offline status
+        return {
+          platform: 'twitch',
+          username: username,
+          isLive: false,
+          title: '',
+          viewerCount: 0,
+          category: '',
+          liveSince: '',
+          error: innerErr.message
+        };
       }
       
       return {
@@ -943,6 +1015,9 @@ async function performScan() {
       const key = `${platform}:${username}`;
       
       if (activeWindows.has(key)) {
+        if (activeQuestStreamer && username === activeQuestStreamer.toLowerCase()) {
+          continue; // Protect quest streamer; monitorQuest manages its lifecycle
+        }
         addLog(`[Lurk] Streamer ${stream.username} on ${stream.platform.toUpperCase()} went offline. Auto-closing container.`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('close-stream-tab', { platform: stream.platform, username: stream.username });
@@ -983,7 +1058,11 @@ async function performScan() {
           if (currentCount >= maxTabs) {
             // Priority-based preemption: Check if we can close a lower-priority active stream on this platform
             const activeKeysForPlatform = Array.from(activeWindows.keys())
-              .filter(k => k.startsWith(`${platform}:`));
+              .filter(k => k.startsWith(`${platform}:`))
+              .filter(k => {
+                const [_, activeUser] = k.split(':');
+                return !activeQuestStreamer || activeUser.toLowerCase() !== activeQuestStreamer.toLowerCase();
+              });
 
             const activeStreamPriorities = activeKeysForPlatform.map(key => {
               const [_, activeUser] = key.split(':');
@@ -1074,11 +1153,111 @@ app.whenReady().then(async () => {
   addLog('Initializing Stream Lurker standalone desktop application...');
   loadConfig();
   
+  const rawUA = session.defaultSession.getUserAgent();
+  const userAgent = rawUA
+    .replace(/stream-lurker\/\S+/i, '')
+    .replace(/Electron\/\S+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  addLog(`[System] Normalized User-Agent for standard Chrome features: ${userAgent}`);
+  session.defaultSession.setUserAgent(userAgent);
+  session.fromPartition('persist:default').setUserAgent(userAgent);
+
+  // Spoof Sec-Ch-Ua client hints on Twitch requests to match normalized User-Agent fingerprint
+  const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
+  const chromeMajorVersion = chromeVersionMatch ? chromeVersionMatch[1] : '124';
+  const osPlatform = process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : 'Windows';
+  const platformString = `"${osPlatform}"`;
+
+  session.fromPartition('persist:default').webRequest.onBeforeRequest(
+    { urls: ['*://*/*'] },
+    (details, callback) => {
+      if (twitchPageWin && !twitchPageWin.isDestroyed() && details.webContentsId === twitchPageWin.webContents.id) {
+        const urlStr = details.url.toLowerCase();
+        if (
+          urlStr.includes('usher.ttvnw.net') ||
+          urlStr.includes('.m3u8') ||
+          urlStr.includes('.ts') ||
+          urlStr.includes('video-weaver')
+        ) {
+          return callback({ cancel: true });
+        }
+      }
+      callback({});
+    }
+  );
+
+  session.fromPartition('persist:default').webRequest.onBeforeSendHeaders(
+    { urls: ['*://*.twitch.tv/*', '*://*.twitchcdn.net/*'] },
+    (details, callback) => {
+      const headers = details.requestHeaders;
+      const setHeader = (name, val) => {
+        const lowerName = name.toLowerCase();
+        for (const key of Object.keys(headers)) {
+          if (key.toLowerCase() === lowerName) {
+            delete headers[key];
+          }
+        }
+        headers[name] = val;
+      };
+      setHeader('sec-ch-ua', `"Chromium";v="${chromeMajorVersion}", "Google Chrome";v="${chromeMajorVersion}", "Not-A.Brand";v="99"`);
+      setHeader('sec-ch-ua-mobile', '?0');
+      setHeader('sec-ch-ua-platform', platformString);
+      if (details.url.includes('gql.twitch.tv')) {
+        addLog(`[Outgoing GQL Request] URL: ${details.url}, Cookie: ${headers['Cookie'] || headers['cookie'] || 'none'}`);
+      }
+      callback({ requestHeaders: headers });
+    }
+  );
+
+  session.fromPartition('persist:default').webRequest.onHeadersReceived(
+    { urls: ['*://gql.twitch.tv/*'] },
+    (details, callback) => {
+      const responseHeaders = details.responseHeaders || {};
+      const setHeader = (name, val) => {
+        const lowerName = name.toLowerCase();
+        for (const key of Object.keys(responseHeaders)) {
+          if (key.toLowerCase() === lowerName) {
+            delete responseHeaders[key];
+          }
+        }
+        responseHeaders[name] = [val];
+      };
+
+      // Rewrite Set-Cookie headers to broaden domain to .twitch.tv
+      let rawCookies = responseHeaders['Set-Cookie'] || responseHeaders['set-cookie'];
+      if (rawCookies) {
+        const updatedCookies = (Array.isArray(rawCookies) ? rawCookies : [rawCookies]).map(cookie => {
+          let val = cookie.replace(/domain=\.?gql\.twitch\.tv/gi, 'Domain=.twitch.tv');
+          if (!/domain=/i.test(val)) {
+            val += '; Domain=.twitch.tv';
+          }
+          return val;
+        });
+        delete responseHeaders['Set-Cookie'];
+        delete responseHeaders['set-cookie'];
+        responseHeaders['set-cookie'] = updatedCookies;
+      }
+
+      setHeader('Access-Control-Allow-Origin', 'https://www.twitch.tv');
+      setHeader('Access-Control-Allow-Credentials', 'true');
+      callback({ responseHeaders });
+    }
+  );
+
   // Pre-install 7TV Extension
   await install7TVExtension();
   
   await loadExtensions();
   createMainWindow();
+  
+  session.defaultSession.on('will-download', (event, item, webContents) => {
+    if (currentDownloadFileName) {
+      item.setSaveDialogOptions({ defaultPath: currentDownloadFileName });
+      currentDownloadFileName = null;
+    }
+  });
+
   createTray();
 
   // Start background poller
@@ -1089,6 +1268,17 @@ app.whenReady().then(async () => {
 
   // Run immediate first scan after a short delay to let frontend mount
   setTimeout(performScan, 3000);
+
+  // Diagnostic drops fetch
+  setTimeout(async () => {
+    addLog('[Drops Test] Running diagnostic drops fetch...');
+    try {
+      const res = await handleFetchDropCampaigns();
+      addLog(`[Drops Test] Result: success=${res.success}, error=${res.error || 'none'}, watchCampaigns=${res.watchCampaigns ? res.watchCampaigns.length : 0}`);
+    } catch (e) {
+      addLog(`[Drops Test] Diagnostic threw error: ${e.message}`);
+    }
+  }, 10000);
 
   // Setup countdown update clock
   if (countdownTimerId) clearInterval(countdownTimerId);
@@ -1183,29 +1373,69 @@ function createTray() {
   }
 }
 
+// Helper to fetch Twitch Username from GQL using OAuth token
+async function fetchTwitchUsername(token) {
+  try {
+    const response = await net.fetch('https://gql.twitch.tv/gql', {
+      method: 'POST',
+      headers: {
+        'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
+        'Authorization': `OAuth ${token}`,
+        'Content-Type': 'application/json',
+        'User-Agent': normalizedUserAgent
+      },
+      body: JSON.stringify([{
+        operationName: 'GetUserInfo',
+        query: 'query GetUserInfo { currentUser { login } }'
+      }])
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data[0]?.data?.currentUser?.login || null;
+    }
+  } catch (e) {
+    addLog(`[Auth] Failed to fetch Twitch username via GQL: ${e.message}`);
+  }
+  return null;
+}
+
 // Session Validation on Startup
 async function validateSavedSessions() {
-  const platforms = Object.keys(config.accounts || {});
-  if (platforms.length === 0) return;
-  
+  const platformsToCheck = ['twitch', 'kick', 'youtube', 'rumble'];
   addLog('[Auth] Validating saved platform sessions...');
   const ses = session.fromPartition('persist:default');
   
-  for (const platform of platforms) {
+  for (const platform of platformsToCheck) {
     let isValid = false;
     
     try {
       if (platform === 'twitch') {
         const cookies = await ses.cookies.get({ name: 'auth-token' });
         isValid = cookies.some(c => c.domain && c.domain.includes('twitch.tv'));
+        if (isValid) {
+          if (!config.accounts[platform] || config.accounts[platform] === 'Twitch User') {
+            const tokenCookie = cookies.find(c => c.domain && c.domain.includes('twitch.tv'));
+            if (tokenCookie) {
+              const username = await fetchTwitchUsername(tokenCookie.value);
+              if (username) {
+                config.accounts[platform] = username;
+                saveConfig();
+                addLog(`[Auth] Recovered Twitch username: ${username}`);
+              } else {
+                config.accounts[platform] = 'Twitch User';
+                saveConfig();
+              }
+            }
+          }
+        }
       } else if (platform === 'kick') {
-        const cookies = await ses.cookies.get({ domain: 'kick.com' });
+        const cookies = await ses.cookies.get({ url: 'https://kick.com' });
         isValid = cookies.some(c => c.name === 'kick_session' || c.name.includes('session'));
       } else if (platform === 'youtube') {
-        const cookies = await ses.cookies.get({ domain: 'google.com' });
+        const cookies = await ses.cookies.get({ url: 'https://youtube.com' });
         isValid = cookies.some(c => c.name === 'SID' || c.name === 'SSID');
       } else if (platform === 'rumble') {
-        const cookies = await ses.cookies.get({ domain: 'rumble.com' });
+        const cookies = await ses.cookies.get({ url: 'https://rumble.com' });
         isValid = cookies.some(c => c.name.includes('session') || c.name === 'u_s');
       }
     } catch (e) {
@@ -1213,13 +1443,19 @@ async function validateSavedSessions() {
     }
     
     if (!isValid) {
-      addLog(`[Auth] Session expired for ${platform.toUpperCase()}. Marking as disconnected.`);
-      delete config.accounts[platform];
-      saveConfig();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('session-expired', { platform });
+      if (config.accounts && config.accounts[platform]) {
+        addLog(`[Auth] Session expired for ${platform.toUpperCase()}. Marking as disconnected.`);
+        delete config.accounts[platform];
+        saveConfig();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('session-expired', { platform });
+        }
       }
     } else {
+      if (!config.accounts[platform]) {
+        config.accounts[platform] = `${platform.charAt(0).toUpperCase() + platform.slice(1)} User`;
+        saveConfig();
+      }
       addLog(`[Auth] Session valid for ${platform.toUpperCase()} (${config.accounts[platform]}).`);
     }
   }
@@ -1301,15 +1537,13 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
           const cookies = await ses.cookies.get({ name: 'auth-token' });
           return cookies.some(c => c.domain && c.domain.includes('twitch.tv'));
         } else if (p === 'kick') {
-          const cookies = await ses.cookies.get({ domain: 'kick.com' });
-          const hasSession = cookies.some(c => c.name === 'kick_session' || c.name.includes('session') || c.name.includes('XSRF'));
-          const url = loginWin.isDestroyed() ? '' : loginWin.webContents.getURL();
-          return hasSession && !url.includes('/login') && !url.includes('/auth/');
+          // Bypassed cookie check to allow DOM/localStorage detection to handle it
+          return false;
         } else if (p === 'youtube') {
-          const googleCookies = await ses.cookies.get({ domain: 'google.com' });
+          const googleCookies = await ses.cookies.get({ url: 'https://youtube.com' });
           return googleCookies.some(c => c.name === 'SID' || c.name === 'SSID');
         } else if (p === 'rumble') {
-          const cookies = await ses.cookies.get({ domain: 'rumble.com' });
+          const cookies = await ses.cookies.get({ url: 'https://rumble.com' });
           return cookies.some(c => c.name.includes('session') || c.name === 'u_s');
         }
       } catch (e) {
@@ -1356,24 +1590,37 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
             script = `
               (() => {
                 try {
-                  const userVal = localStorage.getItem('user');
-                  if (userVal) {
-                    const parsed = JSON.parse(userVal);
-                    if (parsed && (parsed.username || parsed.slug)) return true;
-                  }
-                  if (document.querySelector('.profile-dropdown, #profile-dropdown-trigger, [href*="/dashboard"], [href*="/settings"], [class*="profile-dropdown"]')) {
-                    return true;
-                  }
-                } catch(e) {}
-                return false;
+                  const href = window.location.href;
+                  const localStorageKeys = Object.keys(localStorage);
+                  
+                  // Look for any links containing /dashboard, /settings, /profile, /logout
+                  const links = Array.from(document.querySelectorAll('a')).map(a => a.href).filter(h => h.includes('dashboard') || h.includes('settings') || h.includes('profile') || h.includes('logout') || h.includes('creator'));
+                  
+                  // Look for any buttons or images
+                  const buttons = Array.from(document.querySelectorAll('button')).map(b => b.innerText || b.className).filter(Boolean);
+                  const imgs = Array.from(document.querySelectorAll('img')).map(i => ({ src: i.src, alt: i.alt }));
+                  
+                  const hasNuxt = typeof window.__NUXT__ !== 'undefined';
+                  
+                  return {
+                    href,
+                    localStorageKeys,
+                    links,
+                    buttons: buttons.slice(0, 15),
+                    imgs: imgs.slice(0, 15),
+                    hasNuxt
+                  };
+                } catch(e) {
+                  return { error: e.message };
+                }
               })()
             `;
           } else if (p === 'youtube') {
-            // YouTube: check if we've been redirected back to youtube.com with user avatar
             if (url.includes('youtube.com')) {
               script = `
                 (() => {
                   try {
+                    if (window.ytcfg && window.ytcfg.get && window.ytcfg.get('LOGGED_IN')) return true;
                     return !!document.querySelector('button#avatar-btn, [aria-label*="Account"], #avatar-btn');
                   } catch(e) {}
                   return false;
@@ -1392,7 +1639,20 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
           }
 
           if (script) {
-            isLoggedIn = await loginWin.webContents.executeJavaScript(script);
+            const res = await loginWin.webContents.executeJavaScript(script);
+            if (p === 'kick') {
+              addLog(`[Auth - Kick Diagnostic] ${JSON.stringify(res)}`);
+              if (res && !res.error) {
+                const isOnHomepage = !res.href.includes('/login') && !res.href.includes('/auth/');
+                const hasLoggedInLinks = res.links && res.links.length > 0;
+                const hasLocalStorageUser = res.localStorageKeys && res.localStorageKeys.some(k => k.includes('user') || k.includes('auth'));
+                const hasLoggedInUI = res.imgs && res.imgs.some(img => img.src && (img.src.includes('/avatars/') || img.src.includes('/uploads/')));
+                
+                isLoggedIn = isOnHomepage || hasLoggedInLinks || hasLocalStorageUser || hasLoggedInUI;
+              }
+            } else {
+              isLoggedIn = res;
+            }
           }
         }
 
@@ -1434,10 +1694,35 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
               (async () => {
                 try {
                   let actualUsername = null;
-                  try {
-                    const userObj = JSON.parse(localStorage.getItem('user') || '{}');
-                    actualUsername = userObj.username || userObj.slug || userObj.name;
-                  } catch(e) {}
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const val = localStorage.getItem(key);
+                    if (val && (val.includes('username') || val.includes('slug'))) {
+                      try {
+                        const parsed = JSON.parse(val);
+                        const findUsername = (obj) => {
+                          if (!obj || typeof obj !== 'object') return null;
+                          if (obj.username && typeof obj.username === 'string') return obj.username;
+                          if (obj.slug && typeof obj.slug === 'string') return obj.slug;
+                          for (const k in obj) {
+                            const res = findUsername(obj[k]);
+                            if (res) return res;
+                          }
+                          return null;
+                        };
+                        actualUsername = findUsername(parsed);
+                        if (actualUsername) break;
+                      } catch(e) {}
+                    }
+                  }
+                  if (!actualUsername) {
+                    try {
+                      const avatarImg = document.querySelector('img[src*="/user/" i], img[src*="/profile_image/" i], img[src*="/avatars/" i]');
+                      if (avatarImg && avatarImg.alt && !avatarImg.alt.toLowerCase().includes('avatar') && !avatarImg.alt.toLowerCase().includes('profile') && !avatarImg.alt.toLowerCase().includes('logo')) {
+                        actualUsername = avatarImg.alt;
+                      }
+                    } catch(e) {}
+                  }
                   if (!actualUsername) {
                     try {
                       const controller = new AbortController();
@@ -1455,24 +1740,88 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
             `);
             username = data || 'Kick User';
           } else if (p === 'youtube') {
-            // For YouTube, we may still be on google.com after cookie detection
-            // Navigate to youtube.com to extract username if needed
             const currentUrl = loginWin.webContents.getURL();
             if (!currentUrl.includes('youtube.com')) {
-              loginWin.loadURL('https://www.youtube.com');
+              try {
+                await loginWin.loadURL('https://www.youtube.com');
+              } catch (err) {
+                addLog(`[Auth] Navigation to YouTube failed: ${err.message}`);
+              }
               await new Promise(r => setTimeout(r, 3000));
             }
             const data = await loginWin.webContents.executeJavaScript(`
-              (() => {
-                try {
-                  const avatar = document.querySelector('button#avatar-btn, #avatar-btn');
-                  if (!avatar) return null;
-                  let nameVal = avatar.getAttribute('aria-label') || 'YouTube User';
-                  if (nameVal.includes('Photo of')) nameVal = nameVal.replace('Photo of', '').trim();
-                  return nameVal;
-                } catch(e) {
+              (async () => {
+                const sleep = ms => new Promise(r => setTimeout(r, ms));
+                
+                const cleanName = (name) => {
+                  if (!name) return null;
+                  let n = name.replace(/avatar\\s+image\\s+of/i, '')
+                              .replace(/photo\\s+of/i, '')
+                              .replace(/profile\\s+photo\\s+of/i, '')
+                              .replace(/profile\\s+picture\\s+of/i, '')
+                              .trim();
+                  if (n && !n.toLowerCase().includes('avatar') && !n.toLowerCase().includes('profile') && !n.toLowerCase().includes('photo') && !n.toLowerCase().includes('default')) {
+                    return n;
+                  }
                   return null;
+                };
+
+                for (let attempt = 0; attempt < 20; attempt++) {
+                  try {
+                    // Strategy 1: Check ytcfg configuration properties
+                    if (window.ytcfg && window.ytcfg.get) {
+                      const handle = window.ytcfg.get('CHANNEL_HANDLE');
+                      const name = window.ytcfg.get('USER_NAME');
+                      if (handle) return handle;
+                      if (name) return name;
+                    }
+                    if (window.ytcfg && window.ytcfg.data_) {
+                      const d = window.ytcfg.data_;
+                      if (d.CHANNEL_HANDLE) return d.CHANNEL_HANDLE;
+                      if (d.USER_NAME) return d.USER_NAME;
+                    }
+
+                    // Strategy 2: Check for active menu dropdown headers if already open
+                    const activeHandle = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle');
+                    if (activeHandle && activeHandle.textContent.trim()) {
+                      return activeHandle.textContent.trim();
+                    }
+                    const activeName = document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
+                    if (activeName && activeName.textContent.trim()) {
+                      return activeName.textContent.trim();
+                    }
+
+                    // Strategy 3: Try to find avatar button to trigger the dropdown menu
+                    const avatarBtn = document.querySelector('button#avatar-btn, #avatar-btn, yt-img-shadow#avatar, ytd-topbar-menu-button-renderer');
+                    if (avatarBtn) {
+                      avatarBtn.click();
+                      await sleep(400); // Wait for the dropdown to render
+                      
+                      const handleEl = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle');
+                      if (handleEl && handleEl.textContent.trim()) {
+                        return handleEl.textContent.trim();
+                      }
+                      const nameEl = document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
+                      if (nameEl && nameEl.textContent.trim()) {
+                        return nameEl.textContent.trim();
+                      }
+
+                      // Strategy 4: Fallback to alt tag or aria-label attributes directly on button/image
+                      const img = avatarBtn.querySelector('img');
+                      if (img && img.alt) {
+                        const name = cleanName(img.alt);
+                        if (name) return name;
+                      }
+                      const label = avatarBtn.getAttribute('aria-label');
+                      if (label) {
+                        const name = cleanName(label);
+                        if (name) return name;
+                      }
+                    }
+                  } catch (e) {}
+                  await sleep(500);
                 }
+                return null;
               })()
             `);
             username = data || 'YouTube User';
@@ -1496,6 +1845,10 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
           if (!config.accounts) config.accounts = {};
           config.accounts[p] = username;
           saveConfig();
+
+          if (p === 'twitch') {
+            resetTwitchPageWindow();
+          }
 
           // Notify UI
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1530,6 +1883,10 @@ ipcMain.handle('logout-platform', async (event, { platform }) => {
   if (config.accounts && config.accounts[p]) {
     delete config.accounts[p];
     saveConfig();
+  }
+
+  if (p === 'twitch') {
+    resetTwitchPageWindow();
   }
 
   try {
@@ -1608,7 +1965,7 @@ ipcMain.handle('get-twitch-follows', async () => {
         'Authorization': `OAuth ${token}`,
         'Cookie': `auth-token=${token}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': normalizedUserAgent
       },
       body: JSON.stringify([{
         operationName: 'FollowedLiveUsers',
@@ -1642,6 +1999,12 @@ ipcMain.handle('get-twitch-follows', async () => {
     const follows = currentUser.followedLiveUsers?.edges?.map(e => e.node.login).filter(Boolean) || [];
     
     addLog(`[Twitch Sync] Successfully synced GQL for ${username}. Found ${follows.length} live follows.`);
+    
+    if (config.accounts && config.accounts.twitch !== username) {
+      config.accounts.twitch = username;
+      saveConfig();
+    }
+    
     return { success: true, username, follows };
   } catch (err) {
     addLog(`[Twitch Sync] Secure GQL sync failed: ${err.message}`);
@@ -1831,7 +2194,7 @@ async function fetchTwitchSchedule(username) {
       headers: {
         'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': normalizedUserAgent
       },
       body: JSON.stringify([{
         operationName: 'ChannelStartup',
@@ -1946,6 +2309,16 @@ async function getTwitchAuthToken() {
   return twitchCookie ? twitchCookie.value : null;
 }
 
+async function getTwitchUniqueId() {
+  const allCookies = await session.fromPartition('persist:default').cookies.get({});
+  const names = allCookies.map(c => `${c.name}=${c.domain}`);
+  addLog(`[Twitch Cookie Diagnostic] All cookies in jar: ${names.join(', ')}`);
+  const twitchCookie = allCookies.find(c => c.name === 'unique_id' && c.domain && c.domain.includes('twitch.tv'));
+  const val = twitchCookie ? twitchCookie.value : null;
+  cachedTwitchUniqueId = val;
+  return val;
+}
+
 // Hidden, logged-in Twitch page used to issue integrity-protected GQL requests.
 // Operations like ViewerDropsDashboard/inventory require a Client-Integrity
 // header that Twitch's Kasada SDK generates in the browser — a bare net.fetch
@@ -1953,6 +2326,40 @@ async function getTwitchAuthToken() {
 // where the SDK hooks fetch and supplies the headers. The window is reused.
 let twitchPageWin = null;
 let twitchPageReady = null;
+let cachedTwitchUniqueId = null;
+
+async function clearTwitchTelemetryCookies() {
+  try {
+    const ses = session.fromPartition('persist:default');
+    const cookies = await ses.cookies.get({ domain: 'twitch.tv' });
+    const keep = ['auth-token', 'twilight-user', 'persistent', 'unique_id', 'unique_id_durable', 'login'];
+    let clearedCount = 0;
+    for (const cookie of cookies) {
+      if (!keep.includes(cookie.name)) {
+        const url = `https://${cookie.domain.startsWith('.') ? 'www' : ''}${cookie.domain}${cookie.path}`;
+        await ses.cookies.remove(url, cookie.name);
+        clearedCount++;
+      }
+    }
+    if (clearedCount > 0) {
+      addLog(`[Drops] Cleared ${clearedCount} Twitch telemetry/Kasada cookies for clean session reset.`);
+    }
+  } catch (e) {
+    addLog(`[Drops] Error clearing telemetry cookies: ${e.message}`);
+  }
+}
+
+function resetTwitchPageWindow() {
+  if (twitchPageWin && !twitchPageWin.isDestroyed()) {
+    try {
+      twitchPageWin.destroy();
+    } catch (e) {}
+  }
+  twitchPageWin = null;
+  twitchPageReady = null;
+  addLog('[Drops] Destroyed and reset Twitch GQL page window context.');
+  clearTwitchTelemetryCookies();
+}
 
 async function getTwitchPageWindow() {
   if (twitchPageWin && !twitchPageWin.isDestroyed()) {
@@ -1962,21 +2369,115 @@ async function getTwitchPageWindow() {
     try { twitchPageWin.destroy(); } catch (e) {}
     twitchPageWin = null;
   }
+  
+  // Proactively clear telemetry cookies for a clean initialization of the new window
+  await clearTwitchTelemetryCookies();
+
+  try {
+    const allCookies = await session.fromPartition('persist:default').cookies.get({ name: 'unique_id' });
+    const cookie = allCookies.find(c => c.domain && c.domain.includes('twitch.tv'));
+    cachedTwitchUniqueId = cookie ? cookie.value : null;
+    addLog(`[Drops] Cached Twitch unique_id before page creation: "${cachedTwitchUniqueId}"`);
+  } catch (e) {
+    addLog(`[Drops] Failed to cache unique_id on creation: ${e.message}`);
+  }
+
   twitchPageWin = new BrowserWindow({
-    show: false,
+    width: 1280,
+    height: 720,
+    x: 0,
+    y: 0,
+    show: true,
+    focusable: false,
+    frame: false,
+    transparent: false,
+    hasShadow: false,
+    skipTaskbar: true,
+    opacity: 0.01,
     webPreferences: {
       partition: 'persist:default',
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      webSecurity: true,
+      autoplayPolicy: 'user-gesture-required',
+      preload: path.join(__dirname, 'src', 'twitch-preload.js'),
+      allFrames: true,
+      nodeIntegrationInSubFrames: true
     }
   });
+  try { twitchPageWin.setFocusable(false); } catch (e) {}
+  try { twitchPageWin.setIgnoreMouseEvents(true); } catch (e) {}
+  twitchPageWin.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    addLog(`[Console - TwitchPageWin] [Level ${level}] ${message} at ${sourceId}:${line}`);
+  });
+  twitchPageWin.webContents.setUserAgent(session.fromPartition('persist:default').getUserAgent());
   twitchPageWin.webContents.setAudioMuted(true);
   twitchPageWin.on('closed', () => { twitchPageWin = null; twitchPageReady = null; });
   twitchPageReady = (async () => {
     try {
-      // loadURL resolves on did-finish-load, rejects on net failure.
-      await twitchPageWin.loadURL('https://www.twitch.tv/');
+      // Determine target URL based on username to avoid loading featured streams on homepage
+      const hasToken = await getTwitchAuthToken();
+      let username = config.accounts && config.accounts.twitch;
+      if (!username) {
+        try {
+          const cookies = await session.fromPartition('persist:default').cookies.get({ name: 'twilight-user' });
+          const cookie = cookies.find(c => c.domain && c.domain.includes('twitch.tv'));
+          if (cookie) {
+            const parsed = JSON.parse(decodeURIComponent(cookie.value));
+            if (parsed && parsed.login) {
+              username = parsed.login;
+            }
+          }
+        } catch (e) {}
+      }
+      let targetUrl;
+      if (hasToken) {
+        targetUrl = username ? `https://www.twitch.tv/${username.toLowerCase()}` : 'https://www.twitch.tv/directory/following';
+      } else {
+        targetUrl = 'https://www.twitch.tv/login';
+      }
+      addLog(`[Drops] Loading Twitch background page: ${targetUrl}`);
+
+      // Await loadURL with a 15-second timeout to prevent hanging on slow resources
+      await Promise.race([
+        twitchPageWin.loadURL(targetUrl),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Load timeout')), 15000))
+      ]);
+
+      // Align localStorage device ID with unique_id cookie to prevent Kasada mismatch
+      try {
+        const allCookies = await session.fromPartition('persist:default').cookies.get({ name: 'unique_id' });
+        const cookie = allCookies.find(c => c.domain && c.domain.includes('twitch.tv'));
+        const cookieUniqueId = cookie ? cookie.value : null;
+
+        if (cookieUniqueId) {
+          const alignScript = `(() => {
+            const rawLsDeviceId = localStorage.getItem('local_storage_device_id');
+            const cleanLsDeviceId = rawLsDeviceId ? (rawLsDeviceId.startsWith('"') && rawLsDeviceId.endsWith('"') ? rawLsDeviceId.slice(1, -1) : rawLsDeviceId) : '';
+            const expected = ${JSON.stringify(cookieUniqueId)};
+            if (cleanLsDeviceId !== expected) {
+              localStorage.setItem('local_storage_device_id', JSON.stringify(expected));
+              return { needsReload: true, rawLsDeviceId, expected };
+            }
+            return { needsReload: false, rawLsDeviceId, expected };
+          })()`;
+          
+          const alignResult = await twitchPageWin.webContents.executeJavaScript(alignScript);
+          if (alignResult && alignResult.needsReload) {
+            addLog(`[Drops] Mismatched Device IDs aligned in localStorage. LS: ${JSON.stringify(alignResult.rawLsDeviceId)}, Expected: ${JSON.stringify(alignResult.expected)}. Reloading Twitch page window...`);
+            await Promise.race([
+              twitchPageWin.loadURL(targetUrl),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Load timeout')), 15000))
+            ]);
+            addLog('[Drops] Alignment reload triggered. Appending 5-second settling delay...');
+            await new Promise(r => setTimeout(r, 5000));
+          }
+        }
+      } catch (alignErr) {
+        addLog(`[Drops] Device ID alignment warning: ${alignErr.message}`);
+      }
+
     } catch (e) {
-      addLog(`[Drops] Twitch page load issue: ${e.message}`);
+      addLog(`[Drops] Twitch page load issue/timeout: ${e.message}`);
     }
     // Give Kasada's integrity SDK time to install its fetch hook.
     await new Promise(r => setTimeout(r, 5000));
@@ -1990,7 +2491,10 @@ async function getTwitchPageWindow() {
 async function twitchGqlAuthed(bodyArray) {
   const token = await getTwitchAuthToken();
   if (!token) throw new Error('Not logged in to Twitch');
-  const win = await getTwitchPageWindow();
+  const uniqueId = await getTwitchUniqueId();
+  addLog(`[Drops] twitchGqlAuthed: unique_id cookie is "${uniqueId}"`);
+  let win = await getTwitchPageWindow();
+
   const script = `(async () => {
     let stage = 'init';
     try {
@@ -2000,36 +2504,148 @@ async function twitchGqlAuthed(bodyArray) {
       if (!location.origin.includes('twitch.tv')) {
         return { ok: false, error: 'page not on twitch.tv origin (got ' + location.origin + ')' };
       }
-      const hex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n))).map(b => b.toString(16).padStart(2, '0')).join('');
       const m = document.cookie.match(/unique_id=([^;]+)/);
-      const deviceId = m ? decodeURIComponent(m[1]) : hex(16);
-      const sessionId = hex(8);
+      const cookieUniqueId = m ? decodeURIComponent(m[1]) : '';
+      
+      const cleanLocalVal = (key) => {
+        const val = localStorage.getItem(key);
+        if (!val) return '';
+        try {
+          return JSON.parse(val);
+        } catch (e) {
+          if (val.startsWith('"') && val.endsWith('"')) {
+            return val.substring(1, val.length - 1);
+          }
+          return val;
+        }
+      };
+
+      // Wait for Twitch/Kasada to initialize localStorage session ID
+      let sessionVal = '';
+      for (let i = 0; i < 150; i++) {
+        const val1 = localStorage.getItem('twilight.sessionID');
+        const val2 = localStorage.getItem('local_storage_app_session_id');
+        if (val1 || val2) {
+          sessionVal = val1 || val2;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      const hex = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n))).map(b => b.toString(16).padStart(2, '0')).join('');
+      const deviceId = cookieUniqueId || cleanLocalVal('local_storage_device_id') || cleanLocalVal('k-device-id') || hex(16);
+      const sessionId = cleanLocalVal('twilight.sessionID') || cleanLocalVal('local_storage_app_session_id') || hex(8);
+      const clientVersion = window.__twilightBuildID || window.__twilightCommitHash || '';
       const baseHeaders = {
-        'Client-ID': CLIENT_ID,
+        'Client-Id': CLIENT_ID,
         'Authorization': 'OAuth ' + TOKEN,
         'Client-Session-Id': sessionId,
         'X-Device-Id': deviceId
       };
+      if (clientVersion) {
+        baseHeaders['Client-Version'] = clientVersion;
+      }
       stage = 'integrity';
       let integrityToken = '';
+      let integrityResponse = null;
       try {
-        const ir = await fetch('https://gql.twitch.tv/integrity', { method: 'POST', headers: baseHeaders });
-        const ij = await ir.json();
-        integrityToken = ij.token || '';
-      } catch (e) {}
+        const integrityHeaders = Object.assign({}, baseHeaders);
+        delete integrityHeaders['Authorization'];
+        const ir = await fetch('https://gql.twitch.tv/integrity', { method: 'POST', headers: integrityHeaders, credentials: 'include' });
+        integrityResponse = await ir.json();
+        integrityToken = integrityResponse.token || '';
+      } catch (e) {
+        integrityResponse = { error: String(e && e.message || e) };
+      }
       stage = 'gql';
       const headers = Object.assign({ 'Content-Type': 'application/json' }, baseHeaders);
       if (integrityToken) headers['Client-Integrity'] = integrityToken;
-      const resp = await fetch('https://gql.twitch.tv/gql', { method: 'POST', headers, body: BODY });
+      const resp = await fetch('https://gql.twitch.tv/gql', { method: 'POST', headers, body: BODY, credentials: 'include' });
       const json = await resp.json();
-      return { ok: true, status: resp.status, data: json, hadIntegrity: !!integrityToken };
+      const ls = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        ls[k] = localStorage.getItem(k);
+      }
+      return {
+        ok: true,
+        status: resp.status,
+        data: json,
+        hadIntegrity: !!integrityToken,
+        integrityResponse,
+        deviceId,
+        sessionId,
+        clientVersion,
+        ls,
+        cookies: document.cookie,
+        visibilityState: document.visibilityState,
+        hidden: document.hidden,
+        hasFocus: document.hasFocus()
+      };
     } catch (e) {
       return { ok: false, error: stage + ': ' + String((e && e.message) || e) };
     }
   })()`;
-  const result = await win.webContents.executeJavaScript(script);
-  if (!result || !result.ok) throw new Error(result && result.error ? result.error : 'Page GQL request failed');
-  addLog(`[Drops] GQL via page ok (status ${result.status}, integrity: ${result.hadIntegrity ? 'yes' : 'no'}).`);
+
+  let result;
+  try {
+    result = await win.webContents.executeJavaScript(script);
+    if (result && result.ok) {
+      addLog(`[Drops Diagnostic] document.cookie: "${result.cookies}"`);
+      addLog(`[Drops Diagnostic] localStorage: ${JSON.stringify(result.ls)}`);
+      addLog(`[Drops Diagnostic] visibilityState: "${result.visibilityState}", hidden: ${result.hidden}, hasFocus: ${result.hasFocus}`);
+      addLog(`[Drops Diagnostic] integrityResponse: ${JSON.stringify(result.integrityResponse)}`);
+    }
+  } catch (err) {
+    resetTwitchPageWindow();
+    throw err;
+  }
+
+  if (!result || !result.ok) {
+    // If it failed completely, let's retry once
+    addLog('[Drops] GQL query execute failed. Resetting window and retrying...');
+    resetTwitchPageWindow();
+    win = await getTwitchPageWindow();
+    try {
+      result = await win.webContents.executeJavaScript(script);
+    } catch (err) {
+      resetTwitchPageWindow();
+      throw err;
+    }
+  }
+
+  if (!result || !result.ok) {
+    resetTwitchPageWindow();
+    throw new Error(result && result.error ? result.error : 'Page GQL request failed');
+  }
+
+  // Check if GQL returned an integrity check error
+  let hasIntegrityError = false;
+  if (result.data && Array.isArray(result.data)) {
+    result.data.forEach(res => {
+      if (res.errors && res.errors.some(e => e.message && e.message.toLowerCase().includes('failed integrity check'))) {
+        hasIntegrityError = true;
+      }
+    });
+  }
+
+  if (hasIntegrityError) {
+    addLog('[Drops] GQL failed integrity check. Resetting window and retrying once...');
+    resetTwitchPageWindow();
+    win = await getTwitchPageWindow();
+    try {
+      result = await win.webContents.executeJavaScript(script);
+    } catch (err) {
+      resetTwitchPageWindow();
+      throw err;
+    }
+    if (!result || !result.ok) {
+      resetTwitchPageWindow();
+      throw new Error(result && result.error ? result.error : 'Page GQL request failed after integrity retry');
+    }
+  }
+
+  addLog(`[Drops] GQL via page ok (status ${result.status}, integrity: ${result.hadIntegrity ? 'yes' : 'no'}, deviceId: ${result.deviceId}, sessionId: ${result.sessionId}, clientVersion: "${result.clientVersion}").`);
   return result.data;
 }
 
@@ -2047,7 +2663,7 @@ async function getLiveFollowsWithGames() {
         'Authorization': `OAuth ${token}`,
         'Cookie': `auth-token=${token}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': normalizedUserAgent
       },
       body: JSON.stringify([{
         operationName: 'FollowedLiveUsersWithGame',
@@ -2084,305 +2700,12 @@ async function getLiveFollowsWithGames() {
   }
 }
 
-ipcMain.handle('fetch-drop-campaigns', async () => {
-  try {
-    const token = await getTwitchAuthToken();
-    if (!token) {
-      return { success: false, error: 'Not logged in to Twitch. Sign in under Platform Logins first.' };
-    }
-
-    const data = await twitchGqlAuthed([{
-        operationName: 'ViewerDropsDashboard',
-        variables: { fetchRewardCampaigns: true },
-        query: `query ViewerDropsDashboard($fetchRewardCampaigns: Boolean!) {
-          currentUser {
-            id
-            dropCampaigns {
-              id
-              name
-              status
-              startAt
-              endAt
-              imageURL
-              detailsURL
-              accountLinkURL
-              game { id name displayName boxArtURL slug }
-              timeBasedDrops {
-                id
-                name
-                requiredMinutesWatched
-                requiredSubs
-                startAt
-                endAt
-                benefitEdges {
-                  entitlementLimit
-                  benefit {
-                    id
-                    name
-                    imageAssetURL
-                    ownerOrganization { name }
-                  }
-                }
-              }
-            }
-            inventory {
-              dropCampaignsInProgress {
-                id
-                name
-                game { name }
-                timeBasedDrops {
-                  id
-                  requiredMinutesWatched
-                  self { currentMinutesWatched }
-                }
-              }
-            }
-          }
-          rewardCampaignsAvailableToUser @include(if: $fetchRewardCampaigns) {
-            id
-            name
-            brand
-            startsAt
-            endsAt
-            status
-            summary
-            instructions
-            externalURL
-            aboutURL
-            image { image1xURL }
-            game { id name displayName boxArtURL slug }
-            unlockRequirements {
-              subsGoal
-              minuteWatchedGoal
-            }
-            rewards {
-              id
-              name
-              earnableUntil
-              bannerImage { image1xURL }
-              thumbnailImage { image1xURL }
-            }
-          }
-        }`
-    }]);
-
-    // Surface GQL-level validation errors so they're visible in the activity log.
-    if (data[0]?.errors?.length) {
-      const msg = data[0].errors.map(e => e.message).join('; ');
-      addLog(`[Drops] GQL returned errors: ${msg}`);
-      return { success: false, error: `Twitch GQL error: ${msg}` };
-    }
-
-    const user = data[0]?.data?.currentUser;
-    if (!user) return { success: false, error: 'Empty GQL response. Twitch session may have expired — try re-authenticating.' };
-    const rewardCampaignsAvailable = data[0]?.data?.rewardCampaignsAvailableToUser || [];
-
-    const nowMs = Date.now();
-    // Derive percent complete per in-progress campaign from watched vs required minutes.
-    const inProgress = user.inventory?.dropCampaignsInProgress || [];
-    const progressById = new Map(inProgress.map(c => {
-      const drops = c.timeBasedDrops || [];
-      let pct = 0;
-      if (drops.length) {
-        const ratios = drops.map(d => {
-          const req = d.requiredMinutesWatched || 0;
-          const got = d.self?.currentMinutesWatched || 0;
-          return req > 0 ? Math.min(100, Math.round((got / req) * 100)) : 0;
-        });
-        pct = Math.max(...ratios);
-      }
-      return [c.id, pct];
-    }));
-
-    // Each Drop campaign can carry a mix of watch-time drops (requiredMinutesWatched)
-    // and subscription drops (requiredSubs). Split the drops per campaign so a campaign
-    // surfaces in the Watch tab for its watch drops and in the Sub tab for its sub drops.
-    const watchCampaigns = [];
-    const subCampaigns = [];
-    (user.dropCampaigns || [])
-      .filter(c => c.status === 'ACTIVE' && (!c.endAt || new Date(c.endAt).getTime() > nowMs))
-      .forEach(camp => {
-        const allDrops = camp.timeBasedDrops || [];
-        const subDrops = allDrops.filter(d => (d.requiredSubs || 0) > 0);
-        // Anything not requiring subs counts as watch-time (covers requiredMinutesWatched > 0
-        // and zero-requirement drops that are simply earned by watching).
-        const watchDrops = allDrops.filter(d => (d.requiredSubs || 0) <= 0);
-
-        const base = {
-          id: camp.id,
-          name: camp.name,
-          game: camp.game,
-          imageURL: camp.imageURL,
-          detailsURL: camp.detailsURL,
-          endAt: camp.endAt,
-          accountLinkRequired: !!camp.accountLinkURL,
-          accountLinkURL: camp.accountLinkURL
-        };
-
-        if (watchDrops.length) {
-          watchCampaigns.push({
-            ...base,
-            category: 'watch',
-            percentComplete: progressById.get(camp.id) || 0,
-            drops: watchDrops
-          });
-        }
-        if (subDrops.length) {
-          subCampaigns.push({
-            ...base,
-            category: 'sub',
-            percentComplete: 0,
-            subsGoal: Math.max(...subDrops.map(d => d.requiredSubs || 1)),
-            minuteWatchedGoal: 0,
-            drops: subDrops
-          });
-        }
-      });
-
-    // rewardCampaignsAvailableToUser is an additional source of subscription-driven
-    // reward campaigns (unlock by subbing/gifting). The field is already scoped to
-    // campaigns available to the user, so don't whitelist by status — only drop ended ones.
-    rewardCampaignsAvailable
-      .filter(c => !c.endsAt || new Date(c.endsAt).getTime() > nowMs)
-      .forEach(camp => {
-        const subsGoal = camp.unlockRequirements?.subsGoal || 1;
-        subCampaigns.push({
-          id: camp.id,
-          name: camp.name,
-          category: 'sub',
-          game: camp.game,
-          imageURL: camp.image?.image1xURL || '',
-          detailsURL: camp.externalURL || camp.aboutURL || '',
-          endAt: camp.endsAt,
-          percentComplete: 0,
-          accountLinkRequired: false,
-          accountLinkURL: '',
-          subsGoal,
-          minuteWatchedGoal: camp.unlockRequirements?.minuteWatchedGoal || 0,
-          drops: (camp.rewards || []).map(r => ({
-            id: r.id,
-            name: r.name,
-            requiredSubs: subsGoal,
-            benefitEdges: [{
-              benefit: {
-                id: r.id,
-                name: r.name,
-                imageAssetURL: r.thumbnailImage?.image1xURL || r.bannerImage?.image1xURL || ''
-              }
-            }]
-          }))
-        });
-      });
-
-    // Match currently-live followed channels against campaign games so the user
-    // can prioritise watching a streamer they already follow to earn the rewards.
-    const campaignGameMap = new Map();
-    [...watchCampaigns, ...subCampaigns].forEach(c => {
-      const gname = c.game?.name;
-      if (gname && !campaignGameMap.has(gname.toLowerCase())) {
-        campaignGameMap.set(gname.toLowerCase(), { campaignId: c.id, campaignName: c.name, game: c.game });
-      }
-    });
-
-    let followedCampaigns = [];
-    if (campaignGameMap.size > 0) {
-      const liveFollows = await getLiveFollowsWithGames();
-      followedCampaigns = liveFollows
-        .filter(f => f.game?.name && campaignGameMap.has(f.game.name.toLowerCase()))
-        .map(f => {
-          const match = campaignGameMap.get(f.game.name.toLowerCase());
-          return {
-            login: f.login,
-            displayName: f.displayName,
-            viewersCount: f.viewersCount,
-            game: f.game,
-            campaignId: match.campaignId,
-            campaignName: match.campaignName
-          };
-        })
-        .sort((a, b) => b.viewersCount - a.viewersCount);
-    }
-
-    addLog(`[Drops] Fetched ${watchCampaigns.length} watch + ${subCampaigns.length} sub campaigns; ${followedCampaigns.length} followed streamer(s) on campaign games.`);
-    return { success: true, watchCampaigns, subCampaigns, followedCampaigns };
-  } catch (err) {
-    addLog(`[Drops] Failed to fetch drop campaigns: ${err.message}`);
-    return { success: false, error: err.message };
-  }
+ipcMain.handle('get-twitch-auth-token', getTwitchAuthToken);
+ipcMain.on('get-twitch-unique-id-sync', (event) => {
+  event.returnValue = cachedTwitchUniqueId;
 });
 
-// Find a live drops-enabled Twitch streamer in a given game category so
-// the user can "quest" for a drop. Falls back to the directory page URL
-// if no live stream matches.
-ipcMain.handle('find-drops-stream', async (event, { gameName, gameSlug, exclude }) => {
-  try {
-    const excludeSet = new Set((exclude || []).map(s => String(s).toLowerCase()));
-    const token = await getTwitchAuthToken();
-    const headers = {
-      'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    };
-    if (token) headers['Authorization'] = `OAuth ${token}`;
 
-    const response = await net.fetch('https://gql.twitch.tv/gql', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify([{
-        operationName: 'DirectoryPage_Game',
-        variables: {
-          name: gameName,
-          options: {
-            sort: 'VIEWER_COUNT',
-            recommendationsContext: { platform: 'web' },
-            tags: []
-          },
-          limit: 30
-        },
-        query: `query DirectoryPage_Game($name: String!, $options: GameStreamOptions, $limit: Int) {
-          game(name: $name) {
-            streams(first: $limit, options: $options) {
-              edges {
-                node {
-                  id
-                  viewersCount
-                  broadcaster { login displayName }
-                  freeformTags { name }
-                }
-              }
-            }
-          }
-        }`
-      }])
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      const edges = (data[0]?.data?.game?.streams?.edges || [])
-        .filter(e => {
-          const login = e?.node?.broadcaster?.login;
-          return login && !excludeSet.has(login.toLowerCase());
-        });
-      const dropsEnabled = edges.find(e => {
-        const tags = (e.node.freeformTags || []).map(t => (t.name || '').toLowerCase());
-        return tags.includes('dropsenabled') || tags.includes('drops');
-      }) || edges[0];
-
-      if (dropsEnabled?.node?.broadcaster?.login) {
-        return { success: true, username: dropsEnabled.node.broadcaster.login };
-      }
-    }
-
-    // Fallback: open the directory page filtered by drops
-    return {
-      success: true,
-      directoryUrl: `https://www.twitch.tv/directory/category/${gameSlug || encodeURIComponent(gameName.toLowerCase().replace(/\s+/g, '-'))}?filter=drops`
-    };
-  } catch (err) {
-    addLog(`[Drops] find-drops-stream failed: ${err.message}`);
-    return { success: false, error: err.message };
-  }
-});
 
 // Open a URL in the user's default browser. The renderer can't use Electron's
 // shell directly under context isolation, so it routes through here.
@@ -2398,33 +2721,46 @@ ipcMain.handle('open-external', async (event, url) => {
   }
 });
 
-// Lightweight live check for a single Twitch channel, used by the drops quest
-// monitor to decide whether the streamer it's watching has gone offline.
-ipcMain.handle('check-twitch-live', async (event, username) => {
+let currentDownloadFileName = null;
+
+ipcMain.handle('download-clip', async (event, url, filename) => {
   try {
-    const response = await net.fetch('https://gql.twitch.tv/gql', {
-      method: 'POST',
-      headers: {
-        'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      body: JSON.stringify([{
-        operationName: 'StreamLiveCheck',
-        variables: { login: String(username || '').toLowerCase() },
-        query: `query StreamLiveCheck($login: String!) {
-          user(login: $login) { stream { id game { name } } }
-        }`
-      }])
-    });
-    if (!response.ok) return { success: false, live: false };
-    const data = await response.json();
-    const stream = data[0]?.data?.user?.stream;
-    return { success: true, live: !!stream, game: stream?.game?.name || '' };
+    if (mainWindow && typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      addLog(`[Clips] Starting download for: ${filename || 'clip.mp4'}`);
+      currentDownloadFileName = filename || 'clip.mp4';
+      mainWindow.webContents.downloadURL(url);
+      return { success: true };
+    }
+    return { success: false, error: 'Invalid URL or no main window' };
   } catch (err) {
-    return { success: false, live: false, error: err.message };
+    addLog(`[Clips] Download error: ${err.message}`);
+    return { success: false, error: err.message };
   }
 });
+
+ipcMain.handle('open-clip-window', async (event, url) => {
+  try {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      const clipWin = new BrowserWindow({
+        width: 1024,
+        height: 768,
+        title: 'Clip Player',
+        backgroundColor: '#000000',
+        autoHideMenuBar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true
+        }
+      });
+      clipWin.loadURL(url);
+      return { success: true };
+    }
+    return { success: false, error: 'Invalid URL' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 
 ipcMain.handle('sync-platform-schedules', async () => {
   addLog('[Calendar] Syncing platform calendars for Twitch, YouTube, and Kick streams...');

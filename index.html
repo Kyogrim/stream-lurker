@@ -54,15 +54,18 @@
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           Adblock & Extensions
         </button>
-        <button class="nav-btn" data-tab="drops">
+        <button class="nav-btn" data-tab="clips">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="20 12 20 22 4 22 4 12"/>
-            <rect x="2" y="7" width="20" height="5"/>
-            <line x1="12" y1="22" x2="12" y2="7"/>
-            <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/>
-            <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/>
+            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+            <line x1="7" y1="2" x2="7" y2="22"/>
+            <line x1="17" y1="2" x2="17" y2="22"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+            <line x1="2" y1="7" x2="7" y2="7"/>
+            <line x1="2" y1="17" x2="7" y2="17"/>
+            <line x1="17" y1="17" x2="22" y2="17"/>
+            <line x1="17" y1="7" x2="22" y2="7"/>
           </svg>
-          Drops & Inventory
+          Clips & Points
         </button>
         <button class="nav-btn" data-tab="settings">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -622,106 +625,55 @@
         </div>
       </section>
 
-      <!-- Drops & Inventory Tab -->
-      <section id="tab-drops" class="tab-content">
+      <!-- Clips Management Tab -->
+      <section id="tab-clips" class="tab-content">
         <div class="tab-header">
-          <h2>Drops & Inventory Progress Dashboard</h2>
-          <p>Discover active Twitch drop campaigns, quest for rewards, and monitor auto-claim progress.</p>
+          <h2>Clips Management</h2>
+          <p>Discover trending clips from monitored streamers, save your favorites, and auto-claim channel points.</p>
         </div>
 
-        <div class="drops-layout-grid">
-          <!-- Drops Status & Control panel -->
-          <div class="glass-panel drops-controller-card">
-            <h3>Automated Drop Agents</h3>
-            <p class="description">
-              Stream Lurker automatically intercepts drops campaign tracking inside your authenticated stream containers. When a drop is fully earned, it claims it instantly!
-            </p>
-
-            <div class="quick-guide">
-              <h4>Drops Status Summary:</h4>
-              <div class="drops-stats-row">
-                <div class="drop-stat-card glass-panel">
-                  <span class="drop-stat-val text-violet" id="active-campaigns-count">0</span>
-                  <span class="drop-stat-lbl">Active Campaigns</span>
-                </div>
-                <div class="drop-stat-card glass-panel">
-                  <span class="drop-stat-val text-lime" id="claimed-drops-count">0</span>
-                  <span class="drop-stat-lbl">Claimed Today</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="control-option-card glass-panel" style="margin-top: 16px;">
-              <div class="option-header">
-                <span class="option-title">Auto-Claim Twitch Drops</span>
-                <label class="switch">
-                  <input type="checkbox" id="auto-claim-drops-toggle" checked>
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <p class="option-desc">Automatically claims drops the moment progress reaches 100%.</p>
-            </div>
-
-            <div class="control-option-card glass-panel" style="margin-top: 12px;">
-              <div class="option-header">
-                <span class="option-title">Twitch Emote & Channel Points Claimer</span>
-                <label class="switch">
-                  <input type="checkbox" id="auto-claim-points-toggle" checked>
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <p class="option-desc">Automatically clicks and claims standard channel points chests inside Twitch webview streams.</p>
-            </div>
-
-            <!-- In-progress list (active lurks) -->
-            <div style="margin-top: 20px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0;">
-              <h4 style="font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">Live Progress (Active Lurks)</h4>
-              <div id="drops-campaigns-list" class="drops-campaigns-list" style="margin-top: 4px;">
-                <div class="no-drops-message">
-                  <p>No active drops progress yet. Lurk in a drops-enabled stream to begin monitoring.</p>
-                </div>
+        <div class="clips-layout-grid" style="display: grid; grid-template-columns: 320px 1fr; gap: 24px;">
+          <!-- Left Panel: Settings and Saved Clips -->
+          <div class="glass-panel clips-sidebar" style="display: flex; flex-direction: column; gap: 16px;">
+            <h3 style="margin-top: 12px;">Saved Clips</h3>
+            <p class="description" style="font-size: 0.8rem; margin: 0 0 8px 0;">Your favorite saved clips are stored here.</p>
+            <div id="saved-clips-list" class="saved-clips-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 450px; overflow-y: auto;">
+              <div class="no-clips-message" style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 20px;">
+                <p>No saved clips yet. Find a clip and click the heart to save it!</p>
               </div>
             </div>
           </div>
 
-          <!-- Available Campaigns Card -->
-          <div class="glass-panel drops-list-card">
-            <!-- Followed streamers currently on a campaign game -->
-            <div id="drops-followed-section" class="drops-followed-section" style="display: none;">
-              <div class="drops-available-header">
-                <h3 style="margin: 0;">Followed Streamers on Campaign Games <span class="drops-cat-count" id="followed-campaigns-count">0</span></h3>
-              </div>
-              <p class="description" style="margin: 4px 0 8px;">Streamers you follow who are live in a drop-campaign category. Prioritize one to watch them to the top of your queue and earn the rewards.</p>
-              <div id="drops-followed-list" class="drops-followed-list"></div>
-            </div>
-
-            <div class="drops-available-header">
-              <h3 style="margin: 0;">Available Drop Campaigns</h3>
-              <button id="refresh-drops-campaigns-btn" class="btn btn-sm btn-cyan" title="Refresh campaigns list">
-                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                Refresh
-              </button>
-            </div>
-
-            <div class="drops-category-tabs">
-              <button class="drops-cat-tab active" data-cat="watch">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                Watch Rewards <span class="drops-cat-count" id="watch-cat-count">0</span>
-              </button>
-              <button class="drops-cat-tab" data-cat="sub">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                Sub Rewards <span class="drops-cat-count" id="sub-cat-count">0</span>
-              </button>
-            </div>
-
-            <div id="drops-available-watch" class="drops-available-list active">
-              <div class="no-drops-message">
-                <p>Loading active campaigns... Login to Twitch first if list is empty.</p>
+          <!-- Right Panel: Trending / Latest Clips Grid -->
+          <div class="glass-panel clips-main-panel">
+            <div class="clips-header-row" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--panel-border); padding-bottom: 12px; margin-bottom: 16px;">
+              <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700;">Discover Clips</h3>
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <select id="clips-filter-select" style="
+                  background-color: var(--panel-glass);
+                  border: 1px solid var(--panel-border);
+                  color: var(--text-primary);
+                  font-family: var(--font-sans);
+                  font-size: 0.8rem;
+                  padding: 6px 12px;
+                  border-radius: var(--radius-sm);
+                  outline: none;
+                  cursor: pointer;
+                ">
+                  <option value="trending">Trending (Last 7 Days)</option>
+                  <option value="latest">Latest (Last 24 Hours)</option>
+                  <option value="popular">Popular (All Time)</option>
+                </select>
+                <button id="refresh-clips-btn" class="btn btn-sm btn-cyan" title="Refresh clips list">
+                  <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  Refresh
+                </button>
               </div>
             </div>
-            <div id="drops-available-sub" class="drops-available-list">
-              <div class="no-drops-message">
-                <p>Loading active campaigns...</p>
+            
+            <div id="trending-clips-grid" class="clips-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px;">
+              <div class="no-clips-message" style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-muted);">
+                <p>Click Refresh to fetch trending clips from your monitored streamers.</p>
               </div>
             </div>
           </div>
@@ -788,6 +740,22 @@
               </div>
               <input type="range" id="max-twitch-tabs-slider" min="1" max="10" value="2" class="slider-input">
               <span class="help-text">Maximum number of Twitch streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <label>Automated Activity Toggles</label>
+              <div style="display: grid; grid-template-columns: 1fr; gap: 12px; background-color: hsla(240, 5.9%, 15%, 0.15); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--panel-border);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <div>
+                    <span class="toggle-label" style="font-size: 0.85rem; display: block;">Twitch Emote & Channel Points Claimer</span>
+                    <span style="font-size: 0.75rem; color: var(--text-muted);">Automatically clicks and claims standard channel points chests inside Twitch streams.</span>
+                  </div>
+                  <label class="switch" style="flex-shrink: 0;">
+                    <input type="checkbox" id="auto-claim-points-toggle" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
             </div>
 
             <div class="settings-group">

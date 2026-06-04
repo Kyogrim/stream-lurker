@@ -104,6 +104,10 @@ export function setupLoginPortalListeners() {
         if (res.success) {
           state.followsCache.twitch = res.follows;
           renderFollowsList();
+          if (res.username && state.currentConfig.accounts.twitch !== res.username) {
+            state.currentConfig.accounts.twitch = res.username;
+            setConnectionUI('twitch', true, res.username);
+          }
           appendLogMessage(`[System] Auto-synced ${res.follows.length} live followed Twitch channels.`);
         }
       } catch (e) {

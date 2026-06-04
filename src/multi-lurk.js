@@ -220,7 +220,6 @@ function bindCellActions(cell, platform, username) {
   if (container) webviewResizeObserver.observe(container);
 
   webview.addEventListener('console-message', (e) => {
-    console.log(`[Webview Console - ${username}] line ${e.line}: ${e.message}`);
     if (e.message.includes('[Kick Quality]')) {
       appendLogMessage(`[Quality - ${username}] ${e.message.replace('[Kick Quality] ', '')}`);
     }
@@ -400,7 +399,7 @@ export function createStreamTab(platform, username) {
     cell = document.createElement('div');
     cell.id = cellId;
     cell.className = `stream-grid-cell ${p}-cell`;
-    cell.dataset.platform = platform;
+    cell.dataset.platform = p;
     cell.dataset.username = username;
     cell.dataset.autoQualityDisabled = isQualityDisabled ? 'true' : 'false';
     cell.innerHTML = buildCellHTML(platform, username, isQualityDisabled);

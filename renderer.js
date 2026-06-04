@@ -1,3 +1,4 @@
+console.log('=== RENDERER.JS RUNNING ===');
 // Renderer entry point. Modules under src/ own each feature; this file wires
 // the dashboard once on DOMContentLoaded and bridges main-process events to UI
 // updates.
@@ -18,7 +19,8 @@ import { renderLeaderboard } from './src/leaderboard.js';
 import { populateCalendarFormDays, renderCalendar, setupCalendarHandlers } from './src/calendar.js';
 import { setupLoginPortalListeners } from './src/login.js';
 import { hydrateSettingsUI, applyServiceToggles, setupSettingsHandlers } from './src/settings.js';
-import { startDropsPoller } from './src/drops.js';
+import { startPointsPoller } from './src/points.js';
+import { initClipsManager } from './src/clips.js';
 
 const BACKGROUND_CALENDAR_SYNC_DELAY_MS = 5000;
 const SCAN_BTN_COOLDOWN_MS = 1500;
@@ -149,6 +151,7 @@ function setupBackendListeners() {
 }
 
 async function init() {
+  console.log('=== INIT RUNNING ===');
   setupTabs();
   setupGlobalGhostButton();
   setupTopBarHandlers();
@@ -160,27 +163,53 @@ async function init() {
   setupCalendarHandlers();
 
   try {
+    console.log('Fetching config...');
     state.currentConfig = await window.api.getConfig();
+    console.log('Config fetched successfully:', state.currentConfig);
+    
+    console.log('Fetching active containers...');
     state.activeContainers = await window.api.getActiveContainers();
+    console.log('Active containers fetched successfully:', state.activeContainers);
 
+    console.log('Hydrating settings UI...');
     hydrateSettingsUI();
+    console.log('Applying service toggles...');
     applyServiceToggles();
 
+    console.log('Rendering extensions list...');
     renderExtensionsList();
 
+    console.log('Fetching recent logs...');
     const initialLogs = await window.api.getRecentLogs();
+    console.log('Recent logs fetched successfully, count:', initialLogs ? initialLogs.length : 0);
     initialLogs.forEach(log => appendLogMessage(log));
 
+    console.log('Updating stats...');
     updateStats();
+    console.log('Rendering leaderboard...');
     renderLeaderboard();
+    console.log('Leaderboard rendered successfully.');
 
+    console.log('Populating calendar form days...');
     populateCalendarFormDays();
-    state.platformSchedules = state.currentConfig.syncedCalendarEvents || [];
-    renderCalendar();
+    console.log('Calendar form days populated successfully.');
 
+    state.platformSchedules = state.currentConfig.syncedCalendarEvents || [];
+    console.log('Platform schedules set. Count:', state.platformSchedules ? state.platformSchedules.length : 0);
+
+    console.log('Rendering calendar...');
+    renderCalendar();
+    console.log('Calendar rendered successfully.');
+
+    console.log('Setting up login portal listeners...');
     setupLoginPortalListeners();
+    console.log('Setting up backend listeners...');
     setupBackendListeners();
-    startDropsPoller();
+    console.log('Starting points poller...');
+    startPointsPoller();
+    console.log('Initializing clips manager...');
+    initClipsManager();
+    console.log('Dashboard initialization completed fully!');
 
     // Silent delayed sync to keep platform schedules fresh.
     setTimeout(async () => {
@@ -202,4 +231,9 @@ async function init() {
   }
 }
 
-window.addEventListener('DOMContentLoaded', init);
+console.log('Document readyState:', document.readyState);
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
