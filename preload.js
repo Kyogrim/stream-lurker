@@ -67,5 +67,14 @@ contextBridge.exposeInMainWorld('api', {
   },
   onCloseAllStreamTabs: (callback) => {
     safeOn('close-all-stream-tabs', (event) => callback());
+  },
+
+  // Auto-Updater
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  onUpdateStatus: (callback) => {
+    safeOn('update-status', (event, payload) => callback(payload));
   }
 });

@@ -25,6 +25,98 @@ import { initClipsManager } from './src/clips.js';
 const BACKGROUND_CALENDAR_SYNC_DELAY_MS = 5000;
 const SCAN_BTN_COOLDOWN_MS = 1500;
 
+function setupUpdater() {
+  const versionEl = document.getElementById('app-version-display');
+  const statusText = document.getElementById('update-status-text');
+  const checkBtn = document.getElementById('check-updates-btn');
+  const downloadBtn = document.getElementById('download-update-btn');
+  const installBtn = document.getElementById('install-update-btn');
+  const progressWrapper = document.getElementById('update-progress-wrapper');
+  const progressBar = document.getElementById('update-progress-bar');
+  const progressText = document.getElementById('update-progress-text');
+
+  if (!checkBtn) return;
+
+  window.api.getAppVersion().then(v => {
+    if (versionEl) versionEl.textContent = `v${v}`;
+  }).catch(() => {});
+
+  const setStatus = (msg) => { if (statusText) statusText.textContent = msg; };
+  const showProgress = (show) => progressWrapper?.classList.toggle('hidden', !show);
+  const setProgress = (pct) => {
+    if (progressBar) progressBar.style.width = `${pct}%`;
+    if (progressText) progressText.textContent = `${pct.toFixed(1)}%`;
+  };
+
+  checkBtn.addEventListener('click', async () => {
+    checkBtn.disabled = true;
+    downloadBtn?.classList.add('hidden');
+    installBtn?.classList.add('hidden');
+    showProgress(false);
+    setStatus('Checking for updates…');
+    const res = await window.api.checkForUpdates();
+    checkBtn.disabled = false;
+    if (res && res.dev) {
+      setStatus('Auto-update is disabled when running from source. Build a release to test.');
+    } else if (res && !res.ok && res.error) {
+      setStatus(`Update check failed: ${res.error}`);
+    }
+  });
+
+  downloadBtn?.addEventListener('click', async () => {
+    downloadBtn.disabled = true;
+    setStatus('Downloading update…');
+    showProgress(true);
+    setProgress(0);
+    const res = await window.api.downloadUpdate();
+    if (res && !res.ok && res.error) {
+      setStatus(`Download failed: ${res.error}`);
+      downloadBtn.disabled = false;
+    }
+  });
+
+  installBtn?.addEventListener('click', () => {
+    setStatus('Restarting to install update…');
+    window.api.installUpdate();
+  });
+
+  window.api.onUpdateStatus((payload) => {
+    if (!payload) return;
+    switch (payload.state) {
+      case 'checking':
+        setStatus('Checking for updates…');
+        break;
+      case 'available':
+        setStatus(`Update available: v${payload.version}. Click "Download Update" to get it.`);
+        downloadBtn?.classList.remove('hidden');
+        if (downloadBtn) downloadBtn.disabled = false;
+        break;
+      case 'not-available':
+        setStatus('You are running the latest version.');
+        break;
+      case 'downloading':
+        showProgress(true);
+        setProgress(payload.percent || 0);
+        setStatus(`Downloading update… (${Math.round((payload.bytesPerSecond || 0) / 1024)} KB/s)`);
+        break;
+      case 'downloaded':
+        showProgress(false);
+        setStatus(`Update v${payload.version} downloaded. Restart to install.`);
+        installBtn?.classList.remove('hidden');
+        downloadBtn?.classList.add('hidden');
+        break;
+      case 'error':
+        showProgress(false);
+        setStatus(`Updater error: ${payload.message}`);
+        if (downloadBtn) downloadBtn.disabled = false;
+        break;
+      case 'dev':
+        setStatus(payload.message || 'Auto-update only available in packaged builds.');
+        break;
+    }
+  });
+}
+
 function setupTopBarHandlers() {
   const scanNowBtn = document.getElementById('scan-now-btn');
   scanNowBtn?.addEventListener('click', async () => {
@@ -161,6 +253,7 @@ async function init() {
   setupSettingsHandlers();
   setupFollowsHandlers();
   setupCalendarHandlers();
+  setupUpdater();
 
   try {
     console.log('Fetching config...');

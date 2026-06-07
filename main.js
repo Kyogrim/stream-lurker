@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, session, dialog, net, Notification, Tray, M
 const path = require('path');
 const fs = require('fs');
 const { exec } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 
 // Enable extension support in Electron partitioned sessions & webviews by bypassing sandbox restrictions
 app.commandLine.appendSwitch('disable-extension-sandbox');
@@ -1094,6 +1095,13 @@ async function performScan() {
                 mainWindow.webContents.send('close-stream-tab', { platform: stream.platform, username: closeUsername });
               }
               activeWindows.delete(`${platform}:${closeUsername}`);
+              // Clear any openedSessions entries for the preempted stream so it can be
+              // reopened later when capacity frees up (otherwise a 24/7 stream whose
+              // liveSince never changes would be permanently skipped on subsequent scans).
+              const preemptedPrefix = `${platform}:${closeUsername}:`;
+              for (const k of openedSessions.keys()) {
+                if (k.startsWith(preemptedPrefix)) openedSessions.delete(k);
+              }
               currentCount = getActiveTabsCount(platform);
             } else {
               addLog(`[Lurk] Limit reached: Skip auto-opening ${stream.platform.toUpperCase()} stream for ${stream.username} (Active: ${currentCount}/${maxTabs})`);
@@ -2151,6 +2159,82 @@ ipcMain.handle('get-recent-logs', () => {
 
 ipcMain.handle('get-active-containers', () => {
   return Array.from(activeWindows.keys());
+});
+
+// ── Auto-Updater ───────────────────────────────────────────────────────────
+// User-triggered: the renderer's "Check for Updates" button calls these handlers.
+// We do NOT auto-download — we only download after the user confirms via UI.
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true;
+
+function sendUpdateEvent(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+autoUpdater.on('checking-for-update', () => {
+  addLog('[Updater] Checking for updates…');
+  sendUpdateEvent('update-status', { state: 'checking' });
+});
+autoUpdater.on('update-available', (info) => {
+  addLog(`[Updater] Update available: v${info.version}`);
+  sendUpdateEvent('update-status', { state: 'available', version: info.version, releaseNotes: info.releaseNotes, releaseName: info.releaseName });
+});
+autoUpdater.on('update-not-available', (info) => {
+  addLog(`[Updater] No update available (current v${app.getVersion()}).`);
+  sendUpdateEvent('update-status', { state: 'not-available', version: info && info.version });
+});
+autoUpdater.on('error', (err) => {
+  addLog(`[Updater] Error: ${err && err.message ? err.message : err}`);
+  sendUpdateEvent('update-status', { state: 'error', message: err && err.message ? err.message : String(err) });
+});
+autoUpdater.on('download-progress', (progress) => {
+  sendUpdateEvent('update-status', {
+    state: 'downloading',
+    percent: progress.percent,
+    bytesPerSecond: progress.bytesPerSecond,
+    transferred: progress.transferred,
+    total: progress.total
+  });
+});
+autoUpdater.on('update-downloaded', (info) => {
+  addLog(`[Updater] Update downloaded: v${info.version}. Ready to install.`);
+  sendUpdateEvent('update-status', { state: 'downloaded', version: info.version });
+});
+
+ipcMain.handle('check-for-updates', async () => {
+  if (!app.isPackaged) {
+    const msg = 'Auto-update only works in packaged builds. Running from source.';
+    addLog(`[Updater] ${msg}`);
+    sendUpdateEvent('update-status', { state: 'dev', message: msg, currentVersion: app.getVersion() });
+    return { ok: false, dev: true, currentVersion: app.getVersion() };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { ok: true, currentVersion: app.getVersion(), updateInfo: result && result.updateInfo };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle('download-update', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle('install-update', () => {
+  // Quit and install. isSilent=false shows the installer UI; isForceRunAfter=true relaunches the app.
+  autoUpdater.quitAndInstall(false, true);
+  return { ok: true };
+});
+
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
 });
 
 // Watch time tracking and timer

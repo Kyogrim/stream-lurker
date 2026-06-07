@@ -838,6 +838,49 @@
               <div id="twitch-settings-success" class="success-msg hidden">Twitch API keys saved!</div>
             </div>
           </div>
+
+          <!-- App Updates Card -->
+          <div class="glass-panel settings-card">
+            <h3>App Updates</h3>
+            <p class="help-text" style="margin-bottom: 12px;">
+              Current version: <strong id="app-version-display">…</strong>
+            </p>
+            <div id="update-status-box" style="
+              background-color: hsla(240, 5.9%, 15%, 0.15);
+              border: 1px solid var(--panel-border);
+              border-radius: var(--radius-md);
+              padding: 12px;
+              margin-bottom: 12px;
+              font-size: 0.85rem;
+              color: var(--text-secondary);
+              min-height: 44px;
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+            ">
+              <span id="update-status-text">Click below to check for the latest release.</span>
+              <div id="update-progress-wrapper" class="hidden" style="display: flex; flex-direction: column; gap: 4px;">
+                <div style="background-color: var(--panel-border); height: 6px; border-radius: 3px; overflow: hidden;">
+                  <div id="update-progress-bar" style="width: 0%; height: 100%; background-color: var(--cyan-color); transition: width 0.2s;"></div>
+                </div>
+                <span id="update-progress-text" style="font-size: 0.75rem; color: var(--text-muted);">0%</span>
+              </div>
+            </div>
+            <div class="settings-action-row" style="gap: 8px; flex-wrap: wrap;">
+              <button id="check-updates-btn" class="btn btn-cyan">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                Check for Updates
+              </button>
+              <button id="download-update-btn" class="btn btn-cyan hidden">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                Download Update
+              </button>
+              <button id="install-update-btn" class="btn btn-violet btn-glow hidden">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                Restart & Install
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
