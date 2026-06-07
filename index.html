@@ -65,7 +65,7 @@
             <line x1="17" y1="17" x2="22" y2="17"/>
             <line x1="17" y1="7" x2="22" y2="7"/>
           </svg>
-          Clips & Points
+          Clips
         </button>
         <button class="nav-btn" data-tab="settings">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -444,7 +444,6 @@
               </div>
               <div class="follows-tabs-selectors" style="display: flex; gap: 8px; border-bottom: 1px solid var(--panel-border); padding-bottom: 8px;">
                 <button class="follows-tab-btn active" data-platform="twitch" style="background: none; border: none; font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; color: var(--twitch-color); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: var(--transition);">Twitch</button>
-                <button class="follows-tab-btn" data-platform="kick" style="background: none; border: none; font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; color: var(--text-muted); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: var(--transition);">Kick</button>
               </div>
               <div id="follows-list-container" class="follows-list-container" style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
                 <div class="no-follows-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 15px 0;">Click Scan to discover live followed channels.</div>
@@ -588,6 +587,17 @@
           <p>Manage unpacked Chrome extensions (like uBlock Origin) to load inside stream containers automatically.</p>
         </div>
 
+        <!-- Recommended Extensions Catalog -->
+        <div class="glass-panel ext-catalog-card" style="margin-bottom: 24px; padding: 20px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 12px; margin-bottom: 16px;">
+            <h3 style="margin: 0;">Recommended Extensions</h3>
+            <span style="font-size: 0.75rem; color: var(--text-muted);">One-click install from official GitHub releases</span>
+          </div>
+          <div id="ext-catalog-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">
+            <div class="catalog-loading" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 16px;">Loading catalog…</div>
+          </div>
+        </div>
+
         <div class="extensions-layout-grid">
           <!-- Add Extension controls -->
           <div class="glass-panel ext-controller-card">
@@ -723,10 +733,13 @@
                     <span class="slider"></span>
                   </label>
                 </div>
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                  <span class="toggle-label" style="font-size: 0.85rem;">Rumble</span>
-                  <label class="switch">
-                    <input type="checkbox" id="rumble-enabled-toggle" checked>
+                <div style="display: flex; align-items: center; justify-content: space-between; opacity: 0.55;">
+                  <span class="toggle-label" style="font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
+                    Rumble
+                    <span style="font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--cyan-color); background: var(--cyan-glow); border: 1px solid var(--cyan-color); padding: 1px 6px; border-radius: 10px;">Coming Soon</span>
+                  </span>
+                  <label class="switch" title="Rumble support is coming soon" style="cursor: not-allowed;">
+                    <input type="checkbox" id="rumble-enabled-toggle" disabled>
                     <span class="slider"></span>
                   </label>
                 </div>

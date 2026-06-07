@@ -11,6 +11,9 @@ build/
 .vscode/
 .idea/
 
+# Local dev scratch / throwaway scripts
+scratch/
+
 # Logs
 *.log
 npm-debug.log*

@@ -2,7 +2,7 @@
 // connected/disconnected card states.
 
 import { PLATFORMS, state, appendLogMessage } from './state.js';
-import { renderFollowsList, getKickLiveFollows } from './follows.js';
+import { renderFollowsList } from './follows.js';
 
 function setConnectionUI(platform, connected, username) {
   const disconnectedCard = document.getElementById(`${platform}-disconnected-state`);
@@ -112,16 +112,6 @@ export function setupLoginPortalListeners() {
         }
       } catch (e) {
         appendLogMessage(`[Twitch Sync] Auto-sync follows failed: ${e.message}`);
-      }
-    } else if (platform === 'kick' && state.currentConfig.kickEnabled !== false) {
-      try {
-        appendLogMessage('[Kick Sync] Auto-syncing live follows after successful connection...');
-        const kickFollows = await getKickLiveFollows();
-        state.followsCache.kick = kickFollows;
-        renderFollowsList();
-        appendLogMessage(`[System] Auto-synced ${kickFollows.length} live followed Kick channels.`);
-      } catch (e) {
-        appendLogMessage(`[Kick Sync] Auto-sync follows failed: ${e.message}`);
       }
     }
   });

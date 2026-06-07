@@ -68,6 +68,14 @@ contextBridge.exposeInMainWorld('api', {
   onCloseAllStreamTabs: (callback) => {
     safeOn('close-all-stream-tabs', (event) => callback());
   },
+  onReloadStreamContainers: (callback) => {
+    safeOn('reload-stream-containers', (event) => callback());
+  },
+
+  // Extension catalog
+  listCatalogExtensions: () => ipcRenderer.invoke('list-catalog-extensions'),
+  installCatalogExtension: (id) => ipcRenderer.invoke('install-catalog-extension', { id }),
+  uninstallCatalogExtension: (id) => ipcRenderer.invoke('uninstall-catalog-extension', { id }),
 
   // Auto-Updater
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),

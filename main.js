@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { exec } = require('child_process');
 const { autoUpdater } = require('electron-updater');
+const extractZip = require('extract-zip');
 
 // Enable extension support in Electron partitioned sessions & webviews by bypassing sandbox restrictions
 app.commandLine.appendSwitch('disable-extension-sandbox');
@@ -36,7 +37,7 @@ let config = {
   twitchEnabled: true,
   kickEnabled: true,
   youtubeEnabled: true,
-  rumbleEnabled: true,
+  rumbleEnabled: false, // Coming soon — Rumble support is not yet available; locked off in the UI.
   disabledAutoQuality: {},
   calendarEvents: [],
   syncedCalendarEvents: [],
@@ -52,6 +53,13 @@ let countdownTimerId = null;
 let nextScanTime = 0;
 const logs = [];
 let normalizedUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// The original, un-normalized Electron UA captured at startup. Login windows use
+// THIS (not the normalized one) so navigator.userAgent stays consistent with
+// navigator.userAgentData / Sec-CH-UA. Stripping Electron from the UA string while
+// leaving the client hints intact creates a mismatch that trips Google's
+// "this browser may not be secure" embedded-login block. The initial build never
+// normalized the UA, which is why login worked there.
+let defaultElectronUA = null;
 
 // Twitch OAuth token cache
 let twitchTokenCache = { token: null, expiresAt: 0 };
@@ -101,6 +109,10 @@ function loadConfig() {
       if (!config.disabledAutoQuality) config.disabledAutoQuality = {};
       if (!config.accounts) config.accounts = {};
 
+      // Rumble is a "coming soon" feature — force it off regardless of any
+      // stale saved value so the scanner never polls it.
+      config.rumbleEnabled = false;
+
       addLog('Configuration loaded successfully.');
     } else {
       addLog('No existing configuration found. Creating defaults...');
@@ -131,6 +143,26 @@ function saveConfig(newConfig) {
   } catch (err) {
     addLog(`Error saving config: ${err.message}`);
   }
+}
+
+// Load a SINGLE extension into the live persist:default session so a freshly
+// installed addon takes effect without an app restart. Returns the loaded
+// extension info or throws. Open stream containers must be reloaded to pick it up.
+async function loadSingleExtension(extPath) {
+  const ses = session.fromPartition('persist:default');
+  if (!fs.existsSync(extPath)) throw new Error(`Extension path does not exist: ${extPath}`);
+  // If an extension is already loaded from this exact path, skip re-loading
+  // (re-loading the same id throws "Extension already loaded").
+  let loaded = [];
+  if (ses.extensions) loaded = ses.extensions.getAllExtensions();
+  else if (typeof ses.getAllExtensions === 'function') loaded = ses.getAllExtensions();
+  const already = loaded.find(e => e.path && path.resolve(e.path) === path.resolve(extPath));
+  if (already) return already;
+
+  if (ses.extensions) {
+    return await ses.extensions.loadExtension(extPath, { allowFileAccess: true });
+  }
+  return await ses.loadExtension(extPath, { allowFileAccess: true });
 }
 
 // Load Chrome extensions into the persistent stream session.
@@ -184,209 +216,6 @@ async function loadExtensions() {
   }
 }
 
-// Download and unpack 7TV extension dynamically on startup
-async function install7TVExtension() {
-  const userDataPath = app.getPath('userData');
-  const extensionsDir = path.join(userDataPath, 'extensions');
-  const seventvDir = path.join(extensionsDir, 'seventv');
-  const zipPath = path.join(extensionsDir, 'seventv.zip');
-
-  // Ensure extensions directory exists
-  if (!fs.existsSync(extensionsDir)) {
-    fs.mkdirSync(extensionsDir, { recursive: true });
-  }
-
-  const manifestPath = path.join(seventvDir, 'manifest.json');
-  let localVersion = null;
-  let hasMV3 = false;
-
-  if (fs.existsSync(manifestPath)) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      if (manifest.manifest_version === 3) {
-        hasMV3 = true;
-        localVersion = manifest.version || null;
-      }
-    } catch (e) {
-      addLog(`[7TV] Failed to read pre-installed manifest: ${e.message}`);
-    }
-  }
-
-  let needsDownload = true;
-  let latestRelease = null;
-  let targetAsset = null;
-
-  addLog('[7TV] Fetching latest release info from GitHub (nightly-release)...');
-  try {
-    const response = await net.fetch('https://api.github.com/repos/SevenTV/Extension/releases/tags/nightly-release', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
-    if (response.ok) {
-      latestRelease = await response.json();
-      const assets = latestRelease.assets || [];
-      targetAsset = assets.find(asset => asset.name.endsWith('.zip') && asset.name.toLowerCase().includes('mv3'))
-        || assets.find(asset => 
-            asset.name.endsWith('.zip') && 
-            (asset.name.toLowerCase().includes('chrome') || 
-             asset.name.toLowerCase().includes('webextension') || 
-             asset.name.toLowerCase().includes('chromium'))
-          )
-        || assets.find(asset => asset.name.endsWith('.zip'));
-    } else {
-      addLog(`[7TV] GitHub API returned status ${response.status}. Gracefully continuing...`);
-    }
-  } catch (err) {
-    addLog(`[7TV] Network check failed: ${err.message}. Gracefully continuing...`);
-  }
-
-  if (latestRelease && targetAsset) {
-    const remoteLastUpdated = targetAsset.updated_at;
-
-    if (hasMV3 && config.seventvLastUpdated === remoteLastUpdated) {
-      addLog(`[7TV] Extension is already up-to-date (Last Updated: ${config.seventvLastUpdated}).`);
-      needsDownload = false;
-    } else {
-      if (hasMV3) {
-        addLog(`[7TV] Update available: Local last-updated ${config.seventvLastUpdated || 'unknown'} vs Remote last-updated ${remoteLastUpdated}. Upgrading...`);
-      } else {
-        addLog('[7TV] Extension not fully installed. Installing nightly-release...');
-      }
-      needsDownload = true;
-    }
-  } else {
-    // If GitHub API check fails (offline/rate-limited) but we have a valid local installation, use it!
-    if (hasMV3) {
-      addLog(`[7TV] GitHub check unavailable or asset not found. Keeping existing local installation (Version ${localVersion || 'unknown'}).`);
-      needsDownload = false;
-    } else {
-      addLog('[7TV] GitHub check unavailable and no local installation found. Fresh installation is required.');
-      needsDownload = true;
-    }
-  }
-
-  if (needsDownload) {
-    // If we are replacing an existing directory, remove it first to avoid extraction pollution
-    if (fs.existsSync(seventvDir)) {
-      try {
-        fs.rmSync(seventvDir, { recursive: true, force: true });
-      } catch (rmErr) {
-        addLog(`[7TV] Warning: failed to clean seventv directory: ${rmErr.message}`);
-      }
-    }
-
-    try {
-      if (!latestRelease || !targetAsset) {
-        addLog('[7TV] Recheck: Fetching latest nightly-release from GitHub to download...');
-        const response = await net.fetch('https://api.github.com/repos/SevenTV/Extension/releases/tags/nightly-release', {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
-        });
-        if (!response.ok) {
-          throw new Error(`GitHub API returned status ${response.status}`);
-        }
-        latestRelease = await response.json();
-        const assets = latestRelease.assets || [];
-        targetAsset = assets.find(asset => asset.name.endsWith('.zip') && asset.name.toLowerCase().includes('mv3'))
-          || assets.find(asset => 
-              asset.name.endsWith('.zip') && 
-              (asset.name.toLowerCase().includes('chrome') || 
-               asset.name.toLowerCase().includes('webextension') || 
-               asset.name.toLowerCase().includes('chromium'))
-            )
-          || assets.find(asset => asset.name.endsWith('.zip'));
-      }
-
-      if (!targetAsset) {
-        throw new Error('No suitable ZIP asset found in the nightly-release 7TV release.');
-      }
-
-      const remoteLastUpdated = targetAsset.updated_at;
-      const downloadUrl = targetAsset.browser_download_url;
-      addLog(`[7TV] Downloading latest release: ${targetAsset.name} from GitHub...`);
-
-      const fileResponse = await net.fetch(downloadUrl);
-      if (!fileResponse.ok) {
-        throw new Error(`Failed to download ZIP file: status ${fileResponse.status}`);
-      }
-
-      const buffer = Buffer.from(await fileResponse.arrayBuffer());
-      fs.writeFileSync(zipPath, buffer);
-      addLog('[7TV] ZIP file downloaded successfully. Extracting archive...');
-
-      // Ensure output folder exists
-      if (!fs.existsSync(seventvDir)) {
-        fs.mkdirSync(seventvDir, { recursive: true });
-      }
-
-      // Extract natively using PowerShell Expand-Archive on Windows
-      await new Promise((resolve, reject) => {
-        const psCommand = `powershell -Command "Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${seventvDir.replace(/'/g, "''")}' -Force"`;
-        exec(psCommand, (err, stdout, stderr) => {
-          if (err) {
-            reject(new Error(`Extraction failed: ${stderr || err.message}`));
-          } else {
-            resolve();
-          }
-        });
-      });
-
-      addLog('[7TV] Extraction complete.');
-
-      // Clean up ZIP file
-      if (fs.existsSync(zipPath)) {
-        fs.unlinkSync(zipPath);
-      }
-
-      // Update cached last updated time
-      config.seventvLastUpdated = remoteLastUpdated;
-      saveConfig();
-    } catch (err) {
-      addLog(`[7TV] Installation failed: ${err.message}`);
-      return;
-    }
-  }
-
-  // Programmatically inject Kick.com permissions and matches into unpacked seventv/manifest.json
-  try {
-    if (fs.existsSync(manifestPath)) {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      
-      // 1. Add kick.com to host_permissions
-      if (!manifest.host_permissions) manifest.host_permissions = [];
-      if (!manifest.host_permissions.includes('*://*.kick.com/*')) {
-        manifest.host_permissions.push('*://*.kick.com/*');
-      }
-      
-      // 2. Add kick.com to content_scripts matches
-      if (manifest.content_scripts && Array.isArray(manifest.content_scripts)) {
-        manifest.content_scripts.forEach(script => {
-          if (script.matches && Array.isArray(script.matches)) {
-            const hasTwitch = script.matches.some(m => m.includes('twitch.tv'));
-            const hasKick = script.matches.some(m => m.includes('kick.com'));
-            if (hasTwitch && !hasKick) {
-              script.matches.push('*://*.kick.com/*');
-            }
-          }
-        });
-      }
-      
-      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
-      addLog('[7TV] Successfully patched manifest.json with Kick.com permissions and content scripts.');
-    }
-  } catch (patchErr) {
-    addLog(`[7TV] Warning: Failed to patch manifest.json for Kick: ${patchErr.message}`);
-  }
-
-  // Add to config.extensions and save
-  if (!config.extensions.includes(seventvDir)) {
-    config.extensions.push(seventvDir);
-    saveConfig();
-  }
-  addLog('[7TV] Extension registered and ready.');
-}
 
 
 // Create Main Dashboard Window
@@ -1162,6 +991,7 @@ app.whenReady().then(async () => {
   loadConfig();
   
   const rawUA = session.defaultSession.getUserAgent();
+  defaultElectronUA = rawUA; // preserve the consistent original for login windows
   const userAgent = rawUA
     .replace(/stream-lurker\/\S+/i, '')
     .replace(/Electron\/\S+/i, '')
@@ -1211,12 +1041,10 @@ app.whenReady().then(async () => {
       setHeader('sec-ch-ua', `"Chromium";v="${chromeMajorVersion}", "Google Chrome";v="${chromeMajorVersion}", "Not-A.Brand";v="99"`);
       setHeader('sec-ch-ua-mobile', '?0');
       setHeader('sec-ch-ua-platform', platformString);
-      if (details.url.includes('gql.twitch.tv')) {
-        addLog(`[Outgoing GQL Request] URL: ${details.url}, Cookie: ${headers['Cookie'] || headers['cookie'] || 'none'}`);
-      }
       callback({ requestHeaders: headers });
     }
   );
+
 
   session.fromPartition('persist:default').webRequest.onHeadersReceived(
     { urls: ['*://gql.twitch.tv/*'] },
@@ -1253,9 +1081,8 @@ app.whenReady().then(async () => {
     }
   );
 
-  // Pre-install 7TV Extension
-  await install7TVExtension();
-  
+  // 7TV is no longer bundled/auto-installed — users opt in via the
+  // Recommended Extensions catalog in the Adblock & Extensions tab.
   await loadExtensions();
   createMainWindow();
   
@@ -1516,7 +1343,14 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
     });
 
     loginWin.setMenuBarVisibility(false);
-    loginWin.loadURL(loginUrl);
+    // Use the original (un-normalized) Electron UA for the login window so the
+    // UA string stays consistent with the client hints. A stripped UA here is what
+    // trips Google's "browser may not be secure" block. Matches the initial build
+    // where login worked. Applies only to this window, not stream containers.
+    if (defaultElectronUA) {
+      loginWin.webContents.setUserAgent(defaultElectronUA);
+    }
+    loginWin.loadURL(loginUrl, defaultElectronUA ? { userAgent: defaultElectronUA } : undefined);
 
     loginWin.once('ready-to-show', () => {
       loginWin.show();
@@ -1525,6 +1359,7 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
     let checkInterval = null;
     let resolved = false;
     let timeoutId = null;
+    let kickNoLoginStreak = 0; // consecutive polls with no Log in button (Kick)
 
     // Login timeout — prevent indefinite polling if user never completes login
     timeoutId = setTimeout(() => {
@@ -1596,27 +1431,51 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
             `;
           } else if (p === 'kick') {
             script = `
-              (() => {
+              (async () => {
                 try {
                   const href = window.location.href;
-                  const localStorageKeys = Object.keys(localStorage);
-                  
-                  // Look for any links containing /dashboard, /settings, /profile, /logout
-                  const links = Array.from(document.querySelectorAll('a')).map(a => a.href).filter(h => h.includes('dashboard') || h.includes('settings') || h.includes('profile') || h.includes('logout') || h.includes('creator'));
-                  
-                  // Look for any buttons or images
-                  const buttons = Array.from(document.querySelectorAll('button')).map(b => b.innerText || b.className).filter(Boolean);
-                  const imgs = Array.from(document.querySelectorAll('img')).map(i => ({ src: i.src, alt: i.alt }));
-                  
-                  const hasNuxt = typeof window.__NUXT__ !== 'undefined';
-                  
+                  const onLoginPage = /\\/(login|auth|sign-in|signin|register)/i.test(href);
+
+                  // Visible "Log in" / "Sign up" controls = definitively logged OUT.
+                  const loginButtons = Array.from(document.querySelectorAll('a, button')).filter(el => {
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    return t === 'sign in' || t === 'log in' || t === 'login' || t === 'register' || t === 'sign up';
+                  }).length;
+
+                  // Positive auth signals (only present when logged in):
+                  // a real user avatar, or links to account-only pages.
+                  let userName = null;
+                  const avatarImg = document.querySelector('img[src*="/user/" i], img[src*="/profile_image/" i], img[src*="/avatars/" i]');
+                  const hasAvatar = !!avatarImg;
+                  if (avatarImg && avatarImg.alt) {
+                    const a = avatarImg.alt.toLowerCase();
+                    if (!a.includes('avatar') && !a.includes('profile') && !a.includes('logo')) userName = avatarImg.alt;
+                  }
+                  const hasAccountLink = !!document.querySelector(
+                    'a[href*="/dashboard" i], a[href*="/settings" i], a[href*="/account" i], a[href*="logout" i]'
+                  );
+
+                  // Authenticated API confirmation (best signal when it works).
+                  let apiUserName = null;
+                  try {
+                    const controller = new AbortController();
+                    const tid = setTimeout(() => controller.abort(), 2500);
+                    const r = await fetch('/api/v2/user', { credentials: 'include', signal: controller.signal });
+                    clearTimeout(tid);
+                    if (r.ok) {
+                      const b = await r.json().catch(() => ({}));
+                      apiUserName = b.username || (b.data && b.data.username) || b.slug || null;
+                    }
+                  } catch (e) {}
+
                   return {
                     href,
-                    localStorageKeys,
-                    links,
-                    buttons: buttons.slice(0, 15),
-                    imgs: imgs.slice(0, 15),
-                    hasNuxt
+                    onLoginPage,
+                    loginButtons,
+                    hasAvatar,
+                    hasAccountLink,
+                    apiUserName,
+                    userName: apiUserName || userName,
                   };
                 } catch(e) {
                   return { error: e.message };
@@ -1649,14 +1508,24 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
           if (script) {
             const res = await loginWin.webContents.executeJavaScript(script);
             if (p === 'kick') {
-              addLog(`[Auth - Kick Diagnostic] ${JSON.stringify(res)}`);
               if (res && !res.error) {
-                const isOnHomepage = !res.href.includes('/login') && !res.href.includes('/auth/');
-                const hasLoggedInLinks = res.links && res.links.length > 0;
-                const hasLocalStorageUser = res.localStorageKeys && res.localStorageKeys.some(k => k.includes('user') || k.includes('auth'));
-                const hasLoggedInUI = res.imgs && res.imgs.some(img => img.src && (img.src.includes('/avatars/') || img.src.includes('/uploads/')));
-                
-                isLoggedIn = isOnHomepage || hasLoggedInLinks || hasLocalStorageUser || hasLoggedInUI;
+                // Track consecutive polls with NO "Log in" button. Kick keeps the
+                // user on the /login URL even after authenticating (SPA, no redirect),
+                // so URL is useless. The login button disappearing is the reliable
+                // "you're authenticated" signal; `hasAvatar` is a false positive
+                // (the login page itself shows avatar images).
+                if (res.loginButtons === 0) kickNoLoginStreak++;
+                else kickNoLoginStreak = 0;
+
+                addLog(`[Auth - Kick] poll: loginButtons=${res.loginButtons} noLoginStreak=${kickNoLoginStreak} accountLink=${res.hasAccountLink} apiUser=${res.apiUserName} href=${res.href}`);
+
+                // Logged in when the Log in button is gone AND either a positive auth
+                // signal is present, or the button has been gone for several polls
+                // (fallback for when account links/API don't surface).
+                const positiveSignal = res.hasAccountLink || !!res.apiUserName;
+                if (res.loginButtons === 0 && (positiveSignal || kickNoLoginStreak >= 3)) {
+                  isLoggedIn = true;
+                }
               }
             } else {
               isLoggedIn = res;
@@ -1949,6 +1818,7 @@ ipcMain.handle('logout-platform', async (event, { platform }) => {
   }
 });
 
+
 ipcMain.handle('get-twitch-follows', async () => {
   addLog('[Twitch Sync] Retrieving auth token from cookie jar...');
   try {
@@ -2107,6 +1977,242 @@ ipcMain.handle('select-extension-folder', async () => {
   } catch (err) {
     return { error: `Failed to read manifest.json: ${err.message}` };
   }
+});
+
+// ── Extension Catalog ──────────────────────────────────────────────────────
+// Curated list of one-click installable extensions. Each entry points at a
+// GitHub repo whose Releases publish a Chromium unpacked .zip. The install flow:
+//   1. Hit GitHub API for the latest release JSON
+//   2. Find the asset matching `assetPattern` and download it
+//   3. Extract to userData/managed-extensions/<id>/
+//   4. Locate the directory containing manifest.json and register that path in config.extensions
+const EXTENSION_CATALOG = [
+  {
+    id: 'ublock-origin',
+    name: 'uBlock Origin',
+    description: 'Efficient ad and content blocker. Recommended for hiding Twitch/Kick pre-roll and mid-roll ads inside stream containers.',
+    repo: 'gorhill/uBlock',
+    assetPattern: /^uBlock0_.+\.chromium\.zip$/i
+  },
+  {
+    id: '7tv',
+    name: '7TV',
+    description: 'Adds 7TV global and channel emotes to Twitch and Kick chat inside stream containers.',
+    repo: 'SevenTV/Extension',
+    assetPattern: /^7tv-webextension-mv3\.zip$/i
+  }
+];
+
+// 7TV ships configured for Twitch only. Patch its manifest so it also injects
+// on kick.com (host permission + content-script match), restoring the Kick
+// emote support the old bundled installer used to add.
+function patchSevenTVManifestForKick(manifestRoot) {
+  try {
+    const manifestPath = path.join(manifestRoot, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) return;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    if (!manifest.host_permissions) manifest.host_permissions = [];
+    if (!manifest.host_permissions.includes('*://*.kick.com/*')) {
+      manifest.host_permissions.push('*://*.kick.com/*');
+    }
+
+    if (Array.isArray(manifest.content_scripts)) {
+      manifest.content_scripts.forEach(script => {
+        if (script.matches && Array.isArray(script.matches)) {
+          const hasTwitch = script.matches.some(m => m.includes('twitch.tv'));
+          const hasKick = script.matches.some(m => m.includes('kick.com'));
+          if (hasTwitch && !hasKick) script.matches.push('*://*.kick.com/*');
+        }
+      });
+    }
+
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    addLog('[Catalog] Patched 7TV manifest with Kick.com permissions and content scripts.');
+  } catch (e) {
+    addLog(`[Catalog] Warning: failed to patch 7TV manifest for Kick: ${e.message}`);
+  }
+}
+
+function getManagedExtensionsRoot() {
+  const dir = path.join(app.getPath('userData'), 'managed-extensions');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getCatalogEntryInstallPath(id) {
+  return path.join(getManagedExtensionsRoot(), id);
+}
+
+// Walk the extracted directory to find the dir that contains manifest.json.
+// Some zips put files at root; uBlock puts them under uBlock0.chromium/.
+function findManifestRoot(dir) {
+  if (fs.existsSync(path.join(dir, 'manifest.json'))) return dir;
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory());
+  for (const e of entries) {
+    const sub = path.join(dir, e.name);
+    if (fs.existsSync(path.join(sub, 'manifest.json'))) return sub;
+  }
+  // One more level for safety
+  for (const e of entries) {
+    const found = findManifestRoot(path.join(dir, e.name));
+    if (found) return found;
+  }
+  return null;
+}
+
+function rmrf(p) {
+  if (!fs.existsSync(p)) return;
+  fs.rmSync(p, { recursive: true, force: true });
+}
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    const req = net.request({
+      method: 'GET',
+      url,
+      headers: { 'User-Agent': 'stream-lurker', 'Accept': 'application/vnd.github+json' },
+      redirect: 'follow'
+    });
+    let body = '';
+    req.on('response', (res) => {
+      res.on('data', (chunk) => { body += chunk.toString(); });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`GitHub API ${res.statusCode}: ${body.slice(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function downloadFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const req = net.request({
+      method: 'GET',
+      url,
+      headers: { 'User-Agent': 'stream-lurker', 'Accept': 'application/octet-stream' },
+      redirect: 'follow'
+    });
+    const out = fs.createWriteStream(destPath);
+    req.on('response', (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        out.close();
+        reject(new Error(`Download failed ${res.statusCode}`));
+        return;
+      }
+      res.on('data', (chunk) => out.write(chunk));
+      res.on('end', () => out.end(() => resolve()));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function getInstalledManifestForCatalogEntry(entry) {
+  const root = getCatalogEntryInstallPath(entry.id);
+  if (!fs.existsSync(root)) return null;
+  const manifestRoot = findManifestRoot(root);
+  if (!manifestRoot) return null;
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(manifestRoot, 'manifest.json'), 'utf8'));
+    return { path: manifestRoot, version: m.version, name: m.name };
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('list-catalog-extensions', async () => {
+  return EXTENSION_CATALOG.map(entry => {
+    const installed = getInstalledManifestForCatalogEntry(entry);
+    return {
+      id: entry.id,
+      name: entry.name,
+      description: entry.description,
+      repo: entry.repo,
+      repoUrl: `https://github.com/${entry.repo}`,
+      installed: installed ? { version: installed.version, path: installed.path } : null
+    };
+  });
+});
+
+ipcMain.handle('install-catalog-extension', async (event, { id }) => {
+  const entry = EXTENSION_CATALOG.find(e => e.id === id);
+  if (!entry) return { ok: false, error: `Unknown catalog id: ${id}` };
+
+  addLog(`[Catalog] Installing ${entry.name}…`);
+  try {
+    const release = await fetchJson(`https://api.github.com/repos/${entry.repo}/releases/latest`);
+    const assets = release.assets || [];
+    const asset = assets.find(a => entry.assetPattern.test(a.name) && /\.zip$/i.test(a.name));
+    if (!asset) {
+      const available = assets.map(a => a.name).join(', ');
+      return { ok: false, error: `No matching .zip asset in latest release of ${entry.repo}. Available: ${available || 'none'}` };
+    }
+
+    const installRoot = getCatalogEntryInstallPath(entry.id);
+    // Wipe any prior install so updates don't leave stale files behind
+    rmrf(installRoot);
+    fs.mkdirSync(installRoot, { recursive: true });
+
+    const tmpZip = path.join(app.getPath('temp'), `${entry.id}-${Date.now()}.zip`);
+    addLog(`[Catalog] Downloading ${asset.name} (${(asset.size / 1024 / 1024).toFixed(1)} MB)…`);
+    await downloadFile(asset.browser_download_url, tmpZip);
+
+    addLog(`[Catalog] Extracting ${asset.name}…`);
+    await extractZip(tmpZip, { dir: installRoot });
+    try { fs.unlinkSync(tmpZip); } catch {}
+
+    const manifestRoot = findManifestRoot(installRoot);
+    if (!manifestRoot) {
+      rmrf(installRoot);
+      return { ok: false, error: 'Extracted archive did not contain a manifest.json' };
+    }
+
+    // Per-extension post-install patches.
+    if (entry.id === '7tv') patchSevenTVManifestForKick(manifestRoot);
+
+    // Replace any prior registration of any subpath of installRoot, then add the new manifestRoot
+    config.extensions = (config.extensions || []).filter(p => !p.startsWith(installRoot));
+    config.extensions.push(manifestRoot);
+    saveConfig();
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(manifestRoot, 'manifest.json'), 'utf8'));
+
+    // Load it into the live session immediately so it works without an app restart.
+    try {
+      await loadSingleExtension(manifestRoot);
+      addLog(`[Catalog] Loaded ${entry.name} v${manifest.version} into the live session.`);
+      // Reload any open stream containers so the content scripts inject.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('reload-stream-containers');
+      }
+    } catch (loadErr) {
+      addLog(`[Catalog] Installed ${entry.name} but live-load failed (${loadErr.message}). It will load on next app start.`);
+    }
+
+    addLog(`[Catalog] Installed ${entry.name} v${manifest.version}.`);
+    return { ok: true, path: manifestRoot, version: manifest.version, name: manifest.name };
+  } catch (err) {
+    addLog(`[Catalog] Install failed for ${entry.name}: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('uninstall-catalog-extension', async (event, { id }) => {
+  const entry = EXTENSION_CATALOG.find(e => e.id === id);
+  if (!entry) return { ok: false, error: `Unknown catalog id: ${id}` };
+  const installRoot = getCatalogEntryInstallPath(entry.id);
+  config.extensions = (config.extensions || []).filter(p => !p.startsWith(installRoot));
+  saveConfig();
+  rmrf(installRoot);
+  addLog(`[Catalog] Uninstalled ${entry.name}.`);
+  return { ok: true };
 });
 
 ipcMain.handle('force-scan', () => {

@@ -3,6 +3,101 @@
 import { state, appendLogMessage } from './state.js';
 
 function listEl() { return document.getElementById('extensions-list'); }
+function catalogEl() { return document.getElementById('ext-catalog-grid'); }
+
+export async function renderExtensionCatalog() {
+  const host = catalogEl();
+  if (!host) return;
+  host.innerHTML = `<div class="catalog-loading" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 16px;">Loading catalog…</div>`;
+
+  let items = [];
+  try {
+    items = await window.api.listCatalogExtensions();
+  } catch (err) {
+    host.innerHTML = `<div style="grid-column: 1 / -1; color: var(--text-muted); font-size: 0.85rem;">Failed to load catalog: ${err.message}</div>`;
+    return;
+  }
+
+  host.innerHTML = '';
+  items.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'ext-catalog-item';
+    card.style.cssText = `
+      background-color: hsla(240, 5.9%, 15%, 0.25);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    `;
+    const installedBadge = item.installed
+      ? `<span style="font-size: 0.7rem; color: var(--text-secondary); background: var(--panel-border); padding: 2px 8px; border-radius: 10px;">Installed v${item.installed.version}</span>`
+      : '';
+    card.innerHTML = `
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <strong style="font-size: 0.95rem;">${item.name}</strong>
+        ${installedBadge}
+      </div>
+      <p style="font-size: 0.78rem; color: var(--text-muted); margin: 0; line-height: 1.4; flex-grow: 1;">${item.description}</p>
+      <a href="#" data-repo-url="${item.repoUrl}" style="font-size: 0.7rem; color: var(--cyan-color); text-decoration: none;">${item.repo} ↗</a>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <button class="btn btn-sm btn-cyan catalog-install-btn" data-id="${item.id}" style="flex-grow: 1;">
+          ${item.installed ? 'Update' : 'Install'}
+        </button>
+        ${item.installed ? `<button class="btn btn-sm catalog-uninstall-btn" data-id="${item.id}" style="background: transparent; border: 1px solid var(--panel-border); color: var(--text-secondary);">Remove</button>` : ''}
+      </div>
+      <div class="catalog-status" style="font-size: 0.72rem; color: var(--text-muted); min-height: 14px;"></div>
+    `;
+
+    card.querySelector('[data-repo-url]')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.api.openExternal(e.currentTarget.dataset.repoUrl);
+    });
+
+    const statusEl = card.querySelector('.catalog-status');
+    const installBtn = card.querySelector('.catalog-install-btn');
+    const uninstallBtn = card.querySelector('.catalog-uninstall-btn');
+
+    installBtn.addEventListener('click', async () => {
+      installBtn.disabled = true;
+      if (uninstallBtn) uninstallBtn.disabled = true;
+      statusEl.textContent = 'Downloading & extracting…';
+      const res = await window.api.installCatalogExtension(item.id);
+      if (res.ok) {
+        statusEl.textContent = `Installed v${res.version}. Reload streams to load.`;
+        statusEl.style.color = 'var(--cyan-color)';
+        state.currentConfig = await window.api.getConfig();
+        renderExtensionsList();
+        renderExtensionCatalog();
+        appendLogMessage(`[Catalog] ${item.name} v${res.version} installed.`);
+      } else {
+        statusEl.textContent = `Failed: ${res.error}`;
+        statusEl.style.color = 'var(--text-muted)';
+        installBtn.disabled = false;
+        if (uninstallBtn) uninstallBtn.disabled = false;
+      }
+    });
+
+    uninstallBtn?.addEventListener('click', async () => {
+      uninstallBtn.disabled = true;
+      installBtn.disabled = true;
+      const res = await window.api.uninstallCatalogExtension(item.id);
+      if (res.ok) {
+        state.currentConfig = await window.api.getConfig();
+        renderExtensionsList();
+        renderExtensionCatalog();
+        appendLogMessage(`[Catalog] ${item.name} removed.`);
+      } else {
+        statusEl.textContent = `Failed: ${res.error}`;
+        uninstallBtn.disabled = false;
+        installBtn.disabled = false;
+      }
+    });
+
+    host.appendChild(card);
+  });
+}
 
 export function renderExtensionsList() {
   const host = listEl();

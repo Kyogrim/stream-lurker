@@ -9,11 +9,12 @@ import {
   createStreamTab,
   removeStreamTab,
   closeAllStreamTabs,
+  reloadAllStreamContainers,
   setupGlobalGhostButton,
 } from './src/multi-lurk.js';
 import { renderStreamsGrid, updateStats } from './src/dashboard.js';
 import { renderMonitoredList } from './src/streamers.js';
-import { renderExtensionsList } from './src/extensions.js';
+import { renderExtensionsList, renderExtensionCatalog } from './src/extensions.js';
 import { renderFollowsList, setupFollowsHandlers } from './src/follows.js';
 import { renderLeaderboard } from './src/leaderboard.js';
 import { populateCalendarFormDays, renderCalendar, setupCalendarHandlers } from './src/calendar.js';
@@ -233,6 +234,7 @@ function setupBackendListeners() {
   window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username));
   window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username));
   window.api.onCloseAllStreamTabs(() => closeAllStreamTabs());
+  window.api.onReloadStreamContainers(() => reloadAllStreamContainers());
 
   window.api.onWatchTimeUpdate((data) => {
     if (state.currentConfig) {
@@ -271,6 +273,7 @@ async function init() {
 
     console.log('Rendering extensions list...');
     renderExtensionsList();
+    renderExtensionCatalog();
 
     console.log('Fetching recent logs...');
     const initialLogs = await window.api.getRecentLogs();

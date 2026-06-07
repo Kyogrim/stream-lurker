@@ -153,6 +153,11 @@ function buildCellHTML(platform, username, isQualityDisabled) {
         <span class="stream-cell-name">${username}</span>
       </div>
       <div class="stream-cell-actions">
+        <button class="cell-action-btn chat-popout-btn" title="Open chat in your browser (sign in there to chat)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </button>
         <button class="cell-action-btn quality-toggle-btn ${isQualityDisabled ? '' : 'active'}" title="${isQualityDisabled ? 'Enable Auto Quality (Currently: Native Quality)' : 'Disable Auto Quality (Currently: Auto Quality Active)'}">
           <svg class="quality-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
@@ -200,6 +205,38 @@ function buildCellHTML(platform, username, isQualityDisabled) {
   `;
 }
 
+// Build the URL we open in the user's DEFAULT browser so they can chat while
+// signed in (embedded login is blocked by Google/Twitch anti-bot). For Twitch we
+// use the dedicated chat-only popout; for YouTube we extract the live video id
+// from the embedded webview's current URL to open the chat-only popout, falling
+// back to the live watch page. Kick/Rumble open the channel page where chat is
+// inline and the user can type once logged in.
+function chatPopoutUrl(platform, username, webview) {
+  const p = platform.toLowerCase();
+  const u = username.toLowerCase();
+  switch (p) {
+    case 'twitch':
+      return `https://www.twitch.tv/popout/${u}/chat`;
+    case 'youtube': {
+      try {
+        const current = webview.getURL() || '';
+        const m = current.match(/[?&]v=([\w-]{11})/)
+          || current.match(/\/live\/([\w-]{11})/)
+          || current.match(/youtu\.be\/([\w-]{11})/);
+        if (m) return `https://www.youtube.com/live_chat?v=${m[1]}&is_popout=1`;
+      } catch (e) { /* fall through */ }
+      return `https://www.youtube.com/${u.startsWith('@') ? u : '@' + u}/live`;
+    }
+    case 'kick':
+      return `https://kick.com/${u}`;
+    case 'rumble':
+      try { return webview.getURL() || `https://rumble.com/c/${u}`; }
+      catch (e) { return `https://rumble.com/c/${u}`; }
+    default:
+      return '';
+  }
+}
+
 function bindCellActions(cell, platform, username) {
   const p = platform.toLowerCase();
   const u = username.toLowerCase();
@@ -215,6 +252,7 @@ function bindCellActions(cell, platform, username) {
   const moveLeftBtn = cell.querySelector('.move-left-btn');
   const moveRightBtn = cell.querySelector('.move-right-btn');
   const closeBtn = cell.querySelector('.close-btn');
+  const chatPopoutBtn = cell.querySelector('.chat-popout-btn');
 
   const container = cell.querySelector('.stream-cell-webview-container');
   if (container) webviewResizeObserver.observe(container);
@@ -284,6 +322,14 @@ function bindCellActions(cell, platform, username) {
   reloadBtn.addEventListener('click', () => {
     appendLogMessage(`[Lurk] Reloading active container: ${username} on ${platform.toUpperCase()}`);
     webview.reload();
+  });
+
+  chatPopoutBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const url = chatPopoutUrl(platform, username, webview);
+    if (!url) return;
+    window.api.openExternal(url);
+    appendLogMessage(`[Chat] Opened ${platform.toUpperCase()} chat for ${username} in your browser. Sign in there to send messages.`);
   });
 
   moveLeftBtn.addEventListener('click', () => {
@@ -465,6 +511,18 @@ export function removeStreamTab(platform, username) {
   }
 
   syncActiveTabs();
+}
+
+// Reload every open stream webview — used after a newly installed extension is
+// loaded into the session so its content scripts inject into live streams.
+export function reloadAllStreamContainers() {
+  const webviews = document.querySelectorAll('#multi-lurk-grid .stream-grid-cell webview');
+  webviews.forEach(wv => {
+    try { wv.reload(); } catch (e) { /* ignore */ }
+  });
+  if (webviews.length) {
+    appendLogMessage(`[Extensions] Reloaded ${webviews.length} open stream container(s) to apply the new extension.`);
+  }
 }
 
 export function closeAllStreamTabs() {

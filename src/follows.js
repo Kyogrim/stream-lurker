@@ -1,77 +1,9 @@
-// Sync live followed channels from Twitch (via main process) and Kick (via
-// background webview scrape).
+// Sync live followed channels from Twitch (via main-process GQL). Kick scan
+// was removed — Cloudflare/Kasada protection made the scrape unreliable.
 
 import { state, appendLogMessage } from './state.js';
-import { kickLiveFollowsScript } from './inject.js';
 import { renderMonitoredList } from './streamers.js';
 import { updateStats } from './dashboard.js';
-
-const KICK_SCRAPE_TIMEOUT_MS = 20000;
-
-let kickFollowsInFlight = null;
-
-// Single-flight Kick follows scrape with safety timeout so a stuck webview
-// load never leaves a dangling did-stop-loading listener.
-export function getKickLiveFollows() {
-  if (kickFollowsInFlight) return kickFollowsInFlight;
-
-  kickFollowsInFlight = new Promise((resolve) => {
-    const webview = document.getElementById('kick-login-webview');
-    if (!webview) {
-      kickFollowsInFlight = null;
-      return resolve([]);
-    }
-
-    appendLogMessage('[Kick Sync] Initiating Kick live follows extraction...');
-
-    let settled = false;
-    let timeoutId = null;
-
-    const cleanup = () => {
-      webview.removeEventListener('did-stop-loading', onLoad);
-      if (timeoutId) clearTimeout(timeoutId);
-      kickFollowsInFlight = null;
-    };
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      try { webview.loadURL('about:blank'); } catch {}
-      resolve(result);
-    };
-
-    const onLoad = async () => {
-      const url = webview.getURL();
-      if (!url.includes('kick.com')) return;
-      try {
-        const data = await webview.executeJavaScript(kickLiveFollowsScript);
-        appendLogMessage(`[Kick Sync] Extraction complete. Found ${data ? data.length : 0} live channels.`);
-        finish(data || []);
-      } catch (err) {
-        appendLogMessage(`[Kick Sync] Webview execution failed: ${err.message}`);
-        finish([]);
-      }
-    };
-
-    timeoutId = setTimeout(() => {
-      appendLogMessage('[Kick Sync] Extraction timed out.');
-      finish([]);
-    }, KICK_SCRAPE_TIMEOUT_MS);
-
-    webview.addEventListener('did-stop-loading', onLoad);
-
-    webview.style.display = 'block';
-    webview.style.opacity = '0';
-    webview.style.height = '0px';
-    webview.style.width = '0px';
-    webview.style.position = 'absolute';
-
-    webview.loadURL('https://kick.com/');
-  });
-
-  return kickFollowsInFlight;
-}
 
 export function renderFollowsList() {
   const host = document.getElementById('follows-list-container');
@@ -173,13 +105,6 @@ export function setupFollowsHandlers() {
             } else {
               appendLogMessage(`[Twitch Sync] Secure GQL sync failed: ${res.error || 'Unknown error'}`);
             }
-          })());
-        }
-        if (state.currentConfig.kickEnabled !== false) {
-          promises.push((async () => {
-            const kickFollows = await getKickLiveFollows();
-            state.followsCache.kick = kickFollows;
-            appendLogMessage(`[System] Synced ${kickFollows.length} LIVE channels from Kick follows list.`);
           })());
         }
         await Promise.all(promises);

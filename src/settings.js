@@ -8,6 +8,11 @@ import { renderFollowsList, setActiveFollowsTab } from './follows.js';
 
 const DEFAULT_MAX_TABS = 2;
 
+// Platforms that are not yet available — locked off in the UI ("Coming Soon")
+// and force-disabled regardless of saved config so a stale rumbleEnabled:true
+// can't re-enable them.
+const LOCKED_PLATFORMS = ['rumble'];
+
 // Pairs settings sliders with their value displays for hydration + live update.
 const SLIDER_PAIRS = [
   { id: 'interval-slider', display: 'interval-display-val', configKey: 'checkInterval' },
@@ -35,7 +40,15 @@ export function hydrateSettingsUI() {
 
   for (const p of PLATFORMS) {
     const toggle = document.getElementById(`${p}-enabled-toggle`);
-    if (toggle) toggle.checked = cfg[`${p}Enabled`] !== false;
+    if (!toggle) continue;
+    if (LOCKED_PLATFORMS.includes(p)) {
+      // Force locked platforms off and keep the toggle disabled.
+      cfg[`${p}Enabled`] = false;
+      toggle.checked = false;
+      toggle.disabled = true;
+    } else {
+      toggle.checked = cfg[`${p}Enabled`] !== false;
+    }
   }
 
   const twitchClientId = document.getElementById('twitch-client-id');
@@ -128,6 +141,7 @@ export function setupSettingsHandlers() {
       if (slider) c[configKey] = parseInt(slider.value, 10);
     }
     for (const p of PLATFORMS) {
+      if (LOCKED_PLATFORMS.includes(p)) { c[`${p}Enabled`] = false; continue; }
       const toggle = document.getElementById(`${p}-enabled-toggle`);
       if (toggle) c[`${p}Enabled`] = toggle.checked;
     }
