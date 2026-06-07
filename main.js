@@ -228,6 +228,7 @@ function createMainWindow() {
     frame: true,
     titleBarStyle: 'default',
     backgroundColor: '#09090b',
+    icon: path.join(__dirname, 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

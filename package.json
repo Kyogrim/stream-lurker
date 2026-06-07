@@ -51,7 +51,8 @@
       "target": [
         "AppImage",
         "tar.gz"
-      ]
+      ],
+      "icon": "icon.png"
     },
     "directories": {
       "output": "dist"
@@ -63,6 +64,7 @@
       "style.css",
       "renderer.js",
       "src/**/*.js",
+      "icon.ico",
       "package.json"
     ]
   },
