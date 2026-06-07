@@ -1999,6 +1999,11 @@ const EXTENSION_CATALOG = [
     name: '7TV',
     description: 'Adds 7TV global and channel emotes to Twitch and Kick chat inside stream containers.',
     repo: 'SevenTV/Extension',
+    // Use the NIGHTLY build's mv3 asset. This is exactly what the old bundled
+    // installer pulled, and it works in the embedded webview — the STABLE
+    // (`latest`) release's build strips the Twitch chat input and doesn't mount
+    // its replacement. The nightly build behaves correctly here.
+    releaseTag: 'nightly-release',
     assetPattern: /^7tv-webextension-mv3\.zip$/i
   }
 ];
@@ -2147,12 +2152,17 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
 
   addLog(`[Catalog] Installing ${entry.name}…`);
   try {
-    const release = await fetchJson(`https://api.github.com/repos/${entry.repo}/releases/latest`);
+    // Some extensions (7TV) ship the build we need on a specific tag (nightly-release)
+    // rather than the stable `latest` release.
+    const releaseUrl = entry.releaseTag
+      ? `https://api.github.com/repos/${entry.repo}/releases/tags/${entry.releaseTag}`
+      : `https://api.github.com/repos/${entry.repo}/releases/latest`;
+    const release = await fetchJson(releaseUrl);
     const assets = release.assets || [];
     const asset = assets.find(a => entry.assetPattern.test(a.name) && /\.zip$/i.test(a.name));
     if (!asset) {
       const available = assets.map(a => a.name).join(', ');
-      return { ok: false, error: `No matching .zip asset in latest release of ${entry.repo}. Available: ${available || 'none'}` };
+      return { ok: false, error: `No matching .zip asset in ${entry.releaseTag || 'latest'} release of ${entry.repo}. Available: ${available || 'none'}` };
     }
 
     const installRoot = getCatalogEntryInstallPath(entry.id);

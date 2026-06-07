@@ -743,10 +743,14 @@ input:checked + .slider:before {
   white-space: pre-wrap;
   scroll-behavior: smooth;
   text-shadow: 0 0 5px hsla(188, 86%, 53%, 0.15);
+  /* Allow selecting/copying log lines (overrides the global user-select: none). */
+  user-select: text;
+  cursor: text;
 }
 
 .console-logs div {
   padding-left: 4px;
+  user-select: text;
 }
 
 /* Stats Overview */

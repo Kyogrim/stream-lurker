@@ -65,12 +65,12 @@ export async function renderExtensionCatalog() {
       statusEl.textContent = 'Downloading & extracting…';
       const res = await window.api.installCatalogExtension(item.id);
       if (res.ok) {
-        statusEl.textContent = `Installed v${res.version}. Reload streams to load.`;
+        statusEl.textContent = `Installed v${res.version}. Restart the app to finish loading it.`;
         statusEl.style.color = 'var(--cyan-color)';
         state.currentConfig = await window.api.getConfig();
         renderExtensionsList();
         renderExtensionCatalog();
-        appendLogMessage(`[Catalog] ${item.name} v${res.version} installed.`);
+        appendLogMessage(`[Catalog] ${item.name} v${res.version} installed. Restart Stream Lurker for it to load fully.`);
       } else {
         statusEl.textContent = `Failed: ${res.error}`;
         statusEl.style.color = 'var(--text-muted)';
