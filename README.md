@@ -7,13 +7,6 @@ A standalone desktop application (Electron) that monitors your favorite Twitch, 
 - **Multi-platform live monitoring** — Twitch, Kick, YouTube, and Rumble.
 - **Multi-lurk grid** — watch several streams at once in muted, low-quality webview containers.
 - **Watch-priority queue** — streamers are watched in your configured priority order.
-- **Twitch Drops & Inventory dashboard**
-  - Discovers active drop campaigns and splits them into **Watch Rewards** and **Sub Rewards**.
-  - Lists **followed streamers** currently live in a drop-campaign category.
-  - **Quest for Drop** / **Prioritize** — opens a drops-enabled stream, caps Twitch at 2 concurrent
-    streams (Twitch only credits drops on 2 at once), fails over to the next stream if the
-    current one goes offline, and releases the slot once the rewards are earned.
-  - Live progress tracking and auto-claim for drops and channel points.
 - **Stream schedule calendar** synced from each platform.
 - **Adblock extension support** via loadable Chromium extensions.
 
