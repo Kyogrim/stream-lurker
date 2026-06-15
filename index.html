@@ -974,6 +974,27 @@
     </div>
   </div>
 
+  <!-- Browser-assisted YouTube login modal -->
+  <div id="youtube-import-overlay" class="ti-overlay" style="display: none;">
+    <div class="ti-modal ti-modal-yt glass-panel">
+      <button class="ti-close" id="yti-close" title="Close">&times;</button>
+      <h3 class="ti-title-yt">Connect YouTube</h3>
+      <p class="ti-desc">Google blocks sign-in from inside apps like this one, so we import your session from your normal browser. Because Google's cookies are protected, this needs a free cookie-export extension (one-time).</p>
+      <ol class="ti-steps">
+        <li><button class="btn btn-sm ti-open-btn-yt" id="yti-open-yt">Open YouTube &rarr;</button> and make sure you're signed in.</li>
+        <li>Install a cookie exporter such as <b>Cookie-Editor</b> or <b>Get cookies.txt LOCALLY</b> from your browser's extension store.</li>
+        <li>On <b>youtube.com</b>, open the extension and <b>Export</b> (JSON or cookies.txt). It copies to your clipboard.</li>
+        <li>Paste below (Ctrl+V) and click <b>Import</b>.</li>
+      </ol>
+      <textarea id="yti-input" class="ti-input" rows="3" placeholder="Paste your exported YouTube/Google cookies here (JSON or cookies.txt)" autocomplete="off" spellcheck="false" autocapitalize="off"></textarea>
+      <div class="ti-status" id="yti-status"></div>
+      <div class="ti-actions">
+        <button class="btn btn-sm ti-cancel" id="yti-cancel">Cancel</button>
+        <button class="btn btn-sm ti-import-yt" id="yti-import">Import &amp; Verify</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="renderer.js"></script>
 </body>
 </html>

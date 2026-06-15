@@ -2902,5 +2902,19 @@ input:checked + .slider:before {
 
 .ti-close:hover { color: var(--text-primary, #fff); }
 
+/* YouTube variant of the import modal */
+.ti-modal-yt {
+  border-color: var(--youtube-color, #ff0000);
+  box-shadow: 0 0 30px var(--youtube-glow, rgba(255, 0, 0, 0.35));
+}
+.ti-title-yt { color: var(--youtube-color, #ff0000); }
+.ti-open-btn-yt,
+.ti-import-yt {
+  background: var(--youtube-color, #ff0000);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+}
+
 
 

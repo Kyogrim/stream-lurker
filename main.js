@@ -3036,6 +3036,156 @@ ipcMain.handle('set-twitch-token', async (event, rawInput) => {
   }
 });
 
+// Map various sameSite spellings to the values Electron's cookies.set accepts.
+function normalizeSameSite(s) {
+  const v = String(s || '').toLowerCase();
+  if (v === 'lax') return 'lax';
+  if (v === 'strict') return 'strict';
+  if (v === 'no_restriction' || v === 'none') return 'no_restriction';
+  return 'unspecified';
+}
+
+// Parse a pasted cookie blob from a cookie-export extension. Supports JSON
+// (Cookie-Editor / EditThisCookie), Netscape cookies.txt, and a plain
+// "name=value; name=value" header string. Returns normalized cookie objects.
+function parseCookieBlob(raw) {
+  raw = String(raw || '').trim();
+  const out = [];
+  if (!raw) return out;
+
+  // JSON array/object
+  if (raw[0] === '[' || raw[0] === '{') {
+    try {
+      let arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) arr = arr.cookies || [arr];
+      for (const c of arr) {
+        if (!c || !c.name) continue;
+        out.push({
+          name: c.name,
+          value: c.value != null ? String(c.value) : '',
+          domain: c.domain || '',
+          path: c.path || '/',
+          secure: c.secure !== false,
+          httpOnly: !!(c.httpOnly || c.httponly),
+          sameSite: normalizeSameSite(c.sameSite),
+          expirationDate: c.expirationDate || c.expires || undefined
+        });
+      }
+      if (out.length) return out;
+    } catch (e) { /* fall through to other formats */ }
+  }
+
+  // Netscape cookies.txt (tab-separated): domain, includeSub, path, secure, expiry, name, value
+  if (/\t/.test(raw) || /^#\s*(HTTP Cookie File|Netscape)/im.test(raw)) {
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line || line.startsWith('#')) continue;
+      const f = line.split('\t');
+      if (f.length >= 7) {
+        out.push({
+          domain: f[0], path: f[2] || '/', secure: /true/i.test(f[3]),
+          expirationDate: parseInt(f[4], 10) || undefined,
+          name: f[5], value: f[6], httpOnly: false, sameSite: 'no_restriction'
+        });
+      }
+    }
+    if (out.length) return out;
+  }
+
+  // Plain header string
+  for (const part of raw.split(/;\s*/)) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    out.push({ name: part.slice(0, idx).trim(), value: part.slice(idx + 1).trim(), domain: '', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' });
+  }
+  return out;
+}
+
+// Browser-assisted YouTube/Google login. Google blocks embedded sign-in
+// ("this browser may not be secure"), so the user exports their google.com +
+// youtube.com cookies from a real browser and we replicate the full session
+// (preserving httpOnly/secure attributes — Google's session cookies are httpOnly).
+ipcMain.handle('set-google-cookies', async (event, blob) => {
+  try {
+    const all = parseCookieBlob(blob);
+    // Only import Google-family cookies (ignore anything unrelated in the export).
+    const relevant = all.filter(c => {
+      const d = (c.domain || '').replace(/^\./, '').toLowerCase();
+      return /(^|\.)(google\.com|youtube\.com|youtube-nocookie\.com|ytimg\.com|gstatic\.com|googleapis\.com)$/.test(d) || d === '';
+    });
+    if (relevant.length === 0) {
+      return { success: false, error: 'No Google/YouTube cookies found in that paste. Export cookies for youtube.com (and google.com) and paste the whole thing.' };
+    }
+
+    // Require at least one core Google account session cookie.
+    const coreNames = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LSID', '__Secure-1PSID', '__Secure-3PSID'];
+    const hasCore = relevant.some(c => coreNames.includes(c.name));
+    if (!hasCore) {
+      return { success: false, error: 'Those cookies are missing the Google sign-in session (e.g. __Secure-1PSID/SID). Make sure you are logged in and exported google.com cookies too.' };
+    }
+
+    const ses = session.fromPartition('persist:default');
+    let setCount = 0;
+    for (const c of relevant) {
+      const host = (c.domain || 'youtube.com').replace(/^\./, '');
+      const url = `https://${host}${c.path && c.path.startsWith('/') ? c.path : '/'}`;
+      // Clear any existing same-named cookie first (avoids httpOnly-overwrite blocks).
+      try {
+        const existing = await ses.cookies.get({ name: c.name });
+        for (const ex of existing) {
+          const exHost = (ex.domain || '').replace(/^\./, '');
+          if (exHost && host.endsWith(exHost.split('.').slice(-2).join('.'))) {
+            await ses.cookies.remove(`https://${exHost}${ex.path || '/'}`, c.name);
+          }
+        }
+      } catch (e) {}
+      try {
+        await ses.cookies.set({
+          url,
+          name: c.name,
+          value: c.value,
+          domain: c.domain || undefined,
+          path: c.path || '/',
+          secure: c.secure !== false,
+          httpOnly: !!c.httpOnly,
+          sameSite: normalizeSameSite(c.sameSite),
+          expirationDate: c.expirationDate || (Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365)
+        });
+        setCount++;
+      } catch (e) {
+        addLog(`[Auth] Could not set Google cookie ${c.name}: ${e.message}`);
+      }
+    }
+
+    // Best-effort: confirm youtube.com sees us as logged in (non-blocking).
+    let loggedIn = false;
+    try {
+      const ytCookieHeader = relevant
+        .filter(c => /youtube\.com$/.test((c.domain || '').replace(/^\./, '')))
+        .map(c => `${c.name}=${c.value}`).join('; ');
+      if (ytCookieHeader) {
+        const resp = await net.fetch('https://www.youtube.com/', {
+          headers: { 'Cookie': ytCookieHeader, 'User-Agent': normalizedUserAgent }
+        });
+        const html = await resp.text();
+        loggedIn = /"LOGGED_IN":\s*true/.test(html) || /"logged_in":\s*true/i.test(html);
+      }
+    } catch (e) {}
+
+    addLog(`[Auth] Imported Google/YouTube session: set ${setCount}/${relevant.length} cookies (youtube reports logged-in: ${loggedIn}).`);
+
+    config.accounts = config.accounts || {};
+    config.accounts.youtube = 'YouTube User';
+    saveConfig();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('login-success', { platform: 'youtube', username: 'YouTube User' });
+    }
+    return { success: true, username: 'YouTube User', cookiesSet: setCount, verified: loggedIn };
+  } catch (err) {
+    addLog(`[Auth] Google cookie import failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+});
+
 let currentDownloadFileName = null;
 
 ipcMain.handle('download-clip', async (event, url, filename) => {

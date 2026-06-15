@@ -24,12 +24,14 @@ export function setupLoginPortalListeners() {
   });
 
   setupTwitchImportModal();
+  setupYoutubeImportModal();
 
   document.querySelectorAll('.connect-account-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const platform = btn.dataset.platform;
-      // Twitch blocks embedded login (Kasada error 5025), so use browser-assisted import.
+      // Twitch/YouTube block embedded login, so use browser-assisted cookie import.
       if (platform === 'twitch') { openTwitchImportModal(); return; }
+      if (platform === 'youtube') { openYoutubeImportModal(); return; }
       btn.disabled = true;
       btn.innerHTML = `<span class="pulse-dot"></span> Connecting...`;
       try {
@@ -51,6 +53,7 @@ export function setupLoginPortalListeners() {
     btn.addEventListener('click', async () => {
       const platform = btn.dataset.platform;
       if (platform === 'twitch') { openTwitchImportModal(); return; }
+      if (platform === 'youtube') { openYoutubeImportModal(); return; }
       btn.disabled = true;
       const originalHtml = btn.innerHTML;
       btn.innerHTML = `<span class="pulse-dot"></span> Re-auth...`;
@@ -190,5 +193,67 @@ function setupTwitchImportModal() {
 
   importBtn?.addEventListener('click', doImport);
   // Ctrl/Cmd+Enter submits (plain Enter inserts a newline in the textarea).
+  input?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) doImport(); });
+}
+
+// ── Browser-assisted YouTube login modal ─────────────────────────────────────
+function openYoutubeImportModal() {
+  const overlay = document.getElementById('youtube-import-overlay');
+  if (!overlay) return;
+  const input = document.getElementById('yti-input');
+  const status = document.getElementById('yti-status');
+  if (input) input.value = '';
+  if (status) { status.textContent = ''; status.className = 'ti-status'; }
+  overlay.style.display = 'flex';
+  setTimeout(() => input?.focus(), 50);
+}
+
+function closeYoutubeImportModal() {
+  const overlay = document.getElementById('youtube-import-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function setupYoutubeImportModal() {
+  const overlay = document.getElementById('youtube-import-overlay');
+  if (!overlay) return;
+  const input = document.getElementById('yti-input');
+  const status = document.getElementById('yti-status');
+  const importBtn = document.getElementById('yti-import');
+
+  document.getElementById('yti-open-yt')?.addEventListener('click', () => {
+    window.api.openExternal('https://www.youtube.com/');
+  });
+  document.getElementById('yti-cancel')?.addEventListener('click', closeYoutubeImportModal);
+  document.getElementById('yti-close')?.addEventListener('click', closeYoutubeImportModal);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeYoutubeImportModal(); });
+
+  const doImport = async () => {
+    const blob = (input?.value || '').trim();
+    if (!blob) {
+      if (status) { status.textContent = 'Paste your exported cookies first.'; status.className = 'ti-status error'; }
+      return;
+    }
+    if (status) { status.textContent = 'Importing session…'; status.className = 'ti-status pending'; }
+    if (importBtn) importBtn.disabled = true;
+    try {
+      const res = await window.api.setGoogleCookies(blob);
+      if (res?.success) {
+        const msg = res.verified
+          ? `Connected! (${res.cookiesSet} cookies, verified)`
+          : `Imported ${res.cookiesSet} cookies — open a YouTube stream to confirm.`;
+        if (status) { status.textContent = msg; status.className = 'ti-status ok'; }
+        appendLogMessage(`[System] YouTube session imported (${res.cookiesSet} cookies, verified: ${!!res.verified}).`);
+        setTimeout(closeYoutubeImportModal, 1100);
+      } else {
+        if (status) { status.textContent = res?.error || 'Import failed.'; status.className = 'ti-status error'; }
+      }
+    } catch (err) {
+      if (status) { status.textContent = err.message; status.className = 'ti-status error'; }
+    } finally {
+      if (importBtn) importBtn.disabled = false;
+    }
+  };
+
+  importBtn?.addEventListener('click', doImport);
   input?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) doImport(); });
 }
