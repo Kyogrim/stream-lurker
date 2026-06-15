@@ -52,7 +52,18 @@ let pollIntervalId = null;
 let countdownTimerId = null;
 let nextScanTime = 0;
 const logs = [];
-let normalizedUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// Spoofed Chrome identity for the embedded browser. The bundled Chromium (124,
+// from Electron 30) is too old for platform login gates and Electron leaks into
+// the UA/client-hints. Keep these THREE in sync or bot-detection flags the
+// mismatch as "browser not supported": (1) the UA string below, (2) the
+// Sec-CH-UA request headers, and (3) the preload's navigator.userAgentData
+// (which derives its version from the UA string automatically). To re-bump when
+// platforms reject the version again, just change these two values.
+const SPOOF_CHROME_MAJOR = '137';
+const SPOOF_CHROME_FULL = '137.0.0.0';
+
+let normalizedUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${SPOOF_CHROME_FULL} Safari/537.36`;
 // The original, un-normalized Electron UA captured at startup. Login windows use
 // THIS (not the normalized one) so navigator.userAgent stays consistent with
 // navigator.userAgentData / Sec-CH-UA. Stripping Electron from the UA string while
@@ -531,7 +542,7 @@ async function checkKickStreamer(username) {
   try {
     const response = await net.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': normalizedUserAgent,
         'Accept': 'application/json',
         'Accept-Language': 'en-US,en;q=0.9'
       }
@@ -588,7 +599,7 @@ async function checkYoutubeStreamer(username) {
   try {
     const response = await net.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': normalizedUserAgent,
         'Accept-Language': 'en-US,en;q=0.9'
       }
     });
@@ -658,7 +669,7 @@ async function checkRumbleStreamer(username) {
   try {
     response = await net.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': normalizedUserAgent
       }
     });
 
@@ -667,7 +678,7 @@ async function checkRumbleStreamer(username) {
       url = `https://rumble.com/user/${username}`;
       response = await net.fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          'User-Agent': normalizedUserAgent
         }
       });
     }
@@ -992,19 +1003,22 @@ app.whenReady().then(async () => {
   loadConfig();
   
   const rawUA = session.defaultSession.getUserAgent();
-  defaultElectronUA = rawUA; // preserve the consistent original for login windows
-  const userAgent = rawUA
+  defaultElectronUA = rawUA; // preserve the consistent original for reference/debugging
+  // Strip Electron + the app token, AND bump the (old) bundled Chrome version to a
+  // current one so platforms don't reject it. navigator.userAgent in pages derives
+  // navigator.userAgentData from this, so the spoofed version flows through.
+  normalizedUserAgent = rawUA
     .replace(/stream-lurker\/\S+/i, '')
     .replace(/Electron\/\S+/i, '')
+    .replace(/Chrome\/[\d.]+/i, `Chrome/${SPOOF_CHROME_FULL}`)
     .replace(/\s+/g, ' ')
     .trim();
-  addLog(`[System] Normalized User-Agent for standard Chrome features: ${userAgent}`);
-  session.defaultSession.setUserAgent(userAgent);
-  session.fromPartition('persist:default').setUserAgent(userAgent);
+  addLog(`[System] Spoofed User-Agent for embedded browser: ${normalizedUserAgent}`);
+  session.defaultSession.setUserAgent(normalizedUserAgent);
+  session.fromPartition('persist:default').setUserAgent(normalizedUserAgent);
 
-  // Spoof Sec-Ch-Ua client hints on Twitch requests to match normalized User-Agent fingerprint
-  const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
-  const chromeMajorVersion = chromeVersionMatch ? chromeVersionMatch[1] : '124';
+  // Spoof Sec-CH-UA client hints to match the spoofed User-Agent fingerprint.
+  const chromeMajorVersion = SPOOF_CHROME_MAJOR;
   const osPlatform = process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : 'Windows';
   const platformString = `"${osPlatform}"`;
 
@@ -1026,8 +1040,11 @@ app.whenReady().then(async () => {
     }
   );
 
+  // Spoof Sec-CH-UA client hints on ALL requests (not just Twitch) so Kick,
+  // YouTube/Google and Rumble don't see the real Electron brand or a stale Chrome
+  // version. These must match navigator.userAgentData from the stealth preload.
   session.fromPartition('persist:default').webRequest.onBeforeSendHeaders(
-    { urls: ['*://*.twitch.tv/*', '*://*.twitchcdn.net/*'] },
+    { urls: ['*://*/*'] },
     (details, callback) => {
       const headers = details.requestHeaders;
       const setHeader = (name, val) => {
@@ -1104,17 +1121,6 @@ app.whenReady().then(async () => {
 
   // Run immediate first scan after a short delay to let frontend mount
   setTimeout(performScan, 3000);
-
-  // Diagnostic drops fetch
-  setTimeout(async () => {
-    addLog('[Drops Test] Running diagnostic drops fetch...');
-    try {
-      const res = await handleFetchDropCampaigns();
-      addLog(`[Drops Test] Result: success=${res.success}, error=${res.error || 'none'}, watchCampaigns=${res.watchCampaigns ? res.watchCampaigns.length : 0}`);
-    } catch (e) {
-      addLog(`[Drops Test] Diagnostic threw error: ${e.message}`);
-    }
-  }, 10000);
 
   // Setup countdown update clock
   if (countdownTimerId) clearInterval(countdownTimerId);
@@ -1339,19 +1345,18 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
         partition: 'persist:default',
         nodeIntegration: false,
         contextIsolation: true,
-        sandbox: false
+        sandbox: false,
+        preload: path.join(__dirname, 'src', 'twitch-preload.js')
       }
     });
 
     loginWin.setMenuBarVisibility(false);
-    // Use the original (un-normalized) Electron UA for the login window so the
-    // UA string stays consistent with the client hints. A stripped UA here is what
-    // trips Google's "browser may not be secure" block. Matches the initial build
-    // where login worked. Applies only to this window, not stream containers.
-    if (defaultElectronUA) {
-      loginWin.webContents.setUserAgent(defaultElectronUA);
-    }
-    loginWin.loadURL(loginUrl, defaultElectronUA ? { userAgent: defaultElectronUA } : undefined);
+    // Use the spoofed clean Chrome UA for every platform. It stays consistent with
+    // the globally-spoofed Sec-CH-UA headers and the preload's navigator.userAgentData,
+    // so no Electron brand or stale version leaks to trip "browser not supported".
+    const uaToUse = normalizedUserAgent;
+    loginWin.webContents.setUserAgent(uaToUse);
+    loginWin.loadURL(loginUrl, { userAgent: uaToUse });
 
     loginWin.once('ready-to-show', () => {
       loginWin.show();
@@ -2447,7 +2452,7 @@ async function fetchYoutubeSchedule(username) {
     const url = `https://www.youtube.com/${cleanUsername}/live`;
     const response = await net.fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': normalizedUserAgent,
         'Accept-Language': 'en-US,en;q=0.9'
       }
     });
@@ -2918,6 +2923,115 @@ ipcMain.handle('open-external', async (event, url) => {
     }
     return { success: false, error: 'Invalid URL' };
   } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Browser-assisted Twitch login: Twitch's protected_login gate (Kasada) rejects
+// embedded browsers (error_code 5025). Instead, the user signs in with their real
+// browser and pastes their cookies. A token-ONLY import gets logged out on load
+// because the session is bound to the browser's device cookies (unique_id, etc.),
+// so we accept the FULL `document.cookie` string and replicate the whole session.
+ipcMain.handle('set-twitch-token', async (event, rawInput) => {
+  try {
+    const raw = String(rawInput || '').trim();
+
+    // Parse the input. Two accepted forms:
+    //  (a) a full `document.cookie` string: "auth-token=ab..; unique_id=..; login=.."
+    //  (b) just the auth-token value (or "auth-token=VALUE").
+    const pairs = [];
+    let token = '';
+    if (/;/.test(raw) || /\b\w+=/.test(raw)) {
+      for (const part of raw.split(/;\s*/)) {
+        const idx = part.indexOf('=');
+        if (idx <= 0) continue;
+        const name = part.slice(0, idx).trim();
+        const value = part.slice(idx + 1).trim();
+        if (!name || !value) continue;
+        pairs.push({ name, value });
+        if (name.toLowerCase() === 'auth-token') token = value;
+      }
+    }
+    if (!token) {
+      const m = raw.match(/auth-?token\s*[=:]\s*([a-z0-9]+)/i);
+      token = (m ? m[1] : raw).replace(/^["']|["']$/g, '').trim();
+      if (token && !pairs.some(p => p.name.toLowerCase() === 'auth-token')) {
+        pairs.push({ name: 'auth-token', value: token });
+      }
+    }
+    if (!/^[a-z0-9]{20,60}$/i.test(token)) {
+      return { success: false, error: 'Could not find an auth-token. On twitch.tv open the console (F12) and run copy(document.cookie), then paste that here.' };
+    }
+
+    // 1) Verify the token resolves a user BEFORE touching cookies (non-destructive).
+    let username = '';
+    try {
+      const resp = await net.fetch('https://gql.twitch.tv/gql', {
+        method: 'POST',
+        headers: {
+          'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
+          'Authorization': `OAuth ${token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': normalizedUserAgent
+        },
+        body: JSON.stringify([{
+          operationName: 'CurrentUserCheck',
+          query: 'query CurrentUserCheck { currentUser { id login displayName } }'
+        }])
+      });
+      const data = await resp.json();
+      username = data[0]?.data?.currentUser?.login || '';
+      addLog(`[Auth] Token validation ${username ? 'OK as ' + username : 'returned no user'} (http ${resp.status}).`);
+    } catch (e) {
+      addLog(`[Auth] Token validation request errored: ${e.message}`);
+    }
+    if (!username) {
+      return { success: false, error: 'Twitch did not accept that token. Make sure you copied it while logged in, then try again.' };
+    }
+
+    // Ensure a `login` cookie is present so the web client knows the username.
+    if (!pairs.some(p => p.name.toLowerCase() === 'login')) {
+      pairs.push({ name: 'login', value: username });
+    }
+
+    // 2) Clear old auth cookies, then write the imported session cookies. Importing
+    // the whole set (auth-token + unique_id + persistent + ...) keeps the session
+    // device-consistent so Twitch's client doesn't log it out. (Chromium won't let a
+    // JS-readable cookie overwrite an httpOnly one, so clear first.)
+    const ses = session.fromPartition('persist:default');
+    const expirationDate = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365;
+    for (const p of pairs) {
+      try {
+        const existing = await ses.cookies.get({ name: p.name });
+        for (const c of existing) {
+          if (!/twitch\.tv$/i.test(c.domain.replace(/^\./, ''))) continue;
+          const scheme = c.secure ? 'https' : 'http';
+          const host = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
+          await ses.cookies.remove(`${scheme}://${host}${c.path || '/'}`, p.name);
+        }
+      } catch (e) {}
+    }
+    let setCount = 0;
+    for (const p of pairs) {
+      try {
+        await ses.cookies.set({ url: 'https://www.twitch.tv', name: p.name, value: p.value, domain: '.twitch.tv', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction', expirationDate });
+        setCount++;
+      } catch (e) {
+        addLog(`[Auth] Could not set cookie ${p.name}: ${e.message}`);
+      }
+    }
+    const verify = await ses.cookies.get({ name: 'auth-token' });
+    addLog(`[Auth] Imported Twitch session for ${username}: set ${setCount}/${pairs.length} cookies (auth-token present: ${verify.length > 0}).`);
+
+    config.accounts = config.accounts || {};
+    config.accounts.twitch = username;
+    saveConfig();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('login-success', { platform: 'twitch', username });
+    }
+    return { success: true, username, cookiesSet: setCount };
+  } catch (err) {
+    addLog(`[Auth] Twitch token import failed: ${err.message}`);
     return { success: false, error: err.message };
   }
 });

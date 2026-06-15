@@ -953,6 +953,27 @@
     </main>
   </div>
 
+  <!-- Browser-assisted Twitch login modal -->
+  <div id="twitch-import-overlay" class="ti-overlay" style="display: none;">
+    <div class="ti-modal glass-panel">
+      <button class="ti-close" id="ti-close" title="Close">&times;</button>
+      <h3>Connect Twitch</h3>
+      <p class="ti-desc">Twitch blocks sign-in from inside apps like this one, so we log in using your normal browser. This is a one-time step.</p>
+      <ol class="ti-steps">
+        <li><button class="btn btn-sm ti-open-btn" id="ti-open-twitch">Open Twitch Login &rarr;</button> and sign in (if you aren't already).</li>
+        <li>On <b>twitch.tv</b>, press <b>F12</b> and click the <b>Console</b> tab.</li>
+        <li>Type <code>copy(document.cookie)</code> and press <b>Enter</b>. <span class="ti-hint">(If it warns about pasting, type <code>allow pasting</code> first, then re-run.)</span></li>
+        <li>Paste below (Ctrl+V) and click <b>Import</b>.</li>
+      </ol>
+      <textarea id="ti-token-input" class="ti-input" rows="3" placeholder="Paste your twitch.tv cookies here  (auth-token=...; unique_id=...; ...)" autocomplete="off" spellcheck="false" autocapitalize="off"></textarea>
+      <div class="ti-status" id="ti-status"></div>
+      <div class="ti-actions">
+        <button class="btn btn-sm ti-cancel" id="ti-cancel">Cancel</button>
+        <button class="btn btn-sm ti-import" id="ti-import">Import &amp; Verify</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="renderer.js"></script>
 </body>
 </html>

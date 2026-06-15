@@ -75,8 +75,8 @@ try {
 
         const ua = navigator.userAgent;
         const chromeMatch = ua.match(/Chrome\\/(\\d+)\\./);
-        const chromeVersion = chromeMatch ? chromeMatch[1] : '124';
-        const chromeFullVersion = ua.match(/Chrome\\/([\\d.]+)/) ? ua.match(/Chrome\\/([\\d.]+)/)[1] : '124.0.0.0';
+        const chromeVersion = chromeMatch ? chromeMatch[1] : '137';
+        const chromeFullVersion = ua.match(/Chrome\\/([\\d.]+)/) ? ua.match(/Chrome\\/([\\d.]+)/)[1] : '137.0.0.0';
 
         const brands = [
           { brand: 'Chromium', version: chromeVersion },
@@ -626,7 +626,34 @@ try {
     })();
   `;
 
-  webFrame.executeJavaScript(code);
+  const injectIntoMainWorld = () => {
+    const parent = document.head || document.documentElement;
+    if (!parent) return false;
+    const script = document.createElement('script');
+    // Use a text node rather than `textContent` — pages with a Trusted Types CSP
+    // (e.g. accounts.google.com) reject `script.textContent = ...` outright, which
+    // would silently kill the stealth on Google's login. Appending a text node is
+    // not a Trusted-Types-guarded sink, so it works everywhere.
+    script.appendChild(document.createTextNode(code));
+    parent.appendChild(script);
+    script.remove();
+    return true;
+  };
+
+  // At preload (document-start) the DOM root usually doesn't exist yet, so a direct
+  // appendChild throws and the stealth spoof never runs — leaving the real Electron
+  // Chromium version and userAgentData exposed to the page (a mismatch with the
+  // spoofed UA/Sec-CH-UA that trips "browser not supported"). Retry as soon as the
+  // <html> root appears, which is still before the platform's bot-detection scripts.
+  if (!injectIntoMainWorld()) {
+    const obs = new MutationObserver(() => {
+      if (injectIntoMainWorld()) obs.disconnect();
+    });
+    obs.observe(document, { childList: true, subtree: true });
+    document.addEventListener('readystatechange', () => {
+      if (injectIntoMainWorld()) obs.disconnect();
+    });
+  }
 } catch (e) {
   console.error('[Preload] Failed to inject stealth script:', e);
 }

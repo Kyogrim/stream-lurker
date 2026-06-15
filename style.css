@@ -2775,5 +2775,132 @@ input:checked + .slider:before {
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* ── Browser-assisted Twitch login modal ───────────────────────────────── */
+.ti-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+}
+
+.ti-modal {
+  position: relative;
+  width: 440px;
+  max-width: calc(100vw - 40px);
+  padding: 24px;
+  border-radius: var(--radius-md, 12px);
+  border: 1px solid var(--twitch-color, #9146ff);
+  box-shadow: 0 0 30px var(--twitch-glow, rgba(145, 70, 255, 0.4));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ti-modal h3 {
+  margin: 0;
+  color: var(--twitch-color, #9146ff);
+}
+
+.ti-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted, #a1a1aa);
+}
+
+.ti-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.ti-open-btn {
+  background: var(--twitch-color, #9146ff);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+}
+
+.ti-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text-primary, #fff);
+  font-family: monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  box-sizing: border-box;
+  word-break: break-all;
+}
+
+.ti-hint {
+  color: var(--text-muted, #a1a1aa);
+  font-size: 0.78rem;
+}
+
+.ti-steps code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.ti-input:focus {
+  outline: none;
+  border-color: var(--twitch-color, #9146ff);
+}
+
+.ti-status {
+  font-size: 0.82rem;
+  min-height: 1em;
+}
+
+.ti-status.error { color: #ef4444; }
+.ti-status.ok { color: #22c55e; }
+.ti-status.pending { color: var(--text-muted, #a1a1aa); }
+
+.ti-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ti-import {
+  background: var(--twitch-color, #9146ff);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+}
+
+.ti-cancel {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary, #fff);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.ti-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted, #a1a1aa);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ti-close:hover { color: var(--text-primary, #fff); }
+
 
 

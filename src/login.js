@@ -23,9 +23,13 @@ export function setupLoginPortalListeners() {
     setConnectionUI(platform, !!username, username);
   });
 
+  setupTwitchImportModal();
+
   document.querySelectorAll('.connect-account-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const platform = btn.dataset.platform;
+      // Twitch blocks embedded login (Kasada error 5025), so use browser-assisted import.
+      if (platform === 'twitch') { openTwitchImportModal(); return; }
       btn.disabled = true;
       btn.innerHTML = `<span class="pulse-dot"></span> Connecting...`;
       try {
@@ -46,6 +50,7 @@ export function setupLoginPortalListeners() {
   document.querySelectorAll('.login-card .reauth-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       const platform = btn.dataset.platform;
+      if (platform === 'twitch') { openTwitchImportModal(); return; }
       btn.disabled = true;
       const originalHtml = btn.innerHTML;
       btn.innerHTML = `<span class="pulse-dot"></span> Re-auth...`;
@@ -125,4 +130,65 @@ export function setupLoginPortalListeners() {
     }
     setConnectionUI(platform, false);
   });
+}
+
+// ── Browser-assisted Twitch login modal ──────────────────────────────────────
+function openTwitchImportModal() {
+  const overlay = document.getElementById('twitch-import-overlay');
+  if (!overlay) return;
+  const input = document.getElementById('ti-token-input');
+  const status = document.getElementById('ti-status');
+  if (input) input.value = '';
+  if (status) { status.textContent = ''; status.className = 'ti-status'; }
+  overlay.style.display = 'flex';
+  setTimeout(() => input?.focus(), 50);
+}
+
+function closeTwitchImportModal() {
+  const overlay = document.getElementById('twitch-import-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function setupTwitchImportModal() {
+  const overlay = document.getElementById('twitch-import-overlay');
+  if (!overlay) return;
+  const input = document.getElementById('ti-token-input');
+  const status = document.getElementById('ti-status');
+  const importBtn = document.getElementById('ti-import');
+
+  document.getElementById('ti-open-twitch')?.addEventListener('click', () => {
+    window.api.openExternal('https://www.twitch.tv/login');
+  });
+  document.getElementById('ti-cancel')?.addEventListener('click', closeTwitchImportModal);
+  document.getElementById('ti-close')?.addEventListener('click', closeTwitchImportModal);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeTwitchImportModal(); });
+
+  const doImport = async () => {
+    const token = (input?.value || '').trim();
+    if (!token) {
+      if (status) { status.textContent = 'Paste your auth-token first.'; status.className = 'ti-status error'; }
+      return;
+    }
+    if (status) { status.textContent = 'Verifying with Twitch…'; status.className = 'ti-status pending'; }
+    if (importBtn) importBtn.disabled = true;
+    try {
+      const res = await window.api.setTwitchToken(token);
+      if (res?.success) {
+        if (status) { status.textContent = `Connected as ${res.username}!`; status.className = 'ti-status ok'; }
+        appendLogMessage(`[System] Twitch connected as ${res.username} via browser import.`);
+        // main also emits 'login-success', which updates the card and syncs follows.
+        setTimeout(closeTwitchImportModal, 900);
+      } else {
+        if (status) { status.textContent = res?.error || 'Import failed.'; status.className = 'ti-status error'; }
+      }
+    } catch (err) {
+      if (status) { status.textContent = err.message; status.className = 'ti-status error'; }
+    } finally {
+      if (importBtn) importBtn.disabled = false;
+    }
+  };
+
+  importBtn?.addEventListener('click', doImport);
+  // Ctrl/Cmd+Enter submits (plain Enter inserts a newline in the textarea).
+  input?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) doImport(); });
 }

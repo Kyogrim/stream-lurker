@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   
   // Account logins via Modal Windows
   openLoginModal: (platform) => ipcRenderer.invoke('open-login-modal', { platform }),
+  setTwitchToken: (token) => ipcRenderer.invoke('set-twitch-token', token),
   logoutPlatform: (platform) => ipcRenderer.invoke('logout-platform', { platform }),
   onLoginSuccess: (callback) => safeOn('login-success', (event, data) => callback(data)),
   onSessionExpired: (callback) => safeOn('session-expired', (event, data) => callback(data)),
