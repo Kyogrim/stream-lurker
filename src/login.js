@@ -25,6 +25,7 @@ export function setupLoginPortalListeners() {
 
   setupTwitchImportModal();
   setupYoutubeImportModal();
+  setupExtensionPanel();
 
   document.querySelectorAll('.connect-account-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -194,6 +195,27 @@ function setupTwitchImportModal() {
   importBtn?.addEventListener('click', doImport);
   // Ctrl/Cmd+Enter submits (plain Enter inserts a newline in the textarea).
   input?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) doImport(); });
+}
+
+// ── 1-click login extension panel ────────────────────────────────────────────
+async function setupExtensionPanel() {
+  const codeEl = document.getElementById('ext-pairing-code');
+  const connEl = document.getElementById('ext-conn-status');
+  const folderBtn = document.getElementById('ext-open-folder');
+  if (!codeEl) return;
+
+  folderBtn?.addEventListener('click', () => window.api.openExtensionFolder());
+
+  try {
+    const info = await window.api.getExtensionInfo();
+    codeEl.textContent = info?.pairingCode || '—';
+    if (connEl) {
+      connEl.textContent = info?.port ? `· receiver active (port ${info.port})` : '· receiver not started';
+      connEl.style.color = info?.port ? 'var(--lime-color, #84cc16)' : 'var(--text-muted, #a1a1aa)';
+    }
+  } catch (e) {
+    codeEl.textContent = '—';
+  }
 }
 
 // ── Browser-assisted YouTube login modal ─────────────────────────────────────

@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, session, dialog, net, Notification, Tray, Menu, nativeImage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const extractZip = require('extract-zip');
@@ -1112,6 +1114,9 @@ app.whenReady().then(async () => {
   });
 
   createTray();
+
+  // Start the localhost receiver for the 1-click login browser extension.
+  startCookieReceiver();
 
   // Start background poller
   resetPoller();
@@ -3184,6 +3189,214 @@ ipcMain.handle('set-google-cookies', async (event, blob) => {
     addLog(`[Auth] Google cookie import failed: ${err.message}`);
     return { success: false, error: err.message };
   }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 1-click login: companion browser extension posts the user's platform cookies
+// to a localhost-only receiver, which replicates the session (same mechanism as
+// the manual paste flows above, just automated). Shared import helpers below.
+// ───────────────────────────────────────────────────────────────────────────
+
+const regDomain = (h) => String(h || '').replace(/^\./, '').split('.').slice(-2).join('.');
+
+// Write a list of normalized cookie objects to the session, clearing any existing
+// same-named cookie on the same registrable domain first (Chromium blocks a
+// JS-readable cookie from overwriting an httpOnly one).
+async function writeCookieList(cookieList, defaultDomain) {
+  const ses = session.fromPartition('persist:default');
+  const expDefault = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365;
+  let count = 0;
+  for (const c of cookieList) {
+    if (!c || !c.name) continue;
+    const domain = c.domain || defaultDomain || '';
+    const host = domain.replace(/^\./, '');
+    if (!host) continue;
+    const cpath = (c.path && c.path.startsWith('/')) ? c.path : '/';
+    try {
+      const existing = await ses.cookies.get({ name: c.name });
+      for (const ex of existing) {
+        const exHost = (ex.domain || '').replace(/^\./, '');
+        if (exHost && regDomain(exHost) === regDomain(host)) {
+          await ses.cookies.remove(`https://${exHost}${ex.path || '/'}`, c.name);
+        }
+      }
+    } catch (e) {}
+    try {
+      await ses.cookies.set({
+        url: `https://${host}${cpath}`,
+        name: c.name,
+        value: String(c.value == null ? '' : c.value),
+        domain: domain || undefined,
+        path: cpath,
+        secure: c.secure !== false,
+        httpOnly: !!c.httpOnly,
+        sameSite: normalizeSameSite(c.sameSite),
+        expirationDate: c.expirationDate || expDefault
+      });
+      count++;
+    } catch (e) {
+      addLog(`[Ext] Could not set cookie ${c.name}: ${e.message}`);
+    }
+  }
+  return count;
+}
+
+function notifyLoginSuccess(platform, username) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('login-success', { platform, username });
+  }
+}
+
+async function resolveTwitchUser(token) {
+  try {
+    const resp = await net.fetch('https://gql.twitch.tv/gql', {
+      method: 'POST',
+      headers: { 'Client-ID': TWITCH_PUBLIC_CLIENT_ID, 'Authorization': `OAuth ${token}`, 'Content-Type': 'application/json', 'User-Agent': normalizedUserAgent },
+      body: JSON.stringify([{ operationName: 'CurrentUserCheck', query: 'query CurrentUserCheck { currentUser { id login displayName } }' }])
+    });
+    const data = await resp.json();
+    return data[0]?.data?.currentUser?.login || '';
+  } catch (e) { return ''; }
+}
+
+// Import functions used by the extension receiver. Each takes an array of cookie
+// objects (as returned by chrome.cookies.getAll) for that platform.
+async function importTwitchSession(cookieList) {
+  const list = (cookieList || [])
+    .filter(c => c && c.name && /(^|\.)twitch\.tv$/.test((c.domain || '').replace(/^\./, '')))
+    .map(c => ({ ...c, httpOnly: c.name.toLowerCase() === 'auth-token' ? false : !!c.httpOnly }));
+  const token = list.find(c => c.name.toLowerCase() === 'auth-token')?.value || '';
+  if (!/^[a-z0-9]{20,60}$/i.test(token)) return { success: false, error: 'No Twitch auth-token found in the cookies. Are you logged in on twitch.tv?' };
+  const username = await resolveTwitchUser(token);
+  if (!username) return { success: false, error: 'Twitch did not accept that session.' };
+  if (!list.some(c => c.name.toLowerCase() === 'login')) {
+    list.push({ name: 'login', value: username, domain: '.twitch.tv', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' });
+  }
+  const setCount = await writeCookieList(list, '.twitch.tv');
+  config.accounts = config.accounts || {};
+  config.accounts.twitch = username;
+  saveConfig();
+  notifyLoginSuccess('twitch', username);
+  addLog(`[Ext] Imported Twitch session for ${username} (${setCount} cookies).`);
+  return { success: true, username, cookiesSet: setCount };
+}
+
+async function importGoogleSession(cookieList) {
+  const relevant = (cookieList || []).filter(c => {
+    const d = (c.domain || '').replace(/^\./, '').toLowerCase();
+    return /(^|\.)(google\.com|youtube\.com|youtube-nocookie\.com|ytimg\.com|gstatic\.com|googleapis\.com)$/.test(d);
+  });
+  if (!relevant.length) return { success: false, error: 'No Google/YouTube cookies found. Open youtube.com (logged in) first.' };
+  const coreNames = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LSID', '__Secure-1PSID', '__Secure-3PSID'];
+  if (!relevant.some(c => coreNames.includes(c.name))) return { success: false, error: 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).' };
+  const setCount = await writeCookieList(relevant, '.youtube.com');
+  let loggedIn = false;
+  try {
+    const hdr = relevant.filter(c => /youtube\.com$/.test((c.domain || '').replace(/^\./, ''))).map(c => `${c.name}=${c.value}`).join('; ');
+    if (hdr) {
+      const resp = await net.fetch('https://www.youtube.com/', { headers: { 'Cookie': hdr, 'User-Agent': normalizedUserAgent } });
+      loggedIn = /"LOGGED_IN":\s*true/.test(await resp.text());
+    }
+  } catch (e) {}
+  config.accounts = config.accounts || {};
+  config.accounts.youtube = 'YouTube User';
+  saveConfig();
+  notifyLoginSuccess('youtube', 'YouTube User');
+  addLog(`[Ext] Imported Google/YouTube session (${setCount} cookies, logged-in: ${loggedIn}).`);
+  return { success: true, username: 'YouTube User', cookiesSet: setCount, verified: loggedIn };
+}
+
+async function importKickSession(cookieList) {
+  const relevant = (cookieList || []).filter(c => /(^|\.)kick\.com$/.test((c.domain || '').replace(/^\./, '').toLowerCase()));
+  if (!relevant.length) return { success: false, error: 'No kick.com cookies found. Open kick.com (logged in) first.' };
+  if (!relevant.some(c => /session/i.test(c.name))) return { success: false, error: 'Missing the Kick session cookie.' };
+  const setCount = await writeCookieList(relevant, '.kick.com');
+  config.accounts = config.accounts || {};
+  if (!config.accounts.kick) config.accounts.kick = 'Kick User';
+  saveConfig();
+  notifyLoginSuccess('kick', config.accounts.kick);
+  addLog(`[Ext] Imported Kick session (${setCount} cookies).`);
+  return { success: true, username: config.accounts.kick, cookiesSet: setCount };
+}
+
+// Stable pairing code (persisted) the extension must present to import cookies.
+function getPairingCode() {
+  if (!config.extensionPairingCode) {
+    config.extensionPairingCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+    saveConfig();
+  }
+  return config.extensionPairingCode;
+}
+
+const RECEIVER_PORTS = [47100, 47101, 47102, 47103, 47104];
+let cookieReceiver = null;
+let cookieReceiverPort = 0;
+
+function startCookieReceiver(portIndex = 0) {
+  if (cookieReceiver) return;
+  if (portIndex >= RECEIVER_PORTS.length) { addLog('[Ext] Could not bind a cookie-receiver port (47100-47104 all in use).'); return; }
+
+  const server = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    if (req.method === 'GET' && req.url.startsWith('/ping')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ app: 'stream-lurker', version: app.getVersion() }));
+      return;
+    }
+    if (req.method !== 'POST' || !req.url.startsWith('/import')) { res.writeHead(404); res.end(); return; }
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 8e6) req.destroy(); });
+    req.on('end', async () => {
+      const reply = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      try {
+        const payload = JSON.parse(body || '{}');
+        if (String(payload.pairingCode || '').toUpperCase() !== getPairingCode()) {
+          return reply(403, { success: false, error: 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.' });
+        }
+        const platform = String(payload.platform || '').toLowerCase();
+        const cookies = Array.isArray(payload.cookies) ? payload.cookies : [];
+        let result;
+        if (platform === 'twitch') result = await importTwitchSession(cookies);
+        else if (platform === 'youtube') result = await importGoogleSession(cookies);
+        else if (platform === 'kick') result = await importKickSession(cookies);
+        else result = { success: false, error: 'Unknown platform' };
+        reply(200, result);
+      } catch (e) {
+        reply(400, { success: false, error: e.message });
+      }
+    });
+  });
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') startCookieReceiver(portIndex + 1);
+    else addLog(`[Ext] Cookie receiver error: ${err.message}`);
+  });
+  server.listen(RECEIVER_PORTS[portIndex], '127.0.0.1', () => {
+    cookieReceiver = server;
+    cookieReceiverPort = RECEIVER_PORTS[portIndex];
+    addLog(`[Ext] 1-click login receiver on 127.0.0.1:${cookieReceiverPort} (pairing code ${getPairingCode()}).`);
+  });
+}
+
+// Resolve the on-disk path of the bundled extension (works packaged or in dev).
+function getExtensionPath() {
+  const packaged = path.join(process.resourcesPath || '', 'extension');
+  if (process.resourcesPath && fs.existsSync(packaged)) return packaged;
+  return path.join(__dirname, 'extension');
+}
+
+ipcMain.handle('get-extension-info', () => ({
+  pairingCode: getPairingCode(),
+  port: cookieReceiverPort,
+  ports: RECEIVER_PORTS,
+  extensionPath: getExtensionPath()
+}));
+
+ipcMain.handle('open-extension-folder', async () => {
+  try { await shell.openPath(getExtensionPath()); return { success: true }; }
+  catch (e) { return { success: false, error: e.message }; }
 });
 
 let currentDownloadFileName = null;

@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   openLoginModal: (platform) => ipcRenderer.invoke('open-login-modal', { platform }),
   setTwitchToken: (token) => ipcRenderer.invoke('set-twitch-token', token),
   setGoogleCookies: (blob) => ipcRenderer.invoke('set-google-cookies', blob),
+  getExtensionInfo: () => ipcRenderer.invoke('get-extension-info'),
+  openExtensionFolder: () => ipcRenderer.invoke('open-extension-folder'),
   logoutPlatform: (platform) => ipcRenderer.invoke('logout-platform', { platform }),
   onLoginSuccess: (callback) => safeOn('login-success', (event, data) => callback(data)),
   onSessionExpired: (callback) => safeOn('session-expired', (event, data) => callback(data)),

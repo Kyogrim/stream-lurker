@@ -193,6 +193,21 @@
           <p>Log in securely to Twitch, Kick, YouTube, and Rumble inside Stream Lurker. All active streams will automatically share these credentials.</p>
         </div>
 
+        <!-- 1-click login via the companion browser extension -->
+        <div class="glass-panel ext-login-panel">
+          <div class="ext-login-head">
+            <h3>⚡ 1-Click Login <span class="ext-badge">Recommended</span></h3>
+            <button id="ext-open-folder" class="btn btn-sm">Open Extension Folder</button>
+          </div>
+          <p class="ext-desc">Twitch, YouTube and Kick block signing in from inside apps. The free <b>Stream Lurker Connector</b> browser extension imports your already-logged-in session in one click — no copy-pasting cookies.</p>
+          <ol class="ext-steps">
+            <li>Click <b>Open Extension Folder</b>, then in your browser go to <b>Extensions → Developer mode → Load unpacked</b> and select that folder.</li>
+            <li>Open the extension and enter this pairing code: <code id="ext-pairing-code">…</code> <span class="ext-conn" id="ext-conn-status"></span></li>
+            <li>Log in to Twitch / YouTube / Kick in your browser, then click <b>Connect</b> in the extension.</li>
+          </ol>
+          <p class="ext-fallback">Prefer to do it manually? The <b>Connect Account</b> buttons below still work (paste cookies).</p>
+        </div>
+
         <div class="logins-grid">
           <!-- Twitch Login Panel -->
           <div class="glass-panel login-card twitch-login-card">

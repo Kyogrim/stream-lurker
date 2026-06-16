@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { --bg:#0e0e12; --panel:#17171d; --text:#f4f4f5; --muted:#a1a1aa; --border:#2a2a33; }
+    * { box-sizing: border-box; }
+    body { width: 300px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
+    h1 { font-size: 14px; margin: 0 0 2px; }
+    .sub { font-size: 11px; color: var(--muted); margin: 0 0 12px; }
+    label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+    input { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--border); background: #000; color: var(--text); font-family: monospace; letter-spacing: 1px; text-transform: uppercase; }
+    input:focus { outline: none; border-color: #7c3aed; }
+    .status-line { font-size: 11px; margin: 8px 0 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex-shrink: 0; }
+    .dot.ok { background: #22c55e; }
+    .btns { display: flex; flex-direction: column; gap: 8px; }
+    button { width: 100%; padding: 9px; border: none; border-radius: 7px; font-weight: 600; font-size: 13px; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .tw { background: #9146ff; }
+    .yt { background: #ff0000; }
+    .kk { background: #53fc18; color: #000; }
+    .result { font-size: 11px; min-height: 14px; margin-top: 10px; }
+    .result.ok { color: #22c55e; }
+    .result.err { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <h1>Stream Lurker Connector</h1>
+  <p class="sub">Sends your logged-in session to the desktop app.</p>
+
+  <label for="code">Pairing code (from the app)</label>
+  <input id="code" placeholder="XXXXXXXX" maxlength="16" autocomplete="off" spellcheck="false">
+
+  <div class="status-line"><span class="dot" id="dot"></span><span id="conn">Looking for Stream Lurker…</span></div>
+
+  <div class="btns">
+    <button class="tw" data-platform="twitch">Connect Twitch</button>
+    <button class="yt" data-platform="youtube">Connect YouTube</button>
+    <button class="kk" data-platform="kick">Connect Kick</button>
+  </div>
+
+  <div class="result" id="result"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
