@@ -24,6 +24,8 @@ const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 let mainWindow = null;
 let tray = null;
 const activeWindows = new Map(); // Key: platform:username -> true
+const sessionStarts = new Map(); // Key: platform:username -> session start timestamp (ms), for duration tracking
+const popoutWindows = new Map(); // Key: platform:username -> always-on-top BrowserWindow (pop-out / PiP)
 let activeQuestStreamer = null; // Track active quest streamer (lowercase) to prevent preemption/auto-close
 let config = {
   streamers: [],
@@ -115,6 +117,12 @@ function loadConfig() {
       }
       if (!config.watchTime.streamers) config.watchTime.streamers = {};
       if (!config.watchTime.platforms) config.watchTime.platforms = { twitch: 0, kick: 0, youtube: 0, rumble: 0 };
+      if (config.watchTime.sessions == null) config.watchTime.sessions = 0;
+      if (!config.watchTime.streamerSessions) config.watchTime.streamerSessions = {};
+      if (!config.watchTime.daily) config.watchTime.daily = {};
+      if (config.watchTime.longestSessionMs == null) config.watchTime.longestSessionMs = 0;
+      if (!config.watchTime.streamerLongestMs) config.watchTime.streamerLongestMs = {};
+      if (!config.watchTime.streamerLastSeen) config.watchTime.streamerLastSeen = {};
       if (!config.calendarEvents) config.calendarEvents = [];
       if (!config.syncedCalendarEvents) config.syncedCalendarEvents = [];
       if (!config.seventvLastUpdated) config.seventvLastUpdated = null;
@@ -129,7 +137,7 @@ function loadConfig() {
       addLog('Configuration loaded successfully.');
     } else {
       addLog('No existing configuration found. Creating defaults...');
-      config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 } };
+      config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 }, sessions: 0, streamerSessions: {}, daily: {}, longestSessionMs: 0, streamerLongestMs: {}, streamerLastSeen: {} };
       config.calendarEvents = [];
       config.syncedCalendarEvents = [];
       config.seventvLastUpdated = null;
@@ -330,7 +338,7 @@ function closeAllStreamContainers() {
 // Spawns a dedicated browser container window for a live streamer
 function spawnStreamContainer(platform, username) {
   const key = `${platform.toLowerCase()}:${username.toLowerCase()}`;
-  
+
   if (activeWindows.has(key)) {
     addLog(`Tab for ${platform}:${username} is already active.`);
     return;
@@ -339,8 +347,22 @@ function spawnStreamContainer(platform, username) {
   addLog(`Spawning stream tab for ${platform}:${username}...`);
   activeWindows.set(key, true);
 
+  // Count this as a new lurk session for leaderboard stats (global + per-streamer)
+  // and record the start time so we can measure this session's duration on close.
+  if (!config.watchTime) {
+    config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 }, sessions: 0, streamerSessions: {} };
+  }
+  if (!config.watchTime.streamerSessions) config.watchTime.streamerSessions = {};
+  if (!config.watchTime.streamerLastSeen) config.watchTime.streamerLastSeen = {};
+  config.watchTime.sessions = (config.watchTime.sessions || 0) + 1;
+  config.watchTime.streamerSessions[key] = (config.watchTime.streamerSessions[key] || 0) + 1;
+  config.watchTime.streamerLastSeen[key] = Date.now();
+  sessionStarts.set(key, Date.now());
+  watchTimeDirty = true;
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('open-stream-tab', { platform, username });
+    mainWindow.webContents.send('watch-time-update', config.watchTime);
   }
 }
 
@@ -349,6 +371,40 @@ function sendStreamStatusToUI() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     const openStreams = Array.from(activeWindows.keys());
     mainWindow.webContents.send('active-containers-update', openStreams);
+  }
+}
+
+// Local calendar date key (YYYY-MM-DD) for the daily watch-time buckets that
+// power the activity heatmap and streaks.
+function todayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Record a finished lurk session's wall-clock duration into the longest-session
+// aggregates (global + per-streamer). Sub-second blips are ignored.
+function finalizeSession(key, startMs) {
+  const ms = Date.now() - startMs;
+  if (!config.watchTime || ms < 1000) return;
+  if (!config.watchTime.streamerLongestMs) config.watchTime.streamerLongestMs = {};
+  config.watchTime.longestSessionMs = Math.max(config.watchTime.longestSessionMs || 0, ms);
+  config.watchTime.streamerLongestMs[key] = Math.max(config.watchTime.streamerLongestMs[key] || 0, ms);
+  watchTimeDirty = true;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('watch-time-update', config.watchTime);
+  }
+}
+
+// Build the watch URL for a stream (fallback for pop-out windows when the
+// renderer can't supply the webview's current URL).
+function streamWatchUrl(platform, username) {
+  const u = username.toLowerCase();
+  switch (platform.toLowerCase()) {
+    case 'twitch': return `https://www.twitch.tv/${u}`;
+    case 'kick': return `https://kick.com/${u}`;
+    case 'youtube': return `https://www.youtube.com/${u.startsWith('@') ? u : '@' + u}/live`;
+    case 'rumble': return `https://rumble.com/c/${u}`;
+    default: return '';
   }
 }
 
@@ -2247,6 +2303,49 @@ ipcMain.handle('open-stream-container', (event, { platform, username }) => {
   return true;
 });
 
+// Pop a single stream out into its own always-on-top window (PiP-style). Reuses
+// the shared persist:default session so the user's login carries over. `url` is
+// the webview's current URL when available, so YouTube live-video state etc. is
+// preserved; otherwise we fall back to the channel page.
+ipcMain.handle('popout-stream', (event, { platform, username, url }) => {
+  const key = `${platform.toLowerCase()}:${username.toLowerCase()}`;
+
+  const existing = popoutWindows.get(key);
+  if (existing && !existing.isDestroyed()) {
+    existing.show();
+    existing.focus();
+    return true;
+  }
+
+  const ses = session.fromPartition('persist:default');
+  const win = new BrowserWindow({
+    width: 640,
+    height: 360,
+    title: `${username} · ${platform.toUpperCase()}`,
+    alwaysOnTop: true,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    webPreferences: {
+      partition: 'persist:default',
+      backgroundThrottling: false,
+      autoplayPolicy: 'no-user-gesture-required',
+    },
+  });
+  win.setMenuBarVisibility(false);
+  win.webContents.setUserAgent(ses.getUserAgent());
+  win.loadURL(url || streamWatchUrl(platform, username));
+  popoutWindows.set(key, win);
+  addLog(`[Pop-out] Opened floating window for ${username} on ${platform.toUpperCase()}.`);
+
+  win.on('closed', () => {
+    popoutWindows.delete(key);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('stream-popout-closed', { platform, username });
+    }
+  });
+  return true;
+});
+
 // Move a streamer to the top of the watch-priority list (config.streamers order
 // is the lurk priority) and open their stream container immediately. Adds them
 // to the tracked list if they weren't already there.
@@ -2274,6 +2373,21 @@ ipcMain.handle('close-stream-container', (event, { platform, username }) => {
 });
 
 ipcMain.handle('update-active-tabs', (event, tabsList) => {
+  // The renderer's grid is the source of truth for what's open. Diff the
+  // incoming list against tracked session starts: any key that disappeared had
+  // its container closed, so finalize that session's duration.
+  const incoming = new Set(tabsList);
+  for (const [key, start] of sessionStarts) {
+    if (!incoming.has(key)) {
+      finalizeSession(key, start);
+      sessionStarts.delete(key);
+    }
+  }
+  // Track start times for any open key we aren't already timing (e.g. restored).
+  for (const t of tabsList) {
+    if (!sessionStarts.has(t)) sessionStarts.set(t, Date.now());
+  }
+
   activeWindows.clear();
   tabsList.forEach(t => activeWindows.set(t, true));
   sendStreamStatusToUI();
@@ -2372,22 +2486,32 @@ function startWatchTimeTracking() {
     if (activeWindows.size === 0) return;
     
     if (!config.watchTime) {
-      config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 } };
+      config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 }, sessions: 0 };
     }
     if (!config.watchTime.streamers) config.watchTime.streamers = {};
     if (!config.watchTime.platforms) config.watchTime.platforms = { twitch: 0, kick: 0, youtube: 0, rumble: 0 };
-    
+    if (config.watchTime.sessions == null) config.watchTime.sessions = 0;
+    if (!config.watchTime.streamerSessions) config.watchTime.streamerSessions = {};
+    if (!config.watchTime.daily) config.watchTime.daily = {};
+
     let updated = false;
     for (const key of activeWindows.keys()) {
       const [platform, username] = key.split(':');
       if (!platform || !username) continue;
-      
+
       const streamerKey = `${platform}:${username}`;
       config.watchTime.streamers[streamerKey] = (config.watchTime.streamers[streamerKey] || 0) + 1;
       config.watchTime.platforms[platform] = (config.watchTime.platforms[platform] || 0) + 1;
       updated = true;
     }
-    
+
+    // One calendar minute of lurking for today (regardless of how many streams
+    // are open) — drives the daily activity heatmap and streak counters.
+    if (updated) {
+      const dk = todayKey();
+      config.watchTime.daily[dk] = (config.watchTime.daily[dk] || 0) + 1;
+    }
+
     if (updated) {
       watchTimeDirty = true;
       if (mainWindow && !mainWindow.isDestroyed()) {

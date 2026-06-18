@@ -11,12 +11,14 @@ import {
   closeAllStreamTabs,
   reloadAllStreamContainers,
   setupGlobalGhostButton,
+  setCellPoppedOut,
 } from './src/multi-lurk.js';
+import { setupLiveNow, renderLiveNow } from './src/live-now.js';
 import { renderStreamsGrid, updateStats } from './src/dashboard.js';
 import { renderMonitoredList } from './src/streamers.js';
 import { renderExtensionsList, renderExtensionCatalog } from './src/extensions.js';
 import { renderFollowsList, setupFollowsHandlers } from './src/follows.js';
-import { renderLeaderboard } from './src/leaderboard.js';
+import { renderLeaderboard, setupLeaderboard } from './src/leaderboard.js';
 import { populateCalendarFormDays, renderCalendar, setupCalendarHandlers } from './src/calendar.js';
 import { setupLoginPortalListeners } from './src/login.js';
 import { hydrateSettingsUI, applyServiceToggles, setupSettingsHandlers } from './src/settings.js';
@@ -223,18 +225,21 @@ function setupBackendListeners() {
     state.currentStatuses = statuses;
     renderStreamsGrid();
     updateStats();
+    renderLiveNow();
   });
 
   window.api.onActiveContainersUpdate((openContainers) => {
     state.activeContainers = openContainers;
     renderStreamsGrid();
     updateStats();
+    renderLiveNow();
   });
 
   window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username));
   window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username));
   window.api.onCloseAllStreamTabs(() => closeAllStreamTabs());
   window.api.onReloadStreamContainers(() => reloadAllStreamContainers());
+  window.api.onStreamPopoutClosed(({ platform, username }) => setCellPoppedOut(platform, username, false));
 
   window.api.onWatchTimeUpdate((data) => {
     if (state.currentConfig) {
@@ -255,6 +260,8 @@ async function init() {
   setupSettingsHandlers();
   setupFollowsHandlers();
   setupCalendarHandlers();
+  setupLeaderboard();
+  setupLiveNow();
   setupUpdater();
 
   try {

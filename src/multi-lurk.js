@@ -158,6 +158,12 @@ function buildCellHTML(platform, username, isQualityDisabled) {
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
         </button>
+        <button class="cell-action-btn popout-btn" title="Pop out into a floating Picture-in-Picture window">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="14" rx="2"/>
+            <rect x="12" y="10" width="7" height="6" rx="1"/>
+          </svg>
+        </button>
         <button class="cell-action-btn quality-toggle-btn ${isQualityDisabled ? '' : 'active'}" title="${isQualityDisabled ? 'Enable Auto Quality (Currently: Native Quality)' : 'Disable Auto Quality (Currently: Auto Quality Active)'}">
           <svg class="quality-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
@@ -253,6 +259,7 @@ function bindCellActions(cell, platform, username) {
   const moveRightBtn = cell.querySelector('.move-right-btn');
   const closeBtn = cell.querySelector('.close-btn');
   const chatPopoutBtn = cell.querySelector('.chat-popout-btn');
+  const popoutBtn = cell.querySelector('.popout-btn');
 
   const container = cell.querySelector('.stream-cell-webview-container');
   if (container) webviewResizeObserver.observe(container);
@@ -330,6 +337,27 @@ function bindCellActions(cell, platform, username) {
     if (!url) return;
     window.api.openExternal(url);
     appendLogMessage(`[Chat] Opened ${platform.toUpperCase()} chat for ${username} in your browser. Sign in there to send messages.`);
+  });
+
+  popoutBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    let url = '';
+    try { url = webview.getURL() || ''; } catch (err) { /* webview not ready */ }
+    window.api.popoutStream(platform, username, url);
+    popoutBtn.classList.add('active');
+    popoutBtn.title = 'Pop-out window open (click to re-focus it)';
+    cell.dataset.poppedOut = 'true';
+
+    // Suspend the in-grid copy so we aren't decoding the same stream twice.
+    // Mark it as auto-ghosted so we only resume it (not a manually-ghosted cell)
+    // when the pop-out window closes.
+    let note = '';
+    if (cell.dataset.ghostMode !== 'true') {
+      cell.dataset.autoGhostedByPopout = 'true';
+      ghostBtn?.click();
+      note = ' (grid copy suspended to save CPU)';
+    }
+    appendLogMessage(`[Pop-out] Opened ${username} (${platform.toUpperCase()}) in a floating window${note}.`);
   });
 
   moveLeftBtn.addEventListener('click', () => {
@@ -461,17 +489,41 @@ export function createStreamTab(platform, username) {
   updateGridLayout();
   updateGlobalGhostButtonState();
 
-  const activeTabBtn = document.querySelector('.stream-tab-btn.active, .nav-btn.active');
-  const isCurrentlyOnGrid = activeTabBtn && activeTabBtn.dataset.tab === 'multi-lurk';
-  const totalActiveStreams = gridContainer.querySelectorAll('.stream-grid-cell').length;
-
-  if (isCurrentlyOnGrid || totalActiveStreams > 1) {
-    switchTab('multi-lurk');
-  } else {
-    switchTab(tabId);
-  }
+  // Opening a stream never changes the active view. Auto-jumping to the
+  // Multi-Lurk grid (or any tab) is disruptive when the user is watching a
+  // stream full-screen or batch-opening streams from the monitor panel — the
+  // new tab/cell is created in the background and the user navigates to it when
+  // they choose.
 
   syncActiveTabs();
+}
+
+// Reflect pop-out window state on the cell's pop-out button. Called when the
+// floating window is closed (from main) so the button returns to its idle look.
+export function setCellPoppedOut(platform, username, on) {
+  const cellId = `grid-cell-${platform.toLowerCase()}-${username.toLowerCase()}`;
+  const cell = document.getElementById(cellId);
+  if (!cell) return;
+
+  const btn = cell.querySelector('.popout-btn');
+  if (btn) {
+    btn.classList.toggle('active', on);
+    btn.title = on
+      ? 'Pop-out window open (click to re-focus it)'
+      : 'Pop out into a floating Picture-in-Picture window';
+  }
+
+  if (on) {
+    cell.dataset.poppedOut = 'true';
+  } else {
+    delete cell.dataset.poppedOut;
+    // Resume decoding if we auto-suspended this cell when it was popped out
+    // (leave it alone if the user had ghosted it manually).
+    if (cell.dataset.autoGhostedByPopout === 'true') {
+      delete cell.dataset.autoGhostedByPopout;
+      if (cell.dataset.ghostMode === 'true') cell.querySelector('.ghost-mode-btn')?.click();
+    }
+  }
 }
 
 export function removeStreamTab(platform, username) {

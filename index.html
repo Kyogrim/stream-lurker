@@ -90,6 +90,21 @@
           <span id="countdown-clock" class="timer-value">00:00</span>
         </div>
         <div class="header-actions">
+          <div class="live-now-wrap">
+            <button id="live-now-btn" class="live-now-pill" title="Streamers live right now">
+              <span class="live-now-dot"></span>
+              <span id="live-now-count">0</span>
+              <span class="live-now-label">LIVE</span>
+              <svg class="live-now-caret" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div id="live-now-popover" class="live-now-popover" hidden>
+              <div class="live-now-pop-header">
+                <span>Live Right Now</span>
+                <span id="live-now-pop-count" class="live-now-pop-count">0</span>
+              </div>
+              <div id="live-now-list" class="live-now-list"></div>
+            </div>
+          </div>
           <button id="scan-now-btn" class="btn btn-cyan btn-glow">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
             Scan Now
@@ -159,7 +174,14 @@
             <div class="watch-time-leaderboard glass-panel" style="margin-top: 20px; padding: 20px; display: flex; flex-direction: column; gap: 16px;">
               <div class="leaderboard-header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 10px;">
                 <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--cyan-color); border-bottom: none; padding-bottom: 0; margin-bottom: 0;">LURK LEADERBOARD</h3>
-                <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Top Lurked Streamers</span>
+                <button id="leaderboard-expand-btn" class="lb-expand-btn" title="Open full lurk stats">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="20" x2="18" y2="10"></line>
+                    <line x1="12" y1="20" x2="12" y2="4"></line>
+                    <line x1="6" y1="20" x2="6" y2="14"></line>
+                  </svg>
+                  View All Stats
+                </button>
               </div>
               <div id="leaderboard-list" class="leaderboard-list" style="display: flex; flex-direction: column; gap: 10px;">
                 <div class="no-stats-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 10px 0;">No watch history tracked yet. Keep a stream tab open to track hours!</div>

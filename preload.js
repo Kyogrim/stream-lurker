@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   openStreamContainer: (platform, username) => ipcRenderer.invoke('open-stream-container', { platform, username }),
   prioritizeStreamer: (platform, username) => ipcRenderer.invoke('prioritize-streamer', { platform, username }),
   closeStreamContainer: (platform, username) => ipcRenderer.invoke('close-stream-container', { platform, username }),
+  popoutStream: (platform, username, url) => ipcRenderer.invoke('popout-stream', { platform, username, url }),
   updateActiveTabs: (tabsList) => ipcRenderer.invoke('update-active-tabs', tabsList),
   syncPlatformSchedules: () => ipcRenderer.invoke('sync-platform-schedules'),
 
@@ -74,6 +75,9 @@ contextBridge.exposeInMainWorld('api', {
   },
   onReloadStreamContainers: (callback) => {
     safeOn('reload-stream-containers', (event) => callback());
+  },
+  onStreamPopoutClosed: (callback) => {
+    safeOn('stream-popout-closed', (event, data) => callback(data));
   },
 
   // Extension catalog
