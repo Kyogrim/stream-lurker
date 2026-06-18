@@ -33,7 +33,8 @@
       {
         "provider": "github",
         "owner": "Kyogrim",
-        "repo": "stream-lurker"
+        "repo": "stream-lurker",
+        "releaseType": "release"
       }
     ],
     "win": {
