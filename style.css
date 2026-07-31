@@ -1748,6 +1748,22 @@ input:checked + .slider:before {
   border: none;
 }
 
+/* Player fullscreen stays inside the app window. The grid's ResizeObserver
+   pins each webview to 1280x720 and scales it with an inline transform; those
+   inline styles outrank the browser's fullscreen UA styles, so they have to be
+   cancelled explicitly or the "fullscreen" player would keep rendering at its
+   little scaled-down grid size. */
+webview:fullscreen,
+webview:-webkit-full-screen {
+  position: fixed !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  transform: none !important;
+  background: #000 !important;
+}
+
 /* Custom Grid Utility Styles for dynamic viewspaces */
 .multi-lurk-grid.single-view {
   display: flex !important;

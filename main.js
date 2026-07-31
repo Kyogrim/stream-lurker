@@ -20,6 +20,11 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 const TWITCH_PUBLIC_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
+// Cookie names that indicate a live Google/YouTube session. Covers the legacy
+// pair (SID/SSID/HSID/APISID/SAPISID), the modern __Secure-1P/3P families that
+// Google rotates on its own schedule, and YouTube's own LOGIN_INFO.
+const YOUTUBE_AUTH_COOKIE = /^(SID|SSID|HSID|APISID|SAPISID|LOGIN_INFO|__Secure-[13]PSID(TS|CC)?|__Secure-[13]PAPISID)$/;
+
 // Global variables
 let mainWindow = null;
 let tray = null;
@@ -244,6 +249,18 @@ async function loadExtensions() {
 
 
 
+// Mute every stream webview the instant its webContents exists. The renderer
+// also mutes on dom-ready, but on a heavy page (Twitch/YouTube) that can fire
+// seconds after audio starts, so a newly auto-opened stream would blast sound
+// until then. Muting here happens before the page loads and can't be overridden
+// by page JS. Grid cells always start muted; the cell's unmute button still
+// works normally. Only webviews are affected — pop-out/clip/login windows are
+// BrowserWindows and keep their own audio.
+app.on('web-contents-created', (event, contents) => {
+  if (contents.getType() !== 'webview') return;
+  try { contents.setAudioMuted(true); } catch (e) { /* already gone */ }
+});
+
 // Create Main Dashboard Window
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -255,6 +272,12 @@ function createMainWindow() {
     titleBarStyle: 'default',
     backgroundColor: '#09090b',
     icon: path.join(__dirname, 'icon.ico'),
+    // Keep the player's fullscreen button contained: with the window not
+    // fullscreenable, an HTML5 fullscreen request still expands the <webview>
+    // to fill the app window, but Electron won't also throw the window into
+    // OS fullscreen. (Maximize is unaffected; see webview:fullscreen in
+    // style.css, which cancels the grid's scaling transform while expanded.)
+    fullscreenable: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -397,6 +420,18 @@ function sendStreamStatusToUI() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     const openStreams = Array.from(activeWindows.keys());
     mainWindow.webContents.send('active-containers-update', openStreams);
+  }
+}
+
+// Persist pending cookie writes to disk now, instead of waiting for Chromium's
+// lazy flush (which an unclean shutdown would lose along with any rotated
+// platform session tokens).
+function flushCookies() {
+  try {
+    session.fromPartition('persist:default').cookies.flushStore();
+    session.defaultSession.cookies.flushStore();
+  } catch (e) {
+    addLog(`[Auth] Cookie flush failed: ${e.message}`);
   }
 }
 
@@ -1224,6 +1259,13 @@ app.whenReady().then(async () => {
     }
   }, 300000);
 
+  // Periodically flush the cookie store to disk. Google rotates its session
+  // cookies (__Secure-*PSIDTS) every few minutes; if the app is killed or
+  // crashes before Chromium's own lazy flush, those writes are lost and the
+  // next launch starts from stale tokens — which shows up as YouTube randomly
+  // being logged out.
+  setInterval(flushCookies, 300000);
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });
@@ -1236,6 +1278,7 @@ app.on('before-quit', () => {
     saveConfig();
     watchTimeDirty = false;
   }
+  flushCookies();
 });
 
 app.on('window-all-closed', () => {
@@ -1333,10 +1376,13 @@ async function validateSavedSessions() {
   const platformsToCheck = ['twitch', 'kick', 'youtube', 'rumble'];
   addLog('[Auth] Validating saved platform sessions...');
   const ses = session.fromPartition('persist:default');
-  
+
   for (const platform of platformsToCheck) {
     let isValid = false;
-    
+    // If the cookie lookup itself throws we can't conclude anything — leave the
+    // saved account alone rather than reporting a bogus logout.
+    let checkErrored = false;
+
     try {
       if (platform === 'twitch') {
         const cookies = await ses.cookies.get({ name: 'auth-token' });
@@ -1361,16 +1407,27 @@ async function validateSavedSessions() {
         const cookies = await ses.cookies.get({ url: 'https://kick.com' });
         isValid = cookies.some(c => c.name === 'kick_session' || c.name.includes('session'));
       } else if (platform === 'youtube') {
-        const cookies = await ses.cookies.get({ url: 'https://youtube.com' });
-        isValid = cookies.some(c => c.name === 'SID' || c.name === 'SSID');
+        // Google no longer guarantees the legacy SID/SSID pair is present — modern
+        // sessions can live entirely on the __Secure-*PSID family, and those
+        // cookies rotate. Checking only SID/SSID meant a rotation could look like
+        // a logout and wipe the saved account. Accept any known auth cookie, and
+        // look at google.com too since the session spans both hosts.
+        const cookies = [
+          ...await ses.cookies.get({ url: 'https://www.youtube.com' }),
+          ...await ses.cookies.get({ url: 'https://accounts.google.com' }),
+        ];
+        isValid = cookies.some(c => YOUTUBE_AUTH_COOKIE.test(c.name));
       } else if (platform === 'rumble') {
         const cookies = await ses.cookies.get({ url: 'https://rumble.com' });
         isValid = cookies.some(c => c.name.includes('session') || c.name === 'u_s');
       }
     } catch (e) {
-      addLog(`[Auth] Error validating ${platform.toUpperCase()} session: ${e.message}`);
+      checkErrored = true;
+      addLog(`[Auth] Error validating ${platform.toUpperCase()} session: ${e.message} (keeping saved account).`);
     }
-    
+
+    if (checkErrored) continue;
+
     if (!isValid) {
       if (config.accounts && config.accounts[platform]) {
         addLog(`[Auth] Session expired for ${platform.toUpperCase()}. Marking as disconnected.`);
