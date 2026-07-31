@@ -506,45 +506,83 @@ export function qualityAndTheaterScript(quality) {
             const cog = document.querySelector('.ytp-settings-button');
             if (!cog) return;
             if (window.__qualitySet === quality) return;
+
+            // One attempt at a time. Without this the 3s tick could reopen the
+            // settings menu while a previous attempt was still walking it.
+            const nowTs = Date.now();
+            if (window.__ytQualityBusy) return;
+            if (window.__ytQualityAttemptAt && nowTs - window.__ytQualityAttemptAt < 8000) return;
+            window.__ytQualityAttemptAt = nowTs;
+            window.__ytQualityBusy = true;
+
+            const settingsOpen = function() {
+              const m = document.querySelector('.ytp-settings-menu, .ytp-popup.ytp-settings-menu');
+              return !!m && m.style.display !== 'none';
+            };
+            const finish = function(closeIt) {
+              window.__ytQualityBusy = false;
+              // Never strand the menu open — that was the visible symptom when
+              // the option lookup failed partway through.
+              if (closeIt && settingsOpen()) cog.click();
+            };
+            // A real quality row starts with the resolution ("144p", "1080p60",
+            // "Auto (720p)"). The parent menu's row reads "Quality1080p", so
+            // anchoring at the start keeps us out of the wrong menu.
+            const isQualityOption = function(el) {
+              return /^(\\d{3,4}p|auto)/i.test((el.textContent || '').trim());
+            };
+
             cog.click();
-            setTimeout(() => {
-              const items = Array.from(document.querySelectorAll('.ytp-menuitem, .ytp-menuitem-label'));
+
+            // Poll for the settings panel, then for the quality submenu. The old
+            // code used a flat 150ms timeout, so on a slow frame it read the
+            // parent menu, matched nothing, and clicked the LAST item — opening
+            // an unrelated submenu and leaving it open, while still marking the
+            // quality as set so it never retried.
+            let menuTries = 0;
+            const openQuality = setInterval(() => {
+              if (++menuTries > 20) { clearInterval(openQuality); finish(true); return; }
+              const items = Array.from(document.querySelectorAll('.ytp-menuitem'));
+              if (!items.length) return;
               const qualityItem = items.find(el => {
-                const txt = el.textContent.toLowerCase();
-                return /quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質|품질/i.test(txt) ||
-                       (/\\d{3,4}p/i.test(txt) && !txt.includes('speed') && !txt.includes('vitesse') && !txt.includes('velocidad'));
+                const txt = (el.textContent || '').toLowerCase();
+                return /quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質|품질/i.test(txt);
               });
-              if (qualityItem) {
-                qualityItem.click();
-                setTimeout(() => {
-                  const options = Array.from(document.querySelectorAll('.ytp-menuitem, .ytp-menuitem-label'));
-                  const targetQuality = quality === '160p' ? '144' : (quality === 'source' ? 'auto' : quality.replace('p', ''));
-                  const targetOpt = options.find(el => {
-                    const txt = el.textContent.toLowerCase();
-                    if (targetQuality === 'auto') return /auto|自动|自動/i.test(txt);
-                    return txt.includes(targetQuality);
-                  });
-                  if (targetOpt) {
-                    targetOpt.click();
-                    window.__qualitySet = quality;
-                  } else {
-                    const lowestOpt = options.find(el => {
-                      const txt = el.textContent;
-                      return txt.includes('144') || txt.includes('240') || txt.includes('360');
-                    });
-                    if (lowestOpt) {
-                      lowestOpt.click();
-                      window.__qualitySet = quality;
-                    } else {
-                      const lastOpt = options[options.length - 1];
-                      if (lastOpt) lastOpt.click();
-                      window.__qualitySet = quality;
-                    }
-                  }
-                }, 150);
-              } else {
-                cog.click();
-              }
+              if (!qualityItem) return;
+              clearInterval(openQuality);
+              qualityItem.click();
+
+              let optTries = 0;
+              const pickOption = setInterval(() => {
+                if (++optTries > 20) { clearInterval(pickOption); finish(true); return; }
+                const options = Array.from(document.querySelectorAll('.ytp-menuitem')).filter(isQualityOption);
+                if (!options.length) return;
+                clearInterval(pickOption);
+
+                const want = quality === '160p' ? '144' : (quality === 'source' ? 'auto' : quality.replace('p', ''));
+                let target = options.find(el => {
+                  const txt = (el.textContent || '').toLowerCase();
+                  return want === 'auto' ? /auto|自动|自動/i.test(txt) : txt.indexOf(want) !== -1;
+                });
+                if (!target && want !== 'auto') {
+                  // Fall back to the lowest resolution this stream actually
+                  // offers, rather than whatever sits last in the menu.
+                  const ranked = options
+                    .map(el => ({ el: el, h: parseInt(((el.textContent || '').match(/(\\d{3,4})p/) || [])[1], 10) }))
+                    .filter(o => !isNaN(o.h))
+                    .sort((a, b) => a.h - b.h);
+                  target = ranked.length ? ranked[0].el : null;
+                }
+                if (!target) { finish(true); return; }
+
+                // Long menus scroll, and 144p sits below the fold — make sure
+                // the row is realised and in view before clicking it.
+                try { target.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+                target.click();
+                window.__qualitySet = quality;
+                console.log('[YT Quality] Selected ' + (target.textContent || '').trim());
+                setTimeout(() => finish(true), 300);
+              }, 150);
             }, 150);
           } catch(e){}
         }, 3000);

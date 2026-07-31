@@ -1290,8 +1290,22 @@ app.on('window-all-closed', () => {
 // System Tray
 function createTray() {
   try {
-    // Create a simple 16x16 tray icon (1-pixel nativeImage as fallback)
-    const icon = nativeImage.createEmpty();
+    // icon.ico ships with the app (see build.files) and carries a real 16x16
+    // frame, which is what the Windows tray wants. This used to be
+    // createEmpty(), which is why the tray slot rendered blank while still
+    // showing the tooltip. Fall back to the PNG, then to an empty image, so a
+    // missing asset can never stop the tray (and its Quit item) from existing.
+    let icon = nativeImage.createFromPath(path.join(__dirname, 'icon.ico'));
+    if (icon.isEmpty()) icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
+    if (icon.isEmpty()) {
+      addLog('[Tray] Could not load icon.ico/icon.png — tray icon will be blank.');
+      icon = nativeImage.createEmpty();
+    } else {
+      // Windows picks the nearest frame, but an explicit 16x16 avoids a blurry
+      // downscale from the 256x256 frame on some DPI settings.
+      const small = icon.resize({ width: 16, height: 16 });
+      if (!small.isEmpty()) icon = small;
+    }
     tray = new Tray(icon);
     
     const contextMenu = Menu.buildFromTemplate([
