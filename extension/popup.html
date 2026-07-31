@@ -3,44 +3,235 @@
 <head>
   <meta charset="utf-8">
   <style>
-    :root { --bg:#0e0e12; --panel:#17171d; --text:#f4f4f5; --muted:#a1a1aa; --border:#2a2a33; }
+    /* Brand tokens mirrored from the desktop app's style.css so the addon reads
+       as part of Stream Lurker. Fonts stay system-local: an MV3 popup can't
+       pull Outfit/JetBrains Mono off Google Fonts under the default CSP. */
+    :root {
+      --bg-app: hsl(240, 10%, 3.9%);
+      --bg-panel: hsl(240, 10%, 6%);
+      --panel-glass: hsla(240, 5.9%, 10%, 0.65);
+      --panel-border: hsla(240, 5.9%, 15%, 0.7);
+      --cyan-color: hsl(188, 86%, 53%);
+      --cyan-glow: hsla(188, 86%, 53%, 0.25);
+      --twitch-color: hsl(261, 100%, 63%);
+      --twitch-glow: hsla(261, 100%, 63%, 0.35);
+      --kick-color: hsl(104, 98%, 54%);
+      --kick-glow: hsla(104, 98%, 54%, 0.35);
+      --youtube-color: hsl(0, 84.2%, 60.2%);
+      --youtube-glow: hsla(0, 84.2%, 60.2%, 0.35);
+      --text-primary: hsl(0, 0%, 98%);
+      --text-secondary: hsl(240, 5%, 64.9%);
+      --text-muted: hsl(240, 5%, 44.9%);
+      --danger-color: hsl(0, 84.2%, 60.2%);
+      --success-color: hsl(142, 71%, 45%);
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --font-sans: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+      --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
     * { box-sizing: border-box; }
-    body { width: 300px; margin: 0; padding: 14px; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
-    h1 { font-size: 14px; margin: 0 0 2px; }
-    .sub { font-size: 11px; color: var(--muted); margin: 0 0 12px; }
-    label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
-    input { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--border); background: #000; color: var(--text); font-family: monospace; letter-spacing: 1px; text-transform: uppercase; }
-    input:focus { outline: none; border-color: #7c3aed; }
-    .status-line { font-size: 11px; margin: 8px 0 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; flex-shrink: 0; }
-    .dot.ok { background: #22c55e; }
-    .btns { display: flex; flex-direction: column; gap: 8px; }
-    button { width: 100%; padding: 9px; border: none; border-radius: 7px; font-weight: 600; font-size: 13px; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; }
-    button:disabled { opacity: 0.55; cursor: default; }
-    .tw { background: #9146ff; }
-    .yt { background: #ff0000; }
-    .kk { background: #53fc18; color: #000; }
-    .result { font-size: 11px; min-height: 14px; margin-top: 10px; }
-    .result.ok { color: #22c55e; }
-    .result.err { color: #ef4444; }
+
+    body {
+      width: 320px;
+      margin: 0;
+      padding: 16px;
+      font-family: var(--font-sans);
+      background: var(--bg-app);
+      color: var(--text-primary);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Header: same gradient logo mark and wordmark as the app sidebar. */
+    .head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--panel-border);
+      margin-bottom: 14px;
+    }
+    .logo-icon {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      background: linear-gradient(135deg, var(--cyan-color), var(--twitch-color));
+      border-radius: var(--radius-md);
+      box-shadow: 0 0 15px var(--cyan-glow);
+      position: relative;
+    }
+    .logo-icon::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 10px;
+      height: 10px;
+      background-color: var(--bg-app);
+      border-radius: 50%;
+    }
+    .wordmark { line-height: 1.15; min-width: 0; }
+    .wordmark h1 {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      margin: 0;
+      text-transform: uppercase;
+    }
+    .wordmark .tag {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--cyan-color);
+    }
+
+    /* Connection status, styled like the app's scanner indicator. */
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      background: var(--panel-glass);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin-bottom: 14px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--danger-color);
+      box-shadow: 0 0 8px var(--danger-color);
+    }
+    .dot.ok {
+      background: var(--cyan-color);
+      box-shadow: 0 0 8px var(--cyan-color);
+      animation: pulse-ring 2s infinite;
+    }
+    @keyframes pulse-ring {
+      0%   { transform: scale(0.95); box-shadow: 0 0 0 0 hsla(188, 86%, 53%, 0.7); }
+      70%  { transform: scale(1); box-shadow: 0 0 0 6px hsla(188, 86%, 53%, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 hsla(188, 86%, 53%, 0); }
+    }
+
+    label {
+      display: block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--panel-border);
+      background: rgba(0, 0, 0, 0.35);
+      color: var(--cyan-color);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      transition: var(--transition);
+    }
+    input::placeholder { color: var(--text-muted); letter-spacing: 2px; }
+    input:focus {
+      outline: none;
+      border-color: var(--cyan-color);
+      box-shadow: 0 0 0 1px var(--cyan-glow), 0 0 10px var(--cyan-glow);
+    }
+
+    .btns { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+    button {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-sans);
+      font-weight: 700;
+      font-size: 12.5px;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: var(--transition);
+    }
+    button svg { width: 15px; height: 15px; flex: 0 0 auto; }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:active:not(:disabled) { transform: translateY(0); }
+    button:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+
+    .tw { background: var(--twitch-color); border-color: var(--twitch-color); box-shadow: 0 0 10px var(--twitch-glow); }
+    .yt { background: var(--youtube-color); border-color: var(--youtube-color); box-shadow: 0 0 10px var(--youtube-glow); }
+    .kk { background: var(--kick-color); border-color: var(--kick-color); color: #000; box-shadow: 0 0 10px var(--kick-glow); }
+    .tw:hover:not(:disabled) { box-shadow: 0 0 18px var(--twitch-glow); }
+    .yt:hover:not(:disabled) { box-shadow: 0 0 18px var(--youtube-glow); }
+    .kk:hover:not(:disabled) { box-shadow: 0 0 18px var(--kick-glow); }
+
+    .result {
+      font-size: 11px;
+      line-height: 1.45;
+      min-height: 15px;
+      margin-top: 12px;
+      color: var(--text-secondary);
+      word-break: break-word;
+    }
+    .result.ok { color: var(--success-color); }
+    .result.err { color: var(--danger-color); }
+
+    .hint {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin: 12px 0 0;
+      padding-top: 10px;
+      border-top: 1px solid var(--panel-border);
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
-  <h1>Stream Lurker Connector</h1>
-  <p class="sub">Sends your logged-in session to the desktop app.</p>
+  <div class="head">
+    <div class="logo-icon"></div>
+    <div class="wordmark">
+      <h1>Stream Lurker</h1>
+      <span class="tag">Connector</span>
+    </div>
+  </div>
+
+  <div class="status-line"><span class="dot" id="dot"></span><span id="conn">Looking for Stream Lurker…</span></div>
 
   <label for="code">Pairing code (from the app)</label>
   <input id="code" placeholder="XXXXXXXX" maxlength="16" autocomplete="off" spellcheck="false">
 
-  <div class="status-line"><span class="dot" id="dot"></span><span id="conn">Looking for Stream Lurker…</span></div>
-
   <div class="btns">
-    <button class="tw" data-platform="twitch">Connect Twitch</button>
-    <button class="yt" data-platform="youtube">Connect YouTube</button>
-    <button class="kk" data-platform="kick">Connect Kick</button>
+    <button class="tw" data-platform="twitch">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/></svg>
+      Connect Twitch
+    </button>
+    <button class="yt" data-platform="youtube">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M23.498 6.163a3.003 3.003 0 0 0-2.11-2.108C19.516 3.5 12 3.5 12 3.5s-7.516 0-9.388.555A3.002 3.002 0 0 0 .502 6.163C0 8.07 0 12 0 12s0 3.93.502 5.837a3.003 3.003 0 0 0 2.11 2.108C4.484 20.5 12 20.5 12 20.5s7.516 0 9.388-.555a3.003 3.003 0 0 0 2.11-2.108C24 15.93 24 12 24 12s0-3.93-.502-5.837zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+      Connect YouTube
+    </button>
+    <button class="kk" data-platform="kick">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 0h-5v5h-5v5H4v14h10v-5h5V0zM12 12H9v-2h3v2zm5-5h-3v5h-2V7H9V5h3v2h2v5h3V7z"/></svg>
+      Connect Kick
+    </button>
   </div>
 
   <div class="result" id="result"></div>
+
+  <p class="hint">Log in to a platform in this browser, then click its button to send that session to the desktop app.</p>
 
   <script src="popup.js"></script>
 </body>
