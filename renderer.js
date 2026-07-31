@@ -211,6 +211,24 @@ function setupRefreshWebviewButtons() {
   });
 }
 
+// Re-create grid cells for containers the main process still considers open.
+// Runs on every dashboard load, so after a manual refresh or an automatic
+// crash-recovery reload the grid matches what main is tracking (and still
+// counting watch time for) instead of silently drifting to an empty grid.
+function restoreOpenStreamTabs() {
+  for (const key of state.activeContainers) {
+    const [platform, username] = key.split(':');
+    if (!platform || !username) continue;
+    if (document.getElementById(`grid-cell-${platform}-${username}`)) continue;
+
+    // activeContainers keys are lowercased; recover the display casing.
+    const tracked = state.currentConfig?.streamers?.find(
+      s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
+    );
+    createStreamTab(platform, tracked ? tracked.username : username);
+  }
+}
+
 function setupBackendListeners() {
   window.api.onLogMessage((message) => appendLogMessage(message));
 
@@ -308,6 +326,8 @@ async function init() {
     setupLoginPortalListeners();
     console.log('Setting up backend listeners...');
     setupBackendListeners();
+    console.log('Restoring open stream containers...');
+    restoreOpenStreamTabs();
     console.log('Starting points poller...');
     startPointsPoller();
     console.log('Initializing clips manager...');

@@ -27,6 +27,11 @@ const activeWindows = new Map(); // Key: platform:username -> true
 const sessionStarts = new Map(); // Key: platform:username -> session start timestamp (ms), for duration tracking
 const popoutWindows = new Map(); // Key: platform:username -> always-on-top BrowserWindow (pop-out / PiP)
 let activeQuestStreamer = null; // Track active quest streamer (lowercase) to prevent preemption/auto-close
+// Renderer crash-recovery backoff: at most N reloads within the window.
+const MAX_RENDERER_RECOVERIES = 3;
+const RENDERER_RECOVERY_WINDOW_MS = 10 * 60 * 1000;
+let rendererRecoveryCount = 0;
+let lastRendererRecoveryAt = 0;
 let config = {
   streamers: [],
   checkInterval: 3, // in minutes
@@ -265,6 +270,27 @@ function createMainWindow() {
 
   mainWindow.webContents.on('render-process-gone', (event, details) => {
     addLog(`[System - MainWindow] Renderer process gone! Reason: ${details.reason}, Exit Code: ${details.exitCode}`);
+
+    // A dead renderer leaves a blank, unresponsive window forever (reported
+    // after multi-day uptime). Reload it so the dashboard comes back on its
+    // own; the renderer re-creates any stream containers still tracked here.
+    // Back off if it keeps dying so we never spin in a crash-reload loop.
+    if (details.reason === 'clean-exit' || app.isQuitting) return;
+
+    const now = Date.now();
+    if (now - lastRendererRecoveryAt > RENDERER_RECOVERY_WINDOW_MS) rendererRecoveryCount = 0;
+    lastRendererRecoveryAt = now;
+
+    if (rendererRecoveryCount >= MAX_RENDERER_RECOVERIES) {
+      addLog('[System - MainWindow] Dashboard crashed repeatedly — not reloading again. Please restart Stream Lurker.');
+      return;
+    }
+
+    rendererRecoveryCount++;
+    addLog(`[System - MainWindow] Reloading dashboard to recover (attempt ${rendererRecoveryCount}/${MAX_RENDERER_RECOVERIES})...`);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
+    }, 1000);
   });
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {

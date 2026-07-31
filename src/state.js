@@ -55,6 +55,7 @@ export function streamUrl(platform, username, status) {
 
 // Activity log writer (used everywhere). Console host element is grabbed lazily
 // so this module doesn't require DOM to exist at import time.
+const MAX_CONSOLE_LINES = 300;
 let consoleLogs = null;
 function getConsoleLogs() {
   if (!consoleLogs) consoleLogs = document.getElementById('console-logs');
@@ -77,5 +78,14 @@ export function appendLogMessage(message) {
   }
 
   host.appendChild(line);
+
+  // Trim old lines. The console streams for as long as the app is open, so
+  // without a cap the DOM grows unbounded and eventually OOMs the renderer
+  // (the window goes dark after multi-day uptime). The main process only keeps
+  // the last 200 log entries anyway.
+  while (host.childElementCount > MAX_CONSOLE_LINES) {
+    host.removeChild(host.firstElementChild);
+  }
+
   host.scrollTop = 10000000;
 }
