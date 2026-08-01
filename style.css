@@ -1708,38 +1708,57 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0; /* let the name/meta ellipsis instead of shoving the buttons out */
-}
-
-.stream-cell-titles {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-  line-height: 1.2;
+  min-width: 0; /* let the meta ellipsis instead of shoving the buttons out */
+  flex: 1 1 auto;
 }
 
 .stream-cell-name {
+  flex: 0 0 auto;
   font-size: 0.85rem;
   font-weight: 700;
   letter-spacing: -0.01em;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-/* All-time watch time / viewers / uptime for this streamer. */
+/* All-time watch time / viewers / uptime, sat inline beside the name so it uses
+   the empty span of the header bar rather than stacking under it. */
 .stream-cell-meta {
-  font-size: 0.66rem;
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding-left: 10px;
+  border-left: 1px solid var(--panel-border);
+  font-size: 0.78rem;
   font-weight: 500;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   white-space: nowrap;
+}
+.stream-cell-meta:empty { display: none; }
+
+/* Headline figure — never allowed to shrink or ellipsis away. */
+.cell-meta-watched {
+  flex: 0 0 auto;
+  color: var(--cyan-color);
+  font-weight: 700;
+}
+/* Viewers / uptime give way first when the cell is narrow. */
+.cell-meta-rest {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.stream-cell-meta:empty { display: none; }
-.cell-meta-watched { color: var(--cyan-color); }
-.cell-meta-sep { margin: 0 5px; opacity: 0.5; }
+.cell-meta-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background-color: var(--danger-color);
+  vertical-align: middle;
+}
+.cell-meta-sep { margin: 0 7px; opacity: 0.45; }
 
 /* Cells get short once the grid is dense — drop the meta line rather than let
    it crowd the eight action buttons. data-streams is set by updateGridLayout;

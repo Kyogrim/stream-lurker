@@ -173,19 +173,31 @@ function cellMetaHTML(platform, username) {
   const minutes = state.currentConfig?.watchTime?.streamers?.[key] || 0;
   const status = statusFor(platform, username);
 
-  const parts = [];
-  if (minutes > 0) parts.push(`<span class="cell-meta-watched" title="Your all-time watch time for ${username}">${fmtDuration(minutes)} watched</span>`);
-  if (status?.isLive && status.viewerCount) parts.push(`<span title="Current viewers">${formatViewerCount(status.viewerCount)} viewers</span>`);
+  // Watch time is the headline figure and is pinned so it never truncates.
+  const watched = minutes > 0
+    ? `<span class="cell-meta-watched" title="Your all-time watch time for ${username}">${fmtDuration(minutes)} watched</span>`
+    : '';
 
+  // Viewers and uptime are secondary — labels stay terse (a dot for viewers,
+  // "up" for uptime) so all three fit beside the eight action buttons.
+  const rest = [];
+  if (status?.isLive && status.viewerCount) {
+    rest.push(`<span title="Current viewers"><span class="cell-meta-dot"></span>${formatViewerCount(status.viewerCount)}</span>`);
+  }
   if (status?.isLive && status.liveSince) {
     const started = new Date(status.liveSince).getTime();
     if (!Number.isNaN(started)) {
       const upMins = Math.max(0, Math.floor((Date.now() - started) / 60000));
-      if (upMins > 0) parts.push(`<span title="Live for">up ${fmtDuration(upMins)}</span>`);
+      if (upMins > 0) rest.push(`<span title="Live for ${fmtDuration(upMins)}">up ${fmtDuration(upMins)}</span>`);
     }
   }
 
-  return parts.join('<span class="cell-meta-sep">·</span>');
+  if (!watched && !rest.length) return '';
+  const sep = '<span class="cell-meta-sep">·</span>';
+  const restHTML = rest.length
+    ? `<span class="cell-meta-rest">${watched ? sep : ''}${rest.join(sep)}</span>`
+    : '';
+  return watched + restHTML;
 }
 
 function buildCellHTML(platform, username, isQualityDisabled) {
@@ -194,10 +206,8 @@ function buildCellHTML(platform, username, isQualityDisabled) {
     <div class="stream-cell-header">
       <div class="stream-cell-identity">
         <div class="platform-badge ${p}">${getPlatformSVG(p)}</div>
-        <div class="stream-cell-titles">
-          <span class="stream-cell-name">${username}</span>
-          <span class="stream-cell-meta">${cellMetaHTML(platform, username)}</span>
-        </div>
+        <span class="stream-cell-name">${username}</span>
+        <span class="stream-cell-meta">${cellMetaHTML(platform, username)}</span>
       </div>
       <div class="stream-cell-actions">
         <button class="cell-action-btn chat-popout-btn" title="Open chat in your browser (sign in there to chat)">
