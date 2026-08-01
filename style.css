@@ -1033,14 +1033,13 @@ input:checked + .slider:before {
 }
 
 /* Per-streamer go-live mode: auto-open / notify only / ignore */
+/* Sits inside .priority-controls as its first child, so it lines up in the same
+   column on every row instead of drifting with the channel-name width. */
 .mode-btn {
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
-  /* Pushes to the right so it groups with the priority/delete controls rather
-     than crowding the channel name. */
-  margin-left: auto;
-  margin-right: 10px;
+  margin-right: 8px;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -85,10 +85,10 @@ function buildRow(streamer, index, listLength) {
       <div class="platform-badge ${streamer.platform}">${getPlatformSVG(streamer.platform)}</div>
       <span class="list-item-name">${streamer.username}</span>
     </div>
-    <button class="mode-btn mode-${mode}" title="${MODE_META[mode].title}">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MODE_META[mode].icon}</svg>
-    </button>
     <div class="priority-controls">
+      <button class="mode-btn mode-${mode}" title="${MODE_META[mode].title}">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MODE_META[mode].icon}</svg>
+      </button>
       <button class="priority-btn up-btn" title="Move Up" ${isFirst ? 'disabled' : ''}>▲</button>
       <button class="priority-btn down-btn" title="Move Down" ${isLast ? 'disabled' : ''}>▼</button>
     </div>
