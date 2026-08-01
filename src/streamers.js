@@ -5,6 +5,29 @@ import { renderStreamsGrid, updateStats } from './dashboard.js';
 
 function monitoredListEl() { return document.getElementById('monitored-channels-list'); }
 
+// What should happen when this streamer goes live. Entries saved before this
+// existed have no `mode`, so anything unrecognised reads as 'auto' — those keep
+// behaving exactly as before.
+const STREAM_MODES = ['auto', 'notify', 'ignore'];
+const MODE_META = {
+  auto: {
+    title: 'Auto-open when live (click to change)',
+    icon: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  },
+  notify: {
+    title: 'Notify only — never auto-opens (click to change)',
+    icon: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  },
+  ignore: {
+    title: 'No alerts, never auto-opens — still monitored (click to change)',
+    icon: '<path d="M13.73 21a2 2 0 0 1-3.46 0"/><path d="M18.63 13A17.89 17.89 0 0 1 18 8"/><path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14"/><path d="M18 8a6 6 0 0 0-9.33-5"/><line x1="1" y1="1" x2="23" y2="23"/>',
+  },
+};
+
+function getStreamMode(streamer) {
+  return STREAM_MODES.includes(streamer.mode) ? streamer.mode : 'auto';
+}
+
 function groupByPlatform() {
   const groups = Object.fromEntries(PLATFORMS.map(p => [p, []]));
   for (const s of state.currentConfig.streamers) {
@@ -55,11 +78,16 @@ function buildRow(streamer, index, listLength) {
   row.className = 'list-item';
   row.draggable = true;
 
+  const mode = getStreamMode(streamer);
+
   row.innerHTML = `
     <div class="list-item-identity">
       <div class="platform-badge ${streamer.platform}">${getPlatformSVG(streamer.platform)}</div>
       <span class="list-item-name">${streamer.username}</span>
     </div>
+    <button class="mode-btn mode-${mode}" title="${MODE_META[mode].title}">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MODE_META[mode].icon}</svg>
+    </button>
     <div class="priority-controls">
       <button class="priority-btn up-btn" title="Move Up" ${isFirst ? 'disabled' : ''}>▲</button>
       <button class="priority-btn down-btn" title="Move Down" ${isLast ? 'disabled' : ''}>▼</button>
@@ -105,6 +133,20 @@ function buildRow(streamer, index, listLength) {
     if (state.draggedItem?.platform === platLower && state.draggedItem.index !== index) {
       reorderStreamer(streamer.platform, state.draggedItem.index, { toIndex: index });
     }
+  });
+
+  // Cycle auto → notify → ignore. `streamer` is the same object held in
+  // state.currentConfig.streamers, so mutating it and saving persists the change.
+  row.querySelector('.mode-btn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const next = STREAM_MODES[(STREAM_MODES.indexOf(getStreamMode(streamer)) + 1) % STREAM_MODES.length];
+    streamer.mode = next;
+    await window.api.saveConfig(state.currentConfig);
+    renderMonitoredList();
+    const wording = next === 'auto'
+      ? 'will auto-open when live'
+      : next === 'notify' ? 'will only notify when live' : 'will not alert or auto-open';
+    appendLogMessage(`[Alerts] ${streamer.username} ${wording}.`);
   });
 
   if (!isFirst) row.querySelector('.up-btn').addEventListener('click', () => reorderStreamer(streamer.platform, index, { direction: 'up' }));

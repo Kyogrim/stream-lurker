@@ -1,22 +1,13 @@
 // Top watched-streamers list + platform hours breakdown (dashboard panel),
 // plus an expandable "Lurk Stats" modal with the full ranking and fun totals.
 
-import { PLATFORMS, state, getPlatformSVG, isPlatformEnabled, platformColorVar } from './state.js';
+import { PLATFORMS, state, getPlatformSVG, isPlatformEnabled, platformColorVar, fmtDuration } from './state.js';
 
 const TOP_N = 5;
 
 const EMPTY_HOURS = { twitch: 0, kick: 0, youtube: 0, rumble: 0 };
 
 const PLATFORM_LABELS = { twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', rumble: 'Rumble' };
-
-// Format a minute count as a compact human-readable duration ("45m", "2h 13m").
-function fmtDuration(totalMinutes) {
-  const mins = Math.round(totalMinutes || 0);
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return m ? `${h}h ${m}m` : `${h}h`;
-}
 
 function rankBadge(idx) {
   if (idx === 0) return '👑';

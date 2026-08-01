@@ -5,6 +5,7 @@ import { PLATFORMS, state, appendLogMessage } from './state.js';
 import { renderMonitoredList } from './streamers.js';
 import { renderStreamsGrid, updateStats } from './dashboard.js';
 import { renderFollowsList, setActiveFollowsTab } from './follows.js';
+import { renderLeaderboard } from './leaderboard.js';
 
 const DEFAULT_MAX_TABS = 2;
 
@@ -61,6 +62,15 @@ export function hydrateSettingsUI() {
 
   const autoClaimPointsToggle = document.getElementById('auto-claim-points-toggle');
   if (autoClaimPointsToggle) autoClaimPointsToggle.checked = cfg.autoClaimPoints !== false;
+
+  const notificationsToggle = document.getElementById('notifications-toggle');
+  if (notificationsToggle) notificationsToggle.checked = cfg.notificationsEnabled !== false;
+
+  const launchOnStartupToggle = document.getElementById('launch-on-startup-toggle');
+  if (launchOnStartupToggle) launchOnStartupToggle.checked = !!cfg.launchOnStartup;
+
+  const startMinimizedToggle = document.getElementById('start-minimized-toggle');
+  if (startMinimizedToggle) startMinimizedToggle.checked = !!cfg.startMinimized;
 }
 
 export function applyServiceToggles() {
@@ -176,5 +186,67 @@ export function setupSettingsHandlers() {
     cfg().autoClaimPoints = autoClaimPointsToggle.checked;
     window.api.saveConfig(cfg());
     appendLogMessage(`[Rewards] Auto-claim Channel Points set to: ${autoClaimPointsToggle.checked}`);
+  });
+
+  // Go-live notifications toggle.
+  const notificationsToggle = document.getElementById('notifications-toggle');
+  notificationsToggle?.addEventListener('change', () => {
+    cfg().notificationsEnabled = notificationsToggle.checked;
+    window.api.saveConfig(cfg());
+    appendLogMessage(`[Alerts] Go-live notifications ${notificationsToggle.checked ? 'ENABLED' : 'DISABLED'}.`);
+  });
+
+  // Startup behaviour. Saved through the normal config path; main applies the
+  // OS-level login item whenever the config is written.
+  const launchOnStartupToggle = document.getElementById('launch-on-startup-toggle');
+  launchOnStartupToggle?.addEventListener('change', async () => {
+    cfg().launchOnStartup = launchOnStartupToggle.checked;
+    await window.api.saveConfig(cfg());
+    appendLogMessage(`[System] Launch on Windows startup ${launchOnStartupToggle.checked ? 'ENABLED' : 'DISABLED'}.`);
+  });
+
+  const startMinimizedToggle = document.getElementById('start-minimized-toggle');
+  startMinimizedToggle?.addEventListener('change', async () => {
+    cfg().startMinimized = startMinimizedToggle.checked;
+    await window.api.saveConfig(cfg());
+    appendLogMessage(`[System] Start minimised to tray ${startMinimizedToggle.checked ? 'ENABLED' : 'DISABLED'}.`);
+  });
+
+  // Backup & transfer.
+  const transferMsg = document.getElementById('config-transfer-msg');
+  const showTransferMsg = (text, isError) => {
+    if (!transferMsg) return;
+    transferMsg.textContent = text;
+    transferMsg.style.color = isError ? 'var(--danger-color)' : '';
+    transferMsg.classList.remove('hidden');
+    setTimeout(() => transferMsg.classList.add('hidden'), 5000);
+  };
+
+  document.getElementById('export-config-btn')?.addEventListener('click', async () => {
+    const res = await window.api.exportConfig();
+    if (res?.canceled) return;
+    if (res?.success) {
+      showTransferMsg('Settings exported.');
+      appendLogMessage(`[Config] Exported settings to ${res.filePath}`);
+    } else {
+      showTransferMsg(res?.error || 'Export failed.', true);
+    }
+  });
+
+  document.getElementById('import-config-btn')?.addEventListener('click', async () => {
+    const res = await window.api.importConfig();
+    if (res?.canceled) return;
+    if (res?.success) {
+      // Re-hydrate every panel from the imported config rather than making the
+      // user restart to see it.
+      state.currentConfig = res.config;
+      hydrateSettingsUI();
+      applyServiceToggles();
+      renderLeaderboard(); // imported watch history
+      showTransferMsg(`Imported ${res.streamers} streamer${res.streamers === 1 ? '' : 's'}.`);
+      appendLogMessage('[Config] Settings imported. Your previous setup was backed up first.');
+    } else {
+      showTransferMsg(res?.error || 'Import failed.', true);
+    }
   });
 }

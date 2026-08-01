@@ -12,6 +12,7 @@ import {
   reloadAllStreamContainers,
   setupGlobalGhostButton,
   setCellPoppedOut,
+  refreshGridCellMeta,
 } from './src/multi-lurk.js';
 import { setupLiveNow, renderLiveNow } from './src/live-now.js';
 import { renderStreamsGrid, updateStats } from './src/dashboard.js';
@@ -244,6 +245,7 @@ function setupBackendListeners() {
     renderStreamsGrid();
     updateStats();
     renderLiveNow();
+    refreshGridCellMeta(); // viewer counts / uptime moved
   });
 
   window.api.onActiveContainersUpdate((openContainers) => {
@@ -263,6 +265,7 @@ function setupBackendListeners() {
     if (state.currentConfig) {
       state.currentConfig.watchTime = data;
       renderLeaderboard();
+      refreshGridCellMeta(); // all-time watch totals ticked up
     }
   });
 }

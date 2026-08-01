@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('api', {
   downloadClip: (url, filename) => ipcRenderer.invoke('download-clip', url, filename),
   openClipWindow: (url) => ipcRenderer.invoke('open-clip-window', url),
 
+  // Config backup / transfer
+  exportConfig: () => ipcRenderer.invoke('export-config'),
+  importConfig: () => ipcRenderer.invoke('import-config'),
+
   // Queries
   getRecentLogs: () => ipcRenderer.invoke('get-recent-logs'),
   getActiveContainers: () => ipcRenderer.invoke('get-active-containers'),

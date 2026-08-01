@@ -2,7 +2,7 @@
 // Each lurked stream has (1) a sidebar tab button and (2) a webview cell in
 // the grid. createStreamTab builds both; removeStreamTab tears them down.
 
-import { state, getPlatformSVG, streamUrl, appendLogMessage } from './state.js';
+import { state, getPlatformSVG, streamUrl, appendLogMessage, fmtDuration, formatViewerCount } from './state.js';
 import { switchTab } from './tabs.js';
 import {
   qualityAndTheaterScript,
@@ -69,6 +69,18 @@ export function updateGridLayout() {
   const tabBtn = document.getElementById('multi-lurk-tab-btn');
   const badge = tabBtn?.querySelector('.active-streams-badge');
   if (badge) badge.textContent = `[${visibleCount}/${totalCount}]`;
+}
+
+// Re-render the meta line on every open cell. Called on each watch-time tick
+// (totals climb) and each scan (viewers/uptime move), so the header stays
+// current without rebuilding the cell — a rebuild would reload the webview.
+export function refreshGridCellMeta() {
+  const cells = document.querySelectorAll('#multi-lurk-grid .stream-grid-cell');
+  cells.forEach(cell => {
+    const meta = cell.querySelector('.stream-cell-meta');
+    if (!meta) return;
+    meta.innerHTML = cellMetaHTML(cell.dataset.platform, cell.dataset.username);
+  });
 }
 
 export function updateGlobalGhostButtonState() {
@@ -144,13 +156,48 @@ function ensureMultiLurkButton() {
   return btn;
 }
 
+// Look up the live status the scanner last reported for a stream.
+function statusFor(platform, username) {
+  const p = platform.toLowerCase();
+  const u = username.toLowerCase();
+  return state.currentStatuses.find(
+    s => s.platform.toLowerCase() === p && s.username.toLowerCase() === u
+  );
+}
+
+// The meta line under a cell's name: all-time watch time for this streamer,
+// their current viewer count, and how long they've been live. Returns '' when
+// there's nothing worth showing so the header stays compact.
+function cellMetaHTML(platform, username) {
+  const key = `${platform.toLowerCase()}:${username.toLowerCase()}`;
+  const minutes = state.currentConfig?.watchTime?.streamers?.[key] || 0;
+  const status = statusFor(platform, username);
+
+  const parts = [];
+  if (minutes > 0) parts.push(`<span class="cell-meta-watched" title="Your all-time watch time for ${username}">${fmtDuration(minutes)} watched</span>`);
+  if (status?.isLive && status.viewerCount) parts.push(`<span title="Current viewers">${formatViewerCount(status.viewerCount)} viewers</span>`);
+
+  if (status?.isLive && status.liveSince) {
+    const started = new Date(status.liveSince).getTime();
+    if (!Number.isNaN(started)) {
+      const upMins = Math.max(0, Math.floor((Date.now() - started) / 60000));
+      if (upMins > 0) parts.push(`<span title="Live for">up ${fmtDuration(upMins)}</span>`);
+    }
+  }
+
+  return parts.join('<span class="cell-meta-sep">·</span>');
+}
+
 function buildCellHTML(platform, username, isQualityDisabled) {
   const p = platform.toLowerCase();
   return `
     <div class="stream-cell-header">
       <div class="stream-cell-identity">
         <div class="platform-badge ${p}">${getPlatformSVG(p)}</div>
-        <span class="stream-cell-name">${username}</span>
+        <div class="stream-cell-titles">
+          <span class="stream-cell-name">${username}</span>
+          <span class="stream-cell-meta">${cellMetaHTML(platform, username)}</span>
+        </div>
       </div>
       <div class="stream-cell-actions">
         <button class="cell-action-btn chat-popout-btn" title="Open chat in your browser (sign in there to chat)">

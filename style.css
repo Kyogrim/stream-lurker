@@ -1032,6 +1032,37 @@ input:checked + .slider:before {
   margin-right: 12px;
 }
 
+/* Per-streamer go-live mode: auto-open / notify only / ignore */
+.mode-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  margin-right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: hsla(240, 5.9%, 15%, 0.3);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.mode-btn.mode-auto {
+  color: var(--cyan-color);
+  border-color: hsla(188, 86%, 53%, 0.45);
+  background-color: hsla(188, 86%, 53%, 0.08);
+}
+.mode-btn.mode-notify {
+  color: hsl(38, 92%, 60%);
+  border-color: hsla(38, 92%, 60%, 0.45);
+  background-color: hsla(38, 92%, 60%, 0.08);
+}
+.mode-btn.mode-ignore {
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+.mode-btn:hover { filter: brightness(1.35); }
+
 .priority-btn {
   background-color: hsla(240, 5.9%, 15%, 0.3);
   border: 1px solid var(--panel-border);
@@ -1674,12 +1705,44 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0; /* let the name/meta ellipsis instead of shoving the buttons out */
+}
+
+.stream-cell-titles {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.2;
 }
 
 .stream-cell-name {
   font-size: 0.85rem;
   font-weight: 700;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* All-time watch time / viewers / uptime for this streamer. */
+.stream-cell-meta {
+  font-size: 0.66rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stream-cell-meta:empty { display: none; }
+.cell-meta-watched { color: var(--cyan-color); }
+.cell-meta-sep { margin: 0 5px; opacity: 0.5; }
+
+/* Cells get short once the grid is dense — drop the meta line rather than let
+   it crowd the eight action buttons. data-streams is set by updateGridLayout;
+   this matches any count above four, however high it goes. */
+#multi-lurk-grid:not([data-streams="1"]):not([data-streams="2"]):not([data-streams="3"]):not([data-streams="4"]) .stream-cell-meta {
+  display: none;
 }
 
 .stream-cell-actions {

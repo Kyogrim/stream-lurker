@@ -31,7 +31,6 @@ let tray = null;
 const activeWindows = new Map(); // Key: platform:username -> true
 const sessionStarts = new Map(); // Key: platform:username -> session start timestamp (ms), for duration tracking
 const popoutWindows = new Map(); // Key: platform:username -> always-on-top BrowserWindow (pop-out / PiP)
-let activeQuestStreamer = null; // Track active quest streamer (lowercase) to prevent preemption/auto-close
 // Renderer crash-recovery backoff: at most N reloads within the window.
 const MAX_RENDERER_RECOVERIES = 3;
 const RENDERER_RECOVERY_WINDOW_MS = 10 * 60 * 1000;
@@ -61,6 +60,7 @@ let config = {
 // Map of already opened stream session identifiers to prevent opening duplicate tabs/windows
 // We store "platform:username:liveSince" or "platform:username:dateString"
 const openedSessions = new Map(); // key -> timestamp for time-based eviction
+const notifiedSessions = new Map(); // key -> timestamp; alert dedupe, separate from opening
 
 let pollIntervalId = null;
 let countdownTimerId = null;
@@ -112,15 +112,56 @@ function getConfigPath() {
   return path.join(userDataPath, 'config.json');
 }
 
-// Load configuration
+// Read and parse a config file. Returns null if it's missing, unreadable, or
+// not a JSON object, so callers can fall through to the next candidate.
+function readConfigFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Load configuration, preferring config.json and falling back to the .bak copy
+// written by saveConfig. A damaged file is always preserved as
+// config.json.corrupt-<timestamp> — previously a parse failure quietly started
+// from defaults and the next autosave overwrote the user's entire history.
 function loadConfig() {
   const configPath = getConfigPath();
+  const backupPath = `${configPath}.bak`;
   try {
-    if (fs.existsSync(configPath)) {
-      const data = fs.readFileSync(configPath, 'utf8');
-      const loaded = JSON.parse(data);
+    let loaded = readConfigFile(configPath);
+    let recovered = false;
+
+    if (!loaded) {
+      const fromBackup = readConfigFile(backupPath);
+      if (fromBackup) {
+        loaded = fromBackup;
+        recovered = true;
+      }
+    }
+
+    // Main file exists but couldn't be used: keep it for manual repair, then get
+    // it out of the way so saveConfig doesn't roll the damaged copy over a good
+    // .bak on the next write.
+    if (fs.existsSync(configPath) && !readConfigFile(configPath)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const salvagePath = `${configPath}.corrupt-${stamp}.json`;
+      try {
+        fs.copyFileSync(configPath, salvagePath);
+        fs.unlinkSync(configPath);
+        addLog(`[Config] config.json was unreadable — preserved a copy as ${path.basename(salvagePath)}.`);
+      } catch (e) {
+        addLog(`[Config] config.json was unreadable and could not be preserved: ${e.message}`);
+      }
+    }
+
+    if (loaded) {
       config = { ...config, ...loaded };
-      
+
       // Initialize defaults for new settings
       if (!config.watchTime) {
         config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 } };
@@ -144,7 +185,12 @@ function loadConfig() {
       // stale saved value so the scanner never polls it.
       config.rumbleEnabled = false;
 
-      addLog('Configuration loaded successfully.');
+      if (recovered) {
+        addLog('[Config] Recovered configuration from config.json.bak — watch history and streamers are intact.');
+        saveConfig(); // rewrite a healthy config.json from the recovered data
+      } else {
+        addLog('Configuration loaded successfully.');
+      }
     } else {
       addLog('No existing configuration found. Creating defaults...');
       config.watchTime = { streamers: {}, platforms: { twitch: 0, kick: 0, youtube: 0, rumble: 0 }, sessions: 0, streamerSessions: {}, daily: {}, longestSessionMs: 0, streamerLongestMs: {}, streamerLastSeen: {} };
@@ -162,6 +208,10 @@ function loadConfig() {
 }
 
 // Save configuration
+// config.json holds everything the user can't get back — monitored streamers,
+// watch history, streaks, credentials, calendar. Write it atomically (temp file
+// + rename) and keep the previous good copy as .bak, so a crash or kill during
+// a write can never leave a truncated file behind.
 function saveConfig(newConfig) {
   if (newConfig) config = newConfig;
   const configPath = getConfigPath();
@@ -170,7 +220,17 @@ function saveConfig(newConfig) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+
+    const json = JSON.stringify(config, null, 2);
+    const tmpPath = `${configPath}.tmp`;
+    fs.writeFileSync(tmpPath, json, 'utf8');
+
+    // Roll the current file to .bak only once the replacement is safely on disk.
+    if (fs.existsSync(configPath)) {
+      try { fs.copyFileSync(configPath, `${configPath}.bak`); } catch (e) { /* best effort */ }
+    }
+
+    fs.renameSync(tmpPath, configPath); // atomic replace
   } catch (err) {
     addLog(`Error saving config: ${err.message}`);
   }
@@ -278,6 +338,9 @@ function createMainWindow() {
     // OS fullscreen. (Maximize is unaffected; see webview:fullscreen in
     // style.css, which cancels the grid's scaling transform while expanded.)
     fullscreenable: false,
+    // Held back until ready-to-show so the dashboard never paints half-built —
+    // and so a startup/tray launch can skip showing it altogether.
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -339,21 +402,13 @@ function createMainWindow() {
   // Load dashboard
   mainWindow.loadFile('index.html');
 
-  // Capture screen diagnostic after load
-  setTimeout(async () => {
-    try {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        addLog('Capturing page screenshot...');
-        const image = await mainWindow.webContents.capturePage();
-        const png = image.toPNG();
-        const targetPath = 'C:\\Users\\tmdav\\.gemini\\antigravity-ide\\brain\\f27a3c68-36a2-4597-9c18-2840f5c9cbae\\dashboard_capture.png';
-        fs.writeFileSync(targetPath, png);
-        addLog(`Dashboard screenshot saved to: ${targetPath}`);
-      }
-    } catch (err) {
-      addLog(`Failed to save screenshot: ${err.message}`);
+  mainWindow.once('ready-to-show', () => {
+    if (shouldStartHidden()) {
+      addLog('[System] Started minimised — running in the system tray.');
+      return; // tray icon (and its Show Dashboard item) is the way back in
     }
-  }, 10000);
+    mainWindow.show();
+  });
 
   // Open DevTools only in development
   if (!app.isPackaged) {
@@ -421,6 +476,66 @@ function sendStreamStatusToUI() {
     const openStreams = Array.from(activeWindows.keys());
     mainWindow.webContents.send('active-containers-update', openStreams);
   }
+}
+
+// Per-streamer alert/open behaviour. Entries saved before this feature existed
+// have no `mode`, so treat a missing value as 'auto' — those users keep exactly
+// the behaviour they had.
+function getStreamerMode(platform, username) {
+  const p = (platform || '').toLowerCase();
+  const u = (username || '').toLowerCase();
+  const entry = config.streamers.find(
+    s => s.platform.toLowerCase() === p && s.username.toLowerCase() === u
+  );
+  const mode = entry && entry.mode;
+  return mode === 'notify' || mode === 'ignore' ? mode : 'auto';
+}
+
+// Desktop alert for a streamer going live. Clicking it brings the dashboard
+// forward and starts watching, which is what makes notify-only mode useful.
+function notifyGoLive(stream) {
+  if (config.notificationsEnabled === false) return;
+  if (!Notification.isSupported()) return;
+
+  try {
+    const notif = new Notification({
+      title: `${stream.username} is LIVE!`,
+      body: `${stream.title || 'Live now'} on ${stream.platform.toUpperCase()}`,
+      silent: false,
+    });
+    notif.on('click', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      spawnStreamContainer(stream.platform, stream.username);
+    });
+    notif.show();
+  } catch (err) {
+    addLog(`[Alerts] Could not show notification: ${err.message}`);
+  }
+}
+
+// Mirror config.launchOnStartup into the OS login items. Started this way the
+// app passes --hidden so it comes up in the tray instead of stealing focus at
+// sign-in; startMinimized does the same for normal launches.
+function applyStartupSettings() {
+  try {
+    if (process.platform === 'linux') return; // setLoginItemSettings is a no-op there
+    const openAtLogin = !!config.launchOnStartup;
+    const current = app.getLoginItemSettings();
+    if (current.openAtLogin === openAtLogin) return;
+    app.setLoginItemSettings({ openAtLogin, args: ['--hidden'] });
+    addLog(`[System] Launch on startup ${openAtLogin ? 'enabled' : 'disabled'}.`);
+  } catch (err) {
+    addLog(`[System] Could not update startup setting: ${err.message}`);
+  }
+}
+
+// True when this launch should stay in the tray rather than showing the window.
+function shouldStartHidden() {
+  return process.argv.includes('--hidden') || !!config.startMinimized;
 }
 
 // Persist pending cookie writes to disk now, instead of waiting for Chromium's
@@ -976,9 +1091,6 @@ async function performScan() {
       const key = `${platform}:${username}`;
       
       if (activeWindows.has(key)) {
-        if (activeQuestStreamer && username === activeQuestStreamer.toLowerCase()) {
-          continue; // Protect quest streamer; monitorQuest manages its lifecycle
-        }
         addLog(`[Lurk] Streamer ${stream.username} on ${stream.platform.toUpperCase()} went offline. Auto-closing container.`);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('close-stream-tab', { platform: stream.platform, username: stream.username });
@@ -989,101 +1101,109 @@ async function performScan() {
     }
   }
 
-  // Handle Auto-Open Lurk triggers
-  if (config.autoOpen) {
-    for (const stream of results) {
-      if (stream.isLive) {
-        const platform = stream.platform.toLowerCase();
-        const username = stream.username.toLowerCase();
-        
-        // Create a unique session key based on start time or day, so we don't open multiple windows in the same stream session
-        const sessionDate = stream.liveSince ? stream.liveSince.substring(0, 19) : new Date().toDateString();
-        const sessionKey = `${platform}:${username}:${sessionDate}`;
+  // Handle go-live alerts and auto-open.
+  //
+  // Notifying and opening are deliberately independent: the notification used to
+  // live inside `if (config.autoOpen)`, so anyone who turned auto-open off got no
+  // alerts at all. Each streamer's mode decides what happens —
+  //   auto   → notify + open (subject to auto-open and tab limits)
+  //   notify → notify only
+  //   ignore → neither, though it's still scanned and shown as live
+  for (const stream of results) {
+    if (stream.isLive) {
+      const platform = stream.platform.toLowerCase();
+      const username = stream.username.toLowerCase();
 
-        if (!openedSessions.has(sessionKey)) {
-          // Evict sessions older than 24 hours to prevent unbounded growth
-          const now = Date.now();
-          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          for (const [key, timestamp] of openedSessions) {
-            if (now - timestamp > TWENTY_FOUR_HOURS) openedSessions.delete(key);
-          }
-          // Enforce platform tab limits
-          let maxTabs = 2;
-          if (platform === 'twitch') maxTabs = config.maxTwitchTabs !== undefined ? config.maxTwitchTabs : 2;
-          else if (platform === 'kick') maxTabs = config.maxKickTabs !== undefined ? config.maxKickTabs : 2;
-          else if (platform === 'youtube') maxTabs = config.maxYoutubeTabs !== undefined ? config.maxYoutubeTabs : 2;
-          else if (platform === 'rumble') maxTabs = config.maxRumbleTabs !== undefined ? config.maxRumbleTabs : 2;
+      // Create a unique session key based on start time or day, so we don't open multiple windows in the same stream session
+      const sessionDate = stream.liveSince ? stream.liveSince.substring(0, 19) : new Date().toDateString();
+      const sessionKey = `${platform}:${username}:${sessionDate}`;
 
-          let currentCount = getActiveTabsCount(platform);
+      const mode = getStreamerMode(platform, username);
+      if (mode === 'ignore') continue;
 
-          if (currentCount >= maxTabs) {
-            // Priority-based preemption: Check if we can close a lower-priority active stream on this platform
-            const activeKeysForPlatform = Array.from(activeWindows.keys())
-              .filter(k => k.startsWith(`${platform}:`))
-              .filter(k => {
-                const [_, activeUser] = k.split(':');
-                return !activeQuestStreamer || activeUser.toLowerCase() !== activeQuestStreamer.toLowerCase();
-              });
+      // Evict sessions older than 24 hours to prevent unbounded growth
+      const now = Date.now();
+      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+      for (const [key, timestamp] of openedSessions) {
+        if (now - timestamp > TWENTY_FOUR_HOURS) openedSessions.delete(key);
+      }
+      for (const [key, timestamp] of notifiedSessions) {
+        if (now - timestamp > TWENTY_FOUR_HOURS) notifiedSessions.delete(key);
+      }
 
-            const activeStreamPriorities = activeKeysForPlatform.map(key => {
-              const [_, activeUser] = key.split(':');
-              const indexInConfig = config.streamers.findIndex(
-                s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === activeUser
-              );
-              return {
-                key,
-                username: activeUser,
-                index: indexInConfig === -1 ? Infinity : indexInConfig
-              };
-            });
+      // Alert once per go-live. Tracked separately from openedSessions so a
+      // stream that can't open yet (tab limit) doesn't re-alert every scan
+      // while still being retried for opening below.
+      if (!notifiedSessions.has(sessionKey)) {
+        notifiedSessions.set(sessionKey, now);
+        addLog(`[Lurk] Detected live stream: ${stream.username} on ${stream.platform.toUpperCase()}!`);
+        notifyGoLive(stream);
+      }
 
-            // Sort descending by index (largest index = lowest priority is first)
-            activeStreamPriorities.sort((a, b) => b.index - a.index);
+      // Everything past here is about actually opening the stream.
+      if (!config.autoOpen || mode !== 'auto') continue;
 
-            const incomingIndex = config.streamers.findIndex(
-              s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
+      if (!openedSessions.has(sessionKey)) {
+        // Enforce platform tab limits
+      let maxTabs = 2;
+        if (platform === 'twitch') maxTabs = config.maxTwitchTabs !== undefined ? config.maxTwitchTabs : 2;
+        else if (platform === 'kick') maxTabs = config.maxKickTabs !== undefined ? config.maxKickTabs : 2;
+        else if (platform === 'youtube') maxTabs = config.maxYoutubeTabs !== undefined ? config.maxYoutubeTabs : 2;
+        else if (platform === 'rumble') maxTabs = config.maxRumbleTabs !== undefined ? config.maxRumbleTabs : 2;
+
+        let currentCount = getActiveTabsCount(platform);
+
+        if (currentCount >= maxTabs) {
+          // Priority-based preemption: Check if we can close a lower-priority active stream on this platform
+          const activeKeysForPlatform = Array.from(activeWindows.keys())
+            .filter(k => k.startsWith(`${platform}:`));
+
+          const activeStreamPriorities = activeKeysForPlatform.map(key => {
+            const [_, activeUser] = key.split(':');
+            const indexInConfig = config.streamers.findIndex(
+              s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === activeUser
             );
-            const incomingPriority = incomingIndex === -1 ? Infinity : incomingIndex;
+            return {
+              key,
+              username: activeUser,
+              index: indexInConfig === -1 ? Infinity : indexInConfig
+            };
+          });
 
-            const lowestPriorityActiveStream = activeStreamPriorities[0];
+          // Sort descending by index (largest index = lowest priority is first)
+          activeStreamPriorities.sort((a, b) => b.index - a.index);
 
-            if (lowestPriorityActiveStream && lowestPriorityActiveStream.index > incomingPriority) {
-              const closeUsername = lowestPriorityActiveStream.username;
-              addLog(`[Lurk] Preempting: Closing lower-priority active stream ${closeUsername} on ${platform.toUpperCase()} (priority index ${lowestPriorityActiveStream.index}) to open higher-priority stream ${stream.username} (priority index ${incomingPriority}).`);
+          const incomingIndex = config.streamers.findIndex(
+            s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
+          );
+          const incomingPriority = incomingIndex === -1 ? Infinity : incomingIndex;
+
+          const lowestPriorityActiveStream = activeStreamPriorities[0];
+
+          if (lowestPriorityActiveStream && lowestPriorityActiveStream.index > incomingPriority) {
+            const closeUsername = lowestPriorityActiveStream.username;
+            addLog(`[Lurk] Preempting: Closing lower-priority active stream ${closeUsername} on ${platform.toUpperCase()} (priority index ${lowestPriorityActiveStream.index}) to open higher-priority stream ${stream.username} (priority index ${incomingPriority}).`);
               
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('close-stream-tab', { platform: stream.platform, username: closeUsername });
-              }
-              activeWindows.delete(`${platform}:${closeUsername}`);
-              // Clear any openedSessions entries for the preempted stream so it can be
-              // reopened later when capacity frees up (otherwise a 24/7 stream whose
-              // liveSince never changes would be permanently skipped on subsequent scans).
-              const preemptedPrefix = `${platform}:${closeUsername}:`;
-              for (const k of openedSessions.keys()) {
-                if (k.startsWith(preemptedPrefix)) openedSessions.delete(k);
-              }
-              currentCount = getActiveTabsCount(platform);
-            } else {
-              addLog(`[Lurk] Limit reached: Skip auto-opening ${stream.platform.toUpperCase()} stream for ${stream.username} (Active: ${currentCount}/${maxTabs})`);
-              continue;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('close-stream-tab', { platform: stream.platform, username: closeUsername });
             }
+            activeWindows.delete(`${platform}:${closeUsername}`);
+            // Clear any openedSessions entries for the preempted stream so it can be
+            // reopened later when capacity frees up (otherwise a 24/7 stream whose
+            // liveSince never changes would be permanently skipped on subsequent scans).
+            const preemptedPrefix = `${platform}:${closeUsername}:`;
+            for (const k of openedSessions.keys()) {
+              if (k.startsWith(preemptedPrefix)) openedSessions.delete(k);
+            }
+            currentCount = getActiveTabsCount(platform);
+          } else {
+            addLog(`[Lurk] Limit reached: Skip auto-opening ${stream.platform.toUpperCase()} stream for ${stream.username} (Active: ${currentCount}/${maxTabs})`);
+            continue;
           }
-
-          addLog(`[Lurk] Detected live stream: ${stream.username} on ${stream.platform.toUpperCase()}!`);
-          
-          // Desktop notification
-          if (Notification.isSupported()) {
-            const notif = new Notification({
-              title: `${stream.username} is LIVE!`,
-              body: `${stream.title} on ${stream.platform.toUpperCase()}`,
-              silent: false
-            });
-            notif.show();
-          }
-          
-          spawnStreamContainer(stream.platform, stream.username);
-          openedSessions.set(sessionKey, Date.now());
         }
+
+        spawnStreamContainer(stream.platform, stream.username);
+        openedSessions.set(sessionKey, Date.now());
       }
     }
   }
@@ -1120,7 +1240,8 @@ function sendCountdownToUI() {
 app.whenReady().then(async () => {
   addLog('Initializing Stream Lurker standalone desktop application...');
   loadConfig();
-  
+  applyStartupSettings();
+
   const rawUA = session.defaultSession.getUserAgent();
   defaultElectronUA = rawUA; // preserve the consistent original for reference/debugging
   // Strip Electron + the app token, AND bump the (old) bundled Chrome version to a
@@ -2060,6 +2181,7 @@ ipcMain.handle('save-config', (event, newConfig) => {
   
   saveConfig(newConfig);
   addLog('Settings saved.');
+  applyStartupSettings();
 
   // If interval changed, reset the poller
   if (config.checkInterval !== oldInterval) {
@@ -2088,7 +2210,7 @@ ipcMain.handle('add-streamer', (event, { platform, username }) => {
     return { success: false, error: 'Streamer already added' };
   }
 
-  config.streamers.push({ platform: platform.toLowerCase(), username: cleanUsername });
+  config.streamers.push({ platform: platform.toLowerCase(), username: cleanUsername, mode: 'auto' });
   saveConfig();
   addLog(`Added streamer: ${cleanUsername} on ${platform.toUpperCase()}`);
   
@@ -2489,6 +2611,67 @@ ipcMain.handle('update-active-tabs', (event, tabsList) => {
   tabsList.forEach(t => activeWindows.set(t, true));
   sendStreamStatusToUI();
   return true;
+});
+
+// ── Config backup / transfer ───────────────────────────────────────────────
+// Lets the user move a setup between machines and keep a copy of their watch
+// history somewhere other than the app's own data directory.
+ipcMain.handle('export-config', async () => {
+  try {
+    const stamp = new Date().toISOString().slice(0, 10);
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Stream Lurker Settings',
+      defaultPath: path.join(app.getPath('documents'), `stream-lurker-backup-${stamp}.json`),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return { success: false, canceled: true };
+
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf8');
+    addLog(`[Config] Exported settings to ${filePath}`);
+    return { success: true, filePath };
+  } catch (err) {
+    addLog(`[Config] Export failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('import-config', async () => {
+  try {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import Stream Lurker Settings',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePaths || !filePaths.length) return { success: false, canceled: true };
+
+    const incoming = readConfigFile(filePaths[0]);
+    if (!incoming) return { success: false, error: 'That file is not valid JSON.' };
+    // Sanity-check it actually looks like a Stream Lurker backup before letting
+    // it replace a working setup.
+    if (!Array.isArray(incoming.streamers) || typeof incoming.watchTime !== 'object' || incoming.watchTime === null) {
+      return { success: false, error: 'That does not look like a Stream Lurker backup (missing streamers / watchTime).' };
+    }
+
+    // Snapshot what's there now so a regretted import is recoverable.
+    const configPath = getConfigPath();
+    if (fs.existsSync(configPath)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      try { fs.copyFileSync(configPath, `${configPath}.preimport-${stamp}.json`); } catch (e) { /* best effort */ }
+    }
+
+    config = { ...config, ...incoming };
+    config.rumbleEnabled = false; // still not supported, whatever the backup says
+    saveConfig();
+
+    const count = config.streamers.length;
+    addLog(`[Config] Imported settings from ${filePaths[0]} (${count} streamer${count === 1 ? '' : 's'}).`);
+    applyStartupSettings();
+    resetPoller();
+    return { success: true, config, streamers: count };
+  } catch (err) {
+    addLog(`[Config] Import failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('get-recent-logs', () => {
