@@ -1037,7 +1037,10 @@ input:checked + .slider:before {
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
-  margin-right: 6px;
+  /* Pushes to the right so it groups with the priority/delete controls rather
+     than crowding the channel name. */
+  margin-left: auto;
+  margin-right: 10px;
   display: flex;
   align-items: center;
   justify-content: center;

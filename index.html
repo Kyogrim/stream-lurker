@@ -820,49 +820,6 @@
             </div>
 
             <div class="settings-group">
-              <label>Startup</label>
-              <div style="display: grid; grid-template-columns: 1fr; gap: 12px; background-color: hsla(240, 5.9%, 15%, 0.15); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--panel-border);">
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                  <div>
-                    <span class="toggle-label" style="font-size: 0.85rem; display: block;">Launch on Windows Startup</span>
-                    <span style="font-size: 0.75rem; color: var(--text-muted);">Start Stream Lurker automatically when you sign in, so the scanner is always running.</span>
-                  </div>
-                  <label class="switch" style="flex-shrink: 0;">
-                    <input type="checkbox" id="launch-on-startup-toggle">
-                    <span class="slider"></span>
-                  </label>
-                </div>
-
-                <div style="display: flex; align-items: center; justify-content: space-between;">
-                  <div>
-                    <span class="toggle-label" style="font-size: 0.85rem; display: block;">Start Minimised to Tray</span>
-                    <span style="font-size: 0.75rem; color: var(--text-muted);">Launch straight to the system tray without opening the dashboard window.</span>
-                  </div>
-                  <label class="switch" style="flex-shrink: 0;">
-                    <input type="checkbox" id="start-minimized-toggle">
-                    <span class="slider"></span>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <div class="settings-group">
-              <label>Backup &amp; Transfer</label>
-              <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <button id="export-config-btn" class="btn btn-sm">
-                  <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  Export Settings
-                </button>
-                <button id="import-config-btn" class="btn btn-sm">
-                  <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                  Import Settings
-                </button>
-                <div id="config-transfer-msg" class="success-msg hidden"></div>
-              </div>
-              <span class="help-text">Saves your streamers, watch history and settings to a file you can keep or move to another PC. A copy of your current setup is kept before any import.</span>
-            </div>
-
-            <div class="settings-group">
               <div class="settings-label-row">
                 <label for="max-kick-tabs-slider">Max Kick Lurk Tabs: <span id="max-kick-tabs-display-val">2</span></label>
               </div>
@@ -907,6 +864,49 @@
                 <option value="source">Source / Best Available</option>
               </select>
               <span class="help-text">Automatically applies this quality resolution inside live stream containers to conserve bandwidth.</span>
+            </div>
+
+            <div class="settings-group">
+              <label>Startup</label>
+              <div style="display: grid; grid-template-columns: 1fr; gap: 12px; background-color: hsla(240, 5.9%, 15%, 0.15); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--panel-border);">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <div>
+                    <span class="toggle-label" style="font-size: 0.85rem; display: block;">Launch on Windows Startup</span>
+                    <span style="font-size: 0.75rem; color: var(--text-muted);">Start Stream Lurker automatically when you sign in, so the scanner is always running.</span>
+                  </div>
+                  <label class="switch" style="flex-shrink: 0;">
+                    <input type="checkbox" id="launch-on-startup-toggle">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                  <div>
+                    <span class="toggle-label" style="font-size: 0.85rem; display: block;">Start Minimised to Tray</span>
+                    <span style="font-size: 0.75rem; color: var(--text-muted);">Launch straight to the system tray without opening the dashboard window.</span>
+                  </div>
+                  <label class="switch" style="flex-shrink: 0;">
+                    <input type="checkbox" id="start-minimized-toggle">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-group">
+              <label>Backup &amp; Transfer</label>
+              <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <button id="export-config-btn" class="btn btn-sm">
+                  <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Export Settings
+                </button>
+                <button id="import-config-btn" class="btn btn-sm">
+                  <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Import Settings
+                </button>
+                <div id="config-transfer-msg" class="success-msg hidden"></div>
+              </div>
+              <span class="help-text">Saves your streamers, watch history and settings to a file you can keep or move to another PC. A copy of your current setup is kept before any import.</span>
             </div>
 
             <div class="settings-action-row">
