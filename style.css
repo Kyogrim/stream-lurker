@@ -800,16 +800,40 @@ input:checked + .slider:before {
 }
 
 /* Manage Streamers Page Layout */
+/* Fills the tab rather than sitting in a fixed-height block at the top: the
+   grid takes the remaining height and the channel list scrolls inside it. */
 .streamer-management-grid {
   display: grid;
-  grid-template-columns: 400px 1fr;
+  grid-template-columns: minmax(320px, 400px) 1fr;
   gap: 30px;
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: stretch;
+}
+
+/* Narrow windows: stack instead of squeezing the list into a sliver. */
+@media (max-width: 1100px) {
+  .streamer-management-grid {
+    grid-template-columns: 1fr;
+    flex: 0 0 auto;
+  }
+  .streamer-management-grid .monitored-list {
+    max-height: 60vh;
+  }
 }
 
 .form-card, .list-card {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+/* min-height:0 lets the inner list actually shrink so its own scrollbar takes
+   over, rather than the card growing past the viewport. */
+.list-card { min-height: 0; }
+.streamer-management-left {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .form-card h3, .list-card h3, .ext-controller-card h3, .ext-list-card h3, .settings-card h3 {
@@ -949,12 +973,16 @@ input:checked + .slider:before {
 }
 
 /* Monitored List Items */
+/* No fixed cap — grows with the window and scrolls internally instead of
+   leaving dead space below the panel. */
 .monitored-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
-  max-height: 480px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-right: 4px;
 }
 
 .list-item {
@@ -3080,120 +3108,51 @@ webview:-webkit-full-screen {
   margin: 6px 0 0;
 }
 
-/* ── Lurk Stats: expand button + modal ─────────────────────────────────── */
-.lb-expand-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: var(--cyan-color);
-  background: var(--cyan-glow);
-  border: 1px solid var(--cyan-color);
-  border-radius: var(--radius-sm);
-  padding: 4px 9px;
-  cursor: pointer;
-  transition: var(--transition);
-}
-.lb-expand-btn:hover {
-  background: var(--cyan-color);
-  color: var(--bg-app);
-  box-shadow: 0 0 12px var(--cyan-glow);
-}
-
-.lb-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(4px);
-  padding: 24px;
-}
-.lb-overlay.open { display: flex; }
-
-.lb-modal {
-  position: relative;
+/* ── Lurk Stats tab ────────────────────────────────────────────────────── */
+/* Was a cramped dashboard side-panel plus a modal; now it's a full tab, so the
+   content just flows in the page and the tab does the scrolling. */
+.leaderboard-panel {
   display: flex;
   flex-direction: column;
-  width: 560px;
-  max-width: 100%;
-  max-height: 88vh;
-  overflow: hidden;
-  padding: 24px;
-  background: var(--panel-glass);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--cyan-color);
-  box-shadow: 0 0 30px var(--cyan-glow);
-}
-
-.lb-close {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 1.5rem;
-  line-height: 1;
-  cursor: pointer;
-}
-.lb-close:hover { color: var(--text-primary); }
-
-.lb-modal-head { margin-bottom: 18px; flex: 0 0 auto; }
-
-/* Only the body scrolls — the rounded modal frame stays put so the scrollbar
-   never runs over the corners or the cyan border. */
-.lb-modal-body {
   flex: 1 1 auto;
-  overflow-y: auto;
-  overflow-x: hidden;
-  margin-right: -12px;
-  padding-right: 12px;
+  min-height: 0;
 }
-.lb-modal-body::-webkit-scrollbar { width: 6px; }
-.lb-modal-body::-webkit-scrollbar-track { background: transparent; }
-.lb-modal-body::-webkit-scrollbar-thumb {
-  background: hsla(188, 86%, 53%, 0.35);
-  border-radius: 999px;
+
+/* Wide windows get the ranking and the platform split side by side instead of
+   one long column. */
+.lb-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
 }
-.lb-modal-body::-webkit-scrollbar-thumb:hover { background: hsla(188, 86%, 53%, 0.55); }
-.lb-modal-head h3 {
-  margin: 0;
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: var(--cyan-color);
-}
-.lb-subtitle {
-  margin: 2px 0 0;
-  font-size: 0.78rem;
-  color: var(--text-muted);
+@media (max-width: 1100px) {
+  .lb-columns { grid-template-columns: 1fr; gap: 0; }
 }
 
 .lb-stat-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-bottom: 20px;
+  /* Fits as many cards per row as the window allows rather than a fixed three. */
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
 }
 .lb-stat-card {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 12px 10px;
+  gap: 4px;
+  padding: 16px 16px;
   background: hsla(240, 5.9%, 15%, 0.25);
   border: 1px solid var(--panel-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
 }
 .lb-stat-val {
-  font-size: 1.05rem;
+  font-size: 1.35rem;
   font-weight: 800;
   line-height: 1.15;
 }
 .lb-stat-lbl {
-  font-size: 0.66rem;
+  font-size: 0.68rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -3395,6 +3354,12 @@ webview:-webkit-full-screen {
 }
 
 /* ── Activity heatmap ──────────────────────────────────────────────────── */
+/* Shrink-wraps the grid so the Less/More legend sits under the squares instead
+   of drifting to the far edge of the tab. */
+.lb-heatmap {
+  width: fit-content;
+  max-width: 100%;
+}
 .lb-hm-grid {
   display: grid;
   grid-template-rows: repeat(7, 12px);

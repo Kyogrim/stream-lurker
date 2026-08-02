@@ -41,6 +41,14 @@
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Manage Streamers
         </button>
+        <button class="nav-btn" data-tab="leaderboard">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="20" x2="18" y2="10"></line>
+            <line x1="12" y1="20" x2="12" y2="4"></line>
+            <line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+          Lurk Stats
+        </button>
         <button class="nav-btn" data-tab="calendar">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
@@ -169,43 +177,17 @@
                 <span class="stat-lbl">Open Containers</span>
               </div>
             </div>
-
-            <!-- Watch Time Leaderboard & Stats -->
-            <div class="watch-time-leaderboard glass-panel" style="margin-top: 20px; padding: 20px; display: flex; flex-direction: column; gap: 16px;">
-              <div class="leaderboard-header" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 10px;">
-                <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--cyan-color); border-bottom: none; padding-bottom: 0; margin-bottom: 0;">LURK LEADERBOARD</h3>
-                <button id="leaderboard-expand-btn" class="lb-expand-btn" title="Open full lurk stats">
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="18" y1="20" x2="18" y2="10"></line>
-                    <line x1="12" y1="20" x2="12" y2="4"></line>
-                    <line x1="6" y1="20" x2="6" y2="14"></line>
-                  </svg>
-                  View All Stats
-                </button>
-              </div>
-              <div id="leaderboard-list" class="leaderboard-list" style="display: flex; flex-direction: column; gap: 10px;">
-                <div class="no-stats-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 10px 0;">No watch history tracked yet. Keep a stream tab open to track hours!</div>
-              </div>
-              <div class="platform-breakdown-container" style="display: flex; flex-direction: column; gap: 6px; margin-top: 10px;">
-                <span style="font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">Watch Time by Platform</span>
-                <div class="platform-bar-wrapper" style="display: flex; height: 8px; border-radius: 4px; overflow: hidden; background-color: var(--panel-border);">
-                  <div id="platform-bar-twitch" style="width: 0%; background-color: var(--twitch-color); transition: var(--transition);"></div>
-                  <div id="platform-bar-kick" style="width: 0%; background-color: var(--kick-color); transition: var(--transition);"></div>
-                  <div id="platform-bar-youtube" style="width: 0%; background-color: var(--youtube-color); transition: var(--transition);"></div>
-                  <div id="platform-bar-rumble" style="width: 0%; background-color: var(--rumble-color); transition: var(--transition);"></div>
-                </div>
-                <div class="platform-legend" style="display: flex; justify-content: space-between; font-size: 0.62rem; color: var(--text-secondary); margin-top: 4px; gap: 2px;">
-                  <span class="legend-twitch" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--twitch-color);"></span>Twitch: <span id="legend-twitch-h">0h</span></span>
-                  <span class="legend-kick" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--kick-color);"></span>Kick: <span id="legend-kick-h">0h</span></span>
-                  <span class="legend-youtube" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--youtube-color);"></span>YouTube: <span id="legend-youtube-h">0h</span></span>
-                  <span class="legend-rumble" style="display: flex; align-items: center; gap: 3px;"><span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: var(--rumble-color);"></span>Rumble: <span id="legend-rumble-h">0h</span></span>
-                </div>
-              </div>
-            </div>
-
-
           </div>
         </div>
+      </section>
+
+      <!-- Lurk Stats Tab -->
+      <section id="tab-leaderboard" class="tab-content">
+        <div class="tab-header">
+          <h2>Lurk Stats</h2>
+          <p>Your all-time lurking footprint. Click any streamer for their own breakdown.</p>
+        </div>
+        <div id="leaderboard-panel" class="leaderboard-panel"></div>
       </section>
 
       <!-- Platform Logins Tab -->

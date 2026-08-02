@@ -1,9 +1,7 @@
-// Top watched-streamers list + platform hours breakdown (dashboard panel),
-// plus an expandable "Lurk Stats" modal with the full ranking and fun totals.
+// Lurk Stats tab: headline totals, activity heatmap, the full watch-time
+// ranking, per-platform split, and a per-streamer drill-down.
 
 import { PLATFORMS, state, getPlatformSVG, isPlatformEnabled, platformColorVar, fmtDuration } from './state.js';
-
-const TOP_N = 5;
 
 const EMPTY_HOURS = { twitch: 0, kick: 0, youtube: 0, rumble: 0 };
 
@@ -90,7 +88,10 @@ function buildHeatmap(daily) {
     cursor.setDate(cursor.getDate() + 1);
   }
 
+  // Wrapped so the legend right-aligns to the heatmap itself rather than to the
+  // full width of the tab.
   return `
+    <div class="lb-heatmap">
     <div class="lb-hm-grid">${cells}</div>
     <div class="lb-hm-legend">
       <span>Less</span>
@@ -100,6 +101,7 @@ function buildHeatmap(daily) {
       <span class="lb-hm-cell" data-level="3"></span>
       <span class="lb-hm-cell" data-level="4"></span>
       <span>More</span>
+    </div>
     </div>
   `;
 }
@@ -177,83 +179,10 @@ function getStreamerDetail(key) {
   };
 }
 
-// Which modal view is showing: null = overview, otherwise the streamer key.
+// Which view the tab is showing: null = overview, otherwise a streamer key.
 let currentDetailKey = null;
 
-export function renderLeaderboard() {
-  const list = document.getElementById('leaderboard-list');
-  if (!list) return;
-  list.innerHTML = '';
-
-  const stats = getStats();
-  const sortedStreamers = stats.streamers.slice(0, TOP_N);
-
-  if (sortedStreamers.length === 0) {
-    list.innerHTML = `
-      <div class="no-stats-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 10px 0; width: 100%;">
-        No watch history tracked yet. Keep a stream tab open to track hours!
-      </div>
-    `;
-  } else {
-    const maxMinutes = sortedStreamers[0].minutes || 1;
-    sortedStreamers.forEach((s, idx) => {
-      const rankEmoji = idx === 0 ? '👑' : `#${idx + 1}`;
-      const pct = Math.max(5, (s.minutes / maxMinutes) * 100);
-      const platColor = platformColorVar(s.platform);
-
-      const card = document.createElement('div');
-      card.className = 'leaderboard-item';
-      card.title = `View ${s.username}'s lurk stats`;
-      card.style.cssText = `
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        padding: 8px 10px;
-        background-color: hsla(240, 5.9%, 15%, 0.15);
-        border: 1px solid var(--panel-border);
-        border-radius: var(--radius-sm);
-        cursor: pointer;
-      `;
-      card.addEventListener('click', () => openLeaderboardModal(`${s.platform}:${s.username}`));
-      card.innerHTML = `
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <span style="font-size: 0.8rem; font-weight: 700; color: var(--cyan-color);">${rankEmoji}</span>
-            <span class="platform-badge ${s.platform}" style="width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor};">
-              ${getPlatformSVG(s.platform)}
-            </span>
-            <span style="font-size: 0.85rem; font-weight: 600;">${s.username}</span>
-          </div>
-          <span style="font-size: 0.8rem; font-weight: 700; color: var(--text-primary);">${(s.minutes / 60).toFixed(1)} hrs</span>
-        </div>
-        <div style="width: 100%; height: 4px; background-color: var(--panel-border); border-radius: 2px; overflow: hidden;">
-          <div style="width: ${pct}%; height: 100%; background-color: ${platColor}; border-radius: 2px;"></div>
-        </div>
-      `;
-      list.appendChild(card);
-    });
-  }
-
-  // Platform hours breakdown legend + bars.
-  const mins = Object.fromEntries(
-    PLATFORMS.map(p => [p, isPlatformEnabled(p) ? (stats.platforms[p] || 0) : 0])
-  );
-  const total = PLATFORMS.reduce((sum, p) => sum + mins[p], 0) || 1;
-
-  for (const p of PLATFORMS) {
-    const legendEl = document.getElementById(`legend-${p}-h`);
-    if (legendEl) legendEl.textContent = `${(mins[p] / 60).toFixed(1)}h`;
-    const barEl = document.getElementById(`platform-bar-${p}`);
-    if (barEl) barEl.style.width = `${(mins[p] / total) * 100}%`;
-  }
-
-  // Keep an open modal in sync as watch time ticks in (preserving whichever
-  // view — overview or a streamer detail — the user is currently looking at).
-  const overlay = document.getElementById('leaderboard-overlay');
-  if (overlay && overlay.classList.contains('open')) refreshModal();
-}
-
-// ── Expandable "Lurk Stats" modal ─────────────────────────────────────────
+function panelEl() { return document.getElementById('leaderboard-panel'); }
 
 function statCard(value, label, accent) {
   return `
@@ -264,15 +193,17 @@ function statCard(value, label, accent) {
   `;
 }
 
-function renderModalContent() {
-  const body = document.getElementById('leaderboard-modal-body');
-  if (!body) return;
+// The whole-tab overview: headline figures, activity heatmap, the complete
+// ranking, and the per-platform split.
+function renderOverview() {
+  const host = panelEl();
+  if (!host) return;
 
   currentDetailKey = null;
   const stats = getStats();
 
   if (stats.streamerCount === 0 && stats.sessions === 0) {
-    body.innerHTML = `
+    host.innerHTML = `
       <div class="lb-empty">
         No watch history tracked yet.<br>Open a stream and let it run to start building your lurk stats!
       </div>
@@ -284,8 +215,8 @@ function renderModalContent() {
     ? `${PLATFORM_LABELS[stats.topPlatform]} · ${(stats.topPlatformMins / 60).toFixed(1)}h`
     : '—';
   const topPlatformColor = stats.topPlatform ? platformColorVar(stats.topPlatform) : 'var(--cyan-color)';
-
   const streakVal = stats.streaks.current > 0 ? `${stats.streaks.current}d 🔥` : '0d';
+
   const cards = [
     statCard(fmtDuration(stats.totalMinutes), 'Total Watch Time'),
     statCard(stats.sessions.toLocaleString(), 'Lurk Sessions'),
@@ -298,7 +229,6 @@ function renderModalContent() {
     statCard(topPlatformLabel, 'Top Platform', topPlatformColor),
   ].join('');
 
-  // Full ranked list (everyone, not just the top 5).
   const maxMinutes = stats.top?.minutes || 1;
   const rows = stats.streamers.map((s, idx) => {
     const pct = Math.max(4, (s.minutes / maxMinutes) * 100);
@@ -321,7 +251,6 @@ function renderModalContent() {
     `;
   }).join('');
 
-  // Per-platform breakdown.
   const platTotal = PLATFORMS.reduce((sum, p) => sum + (isPlatformEnabled(p) ? (stats.platforms[p] || 0) : 0), 0) || 1;
   const platRows = PLATFORMS.filter(p => isPlatformEnabled(p)).map(p => {
     const m = stats.platforms[p] || 0;
@@ -338,10 +267,10 @@ function renderModalContent() {
 
   const movies = Math.floor(stats.totalMinutes / 120);
   const funFact = movies >= 1
-    ? `🍿 That's about <strong>${movies.toLocaleString()}</strong> feature-length ${movies === 1 ? 'movie' : 'movies'}' worth of lurking.`
-    : `Keep lurking to unlock more stats!`;
+    ? `🍿 That's about <strong>${movies.toLocaleString()}</strong> feature-length ${movies === 1 ? 'movie' : 'movies'} worth of lurking.`
+    : 'Keep lurking to unlock more stats!';
 
-  body.innerHTML = `
+  host.innerHTML = `
     <div class="lb-stat-grid">${cards}</div>
 
     <div class="lb-section">
@@ -351,25 +280,27 @@ function renderModalContent() {
 
     <p class="lb-funfact">${funFact}</p>
 
-    <div class="lb-section">
-      <h4>Full Leaderboard</h4>
-      <div class="lb-full-list">${rows || '<div class="lb-empty-sm">No streamer history yet.</div>'}</div>
-    </div>
+    <div class="lb-columns">
+      <div class="lb-section">
+        <h4>Full Leaderboard</h4>
+        <div class="lb-full-list">${rows || '<div class="lb-empty-sm">No streamer history yet.</div>'}</div>
+      </div>
 
-    <div class="lb-section">
-      <h4>Watch Time by Platform</h4>
-      <div class="lb-plat-list">${platRows}</div>
+      <div class="lb-section">
+        <h4>Watch Time by Platform</h4>
+        <div class="lb-plat-list">${platRows}</div>
+      </div>
     </div>
   `;
 }
 
 // Per-streamer drill-down shown when a leaderboard row is clicked.
 function renderStreamerDetail(key) {
-  const body = document.getElementById('leaderboard-modal-body');
-  if (!body) return;
+  const host = panelEl();
+  if (!host) return;
 
   const d = getStreamerDetail(key);
-  if (!d) { renderModalContent(); return; }
+  if (!d) { renderOverview(); return; }
 
   currentDetailKey = key;
   const platColor = platformColorVar(d.platform);
@@ -385,7 +316,7 @@ function renderStreamerDetail(key) {
     statCard(`${d.shareOfPlatform.toFixed(1)}%`, `Of ${PLATFORM_LABELS[d.platform]}`, platColor),
   ].join('');
 
-  body.innerHTML = `
+  host.innerHTML = `
     <button class="lb-back-btn">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
       Back to all stats
@@ -405,76 +336,29 @@ function renderStreamerDetail(key) {
   `;
 }
 
-// Re-render whichever modal view is active without losing the user's place.
-function refreshModal() {
+// Public entry point. Re-renders whichever view is open, so the minute-by-minute
+// watch-time updates don't bounce the user out of a streamer's detail page.
+export function renderLeaderboard() {
+  if (!panelEl()) return;
   if (currentDetailKey) renderStreamerDetail(currentDetailKey);
-  else renderModalContent();
+  else renderOverview();
 }
 
-function ensureModal() {
-  let overlay = document.getElementById('leaderboard-overlay');
-  if (overlay) return overlay;
+export function setupLeaderboard() {
+  const host = panelEl();
+  if (!host) return;
 
-  overlay = document.createElement('div');
-  overlay.id = 'leaderboard-overlay';
-  overlay.className = 'lb-overlay';
-  overlay.innerHTML = `
-    <div class="lb-modal" role="dialog" aria-modal="true" aria-label="Lurk Stats">
-      <button class="lb-close" title="Close" aria-label="Close">&times;</button>
-      <div class="lb-modal-head">
-        <h3>📊 Lurk Stats</h3>
-        <p class="lb-subtitle">Your all-time lurking footprint</p>
-      </div>
-      <div class="lb-modal-body" id="leaderboard-modal-body"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const close = () => closeLeaderboardModal();
-  overlay.querySelector('.lb-close').addEventListener('click', close);
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-
-  // Delegated handlers: the body is re-rendered on every view switch, so bind
-  // once on the persistent container.
-  const body = overlay.querySelector('#leaderboard-modal-body');
-  body.addEventListener('click', (e) => {
-    if (e.target.closest('.lb-back-btn')) { renderModalContent(); return; }
+  // Delegated: the panel is re-rendered on every view switch and stats tick.
+  host.addEventListener('click', (e) => {
+    if (e.target.closest('.lb-back-btn')) { renderOverview(); return; }
     const row = e.target.closest('.lb-row-clickable');
     if (row?.dataset.key) renderStreamerDetail(row.dataset.key);
   });
-  body.addEventListener('keydown', (e) => {
+  host.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const row = e.target.closest('.lb-row-clickable');
     if (row?.dataset.key) { e.preventDefault(); renderStreamerDetail(row.dataset.key); }
   });
 
-  return overlay;
-}
-
-function onKeydown(e) {
-  if (e.key === 'Escape') closeLeaderboardModal();
-}
-
-// Opens the stats modal. Pass a "platform:username" key to jump straight to that
-// streamer's detail view (used when a leaderboard name is clicked).
-export function openLeaderboardModal(streamerKey) {
-  const overlay = ensureModal();
-  if (typeof streamerKey === 'string' && getStreamerDetail(streamerKey)) {
-    renderStreamerDetail(streamerKey);
-  } else {
-    renderModalContent();
-  }
-  overlay.classList.add('open');
-  document.addEventListener('keydown', onKeydown);
-}
-
-export function closeLeaderboardModal() {
-  const overlay = document.getElementById('leaderboard-overlay');
-  if (overlay) overlay.classList.remove('open');
-  document.removeEventListener('keydown', onKeydown);
-}
-
-export function setupLeaderboard() {
-  const btn = document.getElementById('leaderboard-expand-btn');
-  if (btn) btn.addEventListener('click', () => openLeaderboardModal());
+  renderLeaderboard();
 }
