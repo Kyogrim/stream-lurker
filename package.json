@@ -1,6 +1,6 @@
 {
   "name": "stream-lurker",
-  "version": "0.11.0-beta",
+  "version": "0.12.0-beta",
   "description": "Standalone desktop application to check and automatically lurk in Twitch & Kick streams with adblock extension support.",
   "main": "main.js",
   "scripts": {
