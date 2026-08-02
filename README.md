@@ -2,7 +2,7 @@
 
 # Stream Lurker
 
-**Watch every streamer you follow — without watching every streamer you follow.**
+**Lurk everything. Miss nothing.**
 
 A desktop app that monitors your favourite Twitch, Kick and YouTube channels, opens them
 automatically the moment they go live, and lets you lurk a whole lineup at once in a single
