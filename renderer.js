@@ -15,6 +15,7 @@ import {
   refreshGridCellMeta,
 } from './src/multi-lurk.js';
 import { setupLiveNow, renderLiveNow } from './src/live-now.js';
+import { setupOnboarding, maybeShowOnboarding } from './src/onboarding.js';
 import { renderStreamsGrid, updateStats } from './src/dashboard.js';
 import { renderMonitoredList } from './src/streamers.js';
 import { renderExtensionsList, renderExtensionCatalog } from './src/extensions.js';
@@ -283,6 +284,7 @@ async function init() {
   setupCalendarHandlers();
   setupLeaderboard();
   setupLiveNow();
+  setupOnboarding();
   setupUpdater();
 
   try {
@@ -336,6 +338,9 @@ async function init() {
     console.log('Initializing clips manager...');
     initClipsManager();
     console.log('Dashboard initialization completed fully!');
+
+    // Fresh installs only — main marks existing configs as already onboarded.
+    maybeShowOnboarding();
 
     // Silent delayed sync to keep platform schedules fresh.
     setTimeout(async () => {

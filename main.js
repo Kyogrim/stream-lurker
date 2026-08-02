@@ -180,6 +180,9 @@ function loadConfig() {
       if (!config.defaultQuality) config.defaultQuality = '160p';
       if (!config.disabledAutoQuality) config.disabledAutoQuality = {};
       if (!config.accounts) config.accounts = {};
+      // Anyone with an existing config has already found their way around, so
+      // don't greet upgraders with the first-run guide.
+      if (config.onboardingComplete == null) config.onboardingComplete = true;
 
       // Rumble is a "coming soon" feature — force it off regardless of any
       // stale saved value so the scanner never polls it.
@@ -200,6 +203,7 @@ function loadConfig() {
       config.defaultQuality = '160p';
       config.disabledAutoQuality = {};
       config.accounts = {};
+      config.onboardingComplete = false; // fresh install → run the setup guide
       saveConfig(config);
     }
   } catch (err) {

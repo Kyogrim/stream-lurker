@@ -3534,3 +3534,115 @@ webview:-webkit-full-screen {
 
 
 
+
+/* ── First-run setup guide ─────────────────────────────────────────────── */
+.ob-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  padding: 24px;
+}
+.ob-overlay.open { display: flex; }
+
+.ob-modal {
+  width: 520px;
+  max-width: 100%;
+  padding: 32px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--cyan-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 40px var(--cyan-glow);
+  text-align: center;
+}
+
+.ob-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--cyan-color);
+  background: var(--cyan-glow);
+  border: 1px solid var(--cyan-color);
+}
+
+.ob-title {
+  margin: 0 0 12px;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ob-body {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+.ob-body strong { color: var(--text-primary); }
+.ob-body em { color: var(--cyan-color); font-style: normal; }
+
+.ob-action {
+  margin-top: 20px;
+  padding: 9px 18px;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--cyan-color);
+  background: var(--cyan-glow);
+  border: 1px solid var(--cyan-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.ob-action:hover { background: var(--cyan-color); color: var(--bg-app); }
+
+.ob-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid var(--panel-border);
+}
+.ob-dots { display: flex; gap: 6px; }
+.ob-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--panel-border);
+  transition: var(--transition);
+}
+.ob-dot.active { background: var(--cyan-color); box-shadow: 0 0 8px var(--cyan-glow); }
+
+.ob-buttons { display: flex; align-items: center; gap: 10px; }
+.ob-buttons button {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.ob-skip, .ob-back {
+  background: none;
+  border: 1px solid var(--panel-border);
+  color: var(--text-muted);
+}
+.ob-skip:hover, .ob-back:hover { color: var(--text-primary); border-color: var(--border-focus); }
+.ob-next {
+  background: var(--cyan-color);
+  border: 1px solid var(--cyan-color);
+  color: var(--bg-app);
+  font-weight: 700;
+}
+.ob-next:hover { box-shadow: 0 0 14px var(--cyan-glow); }
