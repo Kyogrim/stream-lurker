@@ -483,13 +483,19 @@ gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --
 - `gh api` endpoints take **no leading slash** (`gh api markdown`, not `gh api /markdown`).
 - Python reading the config must pass `encoding='utf-8'` — stream titles contain emoji.
 
-### Two rules learned the hard way
+### Three rules learned the hard way
 
 - **Never `git checkout <file>` to unwind a temporary patch** while that file holds uncommitted work.
   It discards everything, not just the patch. Commit first, or revert the patch with a targeted edit.
 - **Don't trust bare-HTTP auth checks against Google.** Fetching youtube.com with the cookie jar
   returns `"LOGGED_IN":false` for sessions that are perfectly alive in a real browser context.
   Verify auth inside a webview (`window.ytcfg.get('LOGGED_IN')`), never from a plain request.
+- **Never point a second Electron process at the live user profile.** Two processes sharing one
+  Chromium profile (`%APPDATA%/stream-lurker`) can wipe the cookie store — a full set of platform
+  logins was destroyed this way by a throwaway test script overlapping the running app. Copy the
+  profile to the scratchpad and point the script at the copy, and close the app first either way.
+  Note that loose scripts otherwise default to `%APPDATA%/Electron`, a profile with none of the
+  app's cookies, so results from one are meaningless unless `app.setPath('userData', ...)` is set.
 
 ### Miscellany
 
