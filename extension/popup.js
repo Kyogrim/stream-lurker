@@ -99,6 +99,9 @@ async function connect(platform) {
     const j = await r.json();
     if (j.success) {
       setResult(`✓ ${platform} connected${j.username ? ' as ' + j.username : ''} (${j.cookiesSet} cookies).`, 'ok');
+      // Tell the background worker to keep this one refreshed from now on —
+      // a one-off snapshot goes stale as the platform rotates its tokens.
+      try { chrome.runtime.sendMessage({ type: 'connected', platform }); } catch (e) { /* worker asleep */ }
     } else {
       setResult(j.error || 'Import failed.', 'err');
     }

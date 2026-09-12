@@ -1376,6 +1376,11 @@ app.whenReady().then(async () => {
   // Validate saved sessions after UI is ready
   setTimeout(validateSavedSessions, 6000);
 
+  // Confirm with YouTube itself that the session still works — cookie presence
+  // alone can't tell. Once after startup settles, then periodically.
+  setTimeout(checkYouTubeSessionHealth, 45000);
+  setInterval(checkYouTubeSessionHealth, 45 * 60 * 1000);
+
   // Periodic debounced watch time save (every 5 min instead of every 60s)
   setInterval(() => {
     if (watchTimeDirty) {
@@ -1511,6 +1516,100 @@ async function fetchTwitchUsername(token) {
 }
 
 // Session Validation on Startup
+// ── YouTube session liveness ───────────────────────────────────────────────
+// Whether Google still accepts the session can only be answered from inside a
+// real page. A plain net.fetch with the cookie jar reports signed-out for
+// sessions that work fine in a browser, so it must never drive this decision.
+// Returns 'live' | 'signed-out' | 'unknown'; anything short of two corroborating
+// signals on a fully-loaded page is 'unknown', and 'unknown' changes nothing.
+async function probeYouTubeLogin() {
+  let win = null;
+  try {
+    win = new BrowserWindow({
+      width: 1280,
+      height: 720,
+      show: false,
+      webPreferences: {
+        partition: 'persist:default',
+        sandbox: false,
+        contextIsolation: true,
+        nodeIntegration: false,
+        backgroundThrottling: false,
+      },
+    });
+    win.webContents.setUserAgent(normalizedUserAgent);
+    win.webContents.setAudioMuted(true);
+
+    await win.loadURL('https://www.youtube.com/', { userAgent: normalizedUserAgent });
+    await new Promise(r => setTimeout(r, 6000)); // let ytcfg populate
+
+    const probe = await win.webContents.executeJavaScript(`
+      (() => {
+        try {
+          const cfgReady = !!(window.ytcfg && window.ytcfg.get);
+          return {
+            cfgReady,
+            loggedIn: cfgReady ? window.ytcfg.get('LOGGED_IN') : null,
+            hasAvatar: !!document.querySelector('button#avatar-btn, #avatar-btn, [aria-label*="Account"]'),
+            hasSignIn: !!document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com/ServiceLogin"]')
+          };
+        } catch (e) { return null; }
+      })()
+    `);
+
+    if (!probe || !probe.cfgReady) return 'unknown'; // page never really loaded
+    if (probe.loggedIn === true || probe.hasAvatar) return 'live';
+    // Only call it dead when the player config says so AND the page is actually
+    // offering a sign-in link.
+    if (probe.loggedIn === false && probe.hasSignIn) return 'signed-out';
+    return 'unknown';
+  } catch (e) {
+    return 'unknown';
+  } finally {
+    try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+  }
+}
+
+// Consecutive confirmed signed-out probes. One is a warning; two in a row is
+// what it takes to actually mark the account disconnected.
+let youtubeSignedOutStreak = 0;
+
+async function checkYouTubeSessionHealth() {
+  if (!config.accounts || !config.accounts.youtube) return; // nothing to lose
+  if (config.youtubeEnabled === false) return;
+
+  const state = await probeYouTubeLogin();
+
+  if (state === 'live') {
+    if (youtubeSignedOutStreak > 0) addLog('[Auth] YouTube session is healthy again.');
+    youtubeSignedOutStreak = 0;
+    return;
+  }
+  if (state === 'unknown') return; // never act on an inconclusive probe
+
+  youtubeSignedOutStreak++;
+  if (youtubeSignedOutStreak < 2) {
+    addLog('[Auth] YouTube looks signed out. Re-checking before flagging it — if this persists, reconnect from Platform Logins.');
+    return;
+  }
+
+  addLog('[Auth] YouTube session has expired. Reconnect from Platform Logins (1-click extension, or paste cookies).');
+  delete config.accounts.youtube;
+  saveConfig();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('session-expired', { platform: 'youtube' });
+  }
+  if (config.notificationsEnabled !== false && Notification.isSupported()) {
+    try {
+      new Notification({
+        title: 'YouTube session expired',
+        body: 'Stream Lurker is signed out of YouTube. Reconnect from Platform Logins.',
+        silent: true,
+      }).show();
+    } catch (e) { /* non-fatal */ }
+  }
+}
+
 async function validateSavedSessions() {
   const platformsToCheck = ['twitch', 'kick', 'youtube', 'rumble'];
   addLog('[Auth] Validating saved platform sessions...');
@@ -3669,7 +3768,7 @@ async function resolveTwitchUser(token) {
 
 // Import functions used by the extension receiver. Each takes an array of cookie
 // objects (as returned by chrome.cookies.getAll) for that platform.
-async function importTwitchSession(cookieList) {
+async function importTwitchSession(cookieList, opts = {}) {
   const list = (cookieList || [])
     .filter(c => c && c.name && /(^|\.)twitch\.tv$/.test((c.domain || '').replace(/^\./, '')))
     .map(c => ({ ...c, httpOnly: c.name.toLowerCase() === 'auth-token' ? false : !!c.httpOnly }));
@@ -3684,12 +3783,12 @@ async function importTwitchSession(cookieList) {
   config.accounts = config.accounts || {};
   config.accounts.twitch = username;
   saveConfig();
-  notifyLoginSuccess('twitch', username);
-  addLog(`[Ext] Imported Twitch session for ${username} (${setCount} cookies).`);
+  if (!opts.auto) notifyLoginSuccess('twitch', username);
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Twitch session for ${username} (${setCount} cookies).`);
   return { success: true, username, cookiesSet: setCount };
 }
 
-async function importGoogleSession(cookieList) {
+async function importGoogleSession(cookieList, opts = {}) {
   const relevant = (cookieList || []).filter(c => {
     const d = (c.domain || '').replace(/^\./, '').toLowerCase();
     return /(^|\.)(google\.com|youtube\.com|youtube-nocookie\.com|ytimg\.com|gstatic\.com|googleapis\.com)$/.test(d);
@@ -3698,23 +3797,21 @@ async function importGoogleSession(cookieList) {
   const coreNames = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'LSID', '__Secure-1PSID', '__Secure-3PSID'];
   if (!relevant.some(c => coreNames.includes(c.name))) return { success: false, error: 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).' };
   const setCount = await writeCookieList(relevant, '.youtube.com');
-  let loggedIn = false;
-  try {
-    const hdr = relevant.filter(c => /youtube\.com$/.test((c.domain || '').replace(/^\./, ''))).map(c => `${c.name}=${c.value}`).join('; ');
-    if (hdr) {
-      const resp = await net.fetch('https://www.youtube.com/', { headers: { 'Cookie': hdr, 'User-Agent': normalizedUserAgent } });
-      loggedIn = /"LOGGED_IN":\s*true/.test(await resp.text());
-    }
-  } catch (e) {}
+
+  // No net.fetch check here on purpose: fetching youtube.com with the cookie jar
+  // reports signed-out for sessions that work perfectly in a browser, so it
+  // can't verify anything. checkYouTubeSessionHealth() answers that properly
+  // from inside a real page, on its own schedule.
   config.accounts = config.accounts || {};
   config.accounts.youtube = 'YouTube User';
   saveConfig();
-  notifyLoginSuccess('youtube', 'YouTube User');
-  addLog(`[Ext] Imported Google/YouTube session (${setCount} cookies, logged-in: ${loggedIn}).`);
-  return { success: true, username: 'YouTube User', cookiesSet: setCount, verified: loggedIn };
+  youtubeSignedOutStreak = 0; // fresh cookies — give it a clean slate
+  if (!opts.auto) notifyLoginSuccess('youtube', 'YouTube User');
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Google/YouTube session (${setCount} cookies).`);
+  return { success: true, username: 'YouTube User', cookiesSet: setCount };
 }
 
-async function importKickSession(cookieList) {
+async function importKickSession(cookieList, opts = {}) {
   const relevant = (cookieList || []).filter(c => /(^|\.)kick\.com$/.test((c.domain || '').replace(/^\./, '').toLowerCase()));
   if (!relevant.length) return { success: false, error: 'No kick.com cookies found. Open kick.com (logged in) first.' };
   if (!relevant.some(c => /session/i.test(c.name))) return { success: false, error: 'Missing the Kick session cookie.' };
@@ -3722,8 +3819,8 @@ async function importKickSession(cookieList) {
   config.accounts = config.accounts || {};
   if (!config.accounts.kick) config.accounts.kick = 'Kick User';
   saveConfig();
-  notifyLoginSuccess('kick', config.accounts.kick);
-  addLog(`[Ext] Imported Kick session (${setCount} cookies).`);
+  if (!opts.auto) notifyLoginSuccess('kick', config.accounts.kick);
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Kick session (${setCount} cookies).`);
   return { success: true, username: config.accounts.kick, cookiesSet: setCount };
 }
 
@@ -3766,10 +3863,13 @@ function startCookieReceiver(portIndex = 0) {
         }
         const platform = String(payload.platform || '').toLowerCase();
         const cookies = Array.isArray(payload.cookies) ? payload.cookies : [];
+        // A periodic background re-sync from the extension, not a click. Same
+        // import, but it must not announce a fresh login every 30 minutes.
+        const opts = { auto: payload.auto === true };
         let result;
-        if (platform === 'twitch') result = await importTwitchSession(cookies);
-        else if (platform === 'youtube') result = await importGoogleSession(cookies);
-        else if (platform === 'kick') result = await importKickSession(cookies);
+        if (platform === 'twitch') result = await importTwitchSession(cookies, opts);
+        else if (platform === 'youtube') result = await importGoogleSession(cookies, opts);
+        else if (platform === 'kick') result = await importKickSession(cookies, opts);
         else result = { success: false, error: 'Unknown platform' };
         reply(200, result);
       } catch (e) {

@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Stream Lurker Connector",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "One-click login for the Stream Lurker desktop app — imports your Twitch, YouTube, and Kick session so you don't have to copy cookies by hand.",
-  "permissions": ["cookies", "storage"],
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms"
+  ],
   "host_permissions": [
     "*://*.twitch.tv/*",
     "*://*.kick.com/*",
@@ -26,5 +30,8 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+  "background": {
+    "service_worker": "background.js"
   }
 }
