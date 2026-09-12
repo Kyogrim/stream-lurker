@@ -1380,6 +1380,7 @@ app.whenReady().then(async () => {
   // alone can't tell. Once after startup settles, then periodically.
   setTimeout(checkYouTubeSessionHealth, 45000);
   setInterval(checkYouTubeSessionHealth, 45 * 60 * 1000);
+  setTimeout(refreshPlaceholderAccountNames, 20000);
 
   // Periodic debounced watch time save (every 5 min instead of every 60s)
   setInterval(() => {
@@ -1522,7 +1523,11 @@ async function fetchTwitchUsername(token) {
 // sessions that work fine in a browser, so it must never drive this decision.
 // Returns 'live' | 'signed-out' | 'unknown'; anything short of two corroborating
 // signals on a fully-loaded page is 'unknown', and 'unknown' changes nothing.
-async function probeYouTubeLogin() {
+// Load a page in a hidden window on the shared session and evaluate a script in
+// it. Anything that depends on being a real browser — login state, account
+// names, Cloudflare-protected APIs — has to be answered from in here rather
+// than from a bare request.
+async function runInHiddenPage(url, script, settleMs = 5000) {
   let win = null;
   try {
     win = new BrowserWindow({
@@ -1539,34 +1544,168 @@ async function probeYouTubeLogin() {
     });
     win.webContents.setUserAgent(normalizedUserAgent);
     win.webContents.setAudioMuted(true);
-
-    await win.loadURL('https://www.youtube.com/', { userAgent: normalizedUserAgent });
-    await new Promise(r => setTimeout(r, 6000)); // let ytcfg populate
-
-    const probe = await win.webContents.executeJavaScript(`
-      (() => {
-        try {
-          const cfgReady = !!(window.ytcfg && window.ytcfg.get);
-          return {
-            cfgReady,
-            loggedIn: cfgReady ? window.ytcfg.get('LOGGED_IN') : null,
-            hasAvatar: !!document.querySelector('button#avatar-btn, #avatar-btn, [aria-label*="Account"]'),
-            hasSignIn: !!document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com/ServiceLogin"]')
-          };
-        } catch (e) { return null; }
-      })()
-    `);
-
-    if (!probe || !probe.cfgReady) return 'unknown'; // page never really loaded
-    if (probe.loggedIn === true || probe.hasAvatar) return 'live';
-    // Only call it dead when the player config says so AND the page is actually
-    // offering a sign-in link.
-    if (probe.loggedIn === false && probe.hasSignIn) return 'signed-out';
-    return 'unknown';
+    await win.loadURL(url, { userAgent: normalizedUserAgent });
+    await new Promise(r => setTimeout(r, settleMs));
+    return await win.webContents.executeJavaScript(script);
   } catch (e) {
-    return 'unknown';
+    return null;
   } finally {
     try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+  }
+}
+
+// Reads sign-in state and the account name in one page load.
+const YOUTUBE_PROBE_SCRIPT = `
+  (async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const clean = (s) => {
+      if (!s) return null;
+      const n = s.replace(/avatar\\s+image\\s+of/i, '')
+                 .replace(/(profile\\s+)?(photo|picture)\\s+of/i, '')
+                 .trim();
+      if (!n) return null;
+      return /avatar|profile|photo|default/i.test(n) ? null : n;
+    };
+    try {
+      const cfgReady = !!(window.ytcfg && window.ytcfg.get);
+      const loggedIn = cfgReady ? window.ytcfg.get('LOGGED_IN') : null;
+      const hasAvatar = !!document.querySelector('button#avatar-btn, #avatar-btn, [aria-label*="Account"]');
+      const hasSignIn = !!document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com/ServiceLogin"]');
+
+      let name = null;
+      if (loggedIn === true || hasAvatar) {
+        if (cfgReady) name = window.ytcfg.get('CHANNEL_HANDLE') || window.ytcfg.get('USER_NAME') || null;
+        if (!name && window.ytcfg && window.ytcfg.data_) {
+          name = window.ytcfg.data_.CHANNEL_HANDLE || window.ytcfg.data_.USER_NAME || null;
+        }
+        if (!name) {
+          const el = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle')
+                  || document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
+          if (el && el.textContent.trim()) name = el.textContent.trim();
+        }
+        if (!name) {
+          // Opening the account menu is what actually renders the handle.
+          const btn = document.querySelector('button#avatar-btn, #avatar-btn');
+          if (btn) {
+            btn.click();
+            await sleep(900);
+            const el = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle')
+                    || document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
+            if (el && el.textContent.trim()) name = el.textContent.trim();
+            if (!name) {
+              const img = btn.querySelector('img');
+              name = clean(img && img.alt) || clean(btn.getAttribute('aria-label'));
+            }
+          }
+        }
+      }
+      return { cfgReady, loggedIn, hasAvatar, hasSignIn, name: name || null };
+    } catch (e) { return null; }
+  })()
+`;
+
+// Returns { state: 'live' | 'signed-out' | 'unknown', name }.
+async function probeYouTubeLogin() {
+  const probe = await runInHiddenPage('https://www.youtube.com/', YOUTUBE_PROBE_SCRIPT, 6000);
+  if (!probe || !probe.cfgReady) return { state: 'unknown', name: null }; // page never really loaded
+  const name = probe.name || null;
+  if (probe.loggedIn === true || probe.hasAvatar) return { state: 'live', name };
+  // Only call it dead when the player config says so AND the page is actually
+  // offering a sign-in link.
+  if (probe.loggedIn === false && probe.hasSignIn) return { state: 'signed-out', name: null };
+  return { state: 'unknown', name };
+}
+
+// Kick's own API, called from inside a kick.com page so it carries the session
+// cookies and isn't turned away by Cloudflare.
+async function resolveKickUser() {
+  const res = await runInHiddenPage('https://kick.com/', `
+    (async () => {
+      const pick = (o) => (o && (o.username || o.slug || o.name
+        || (o.user && (o.user.username || o.user.name))
+        || (o.data && (o.data.username || o.data.slug || o.data.name)))) || null;
+      const tried = [];
+
+      // Kick runs Laravel: an authenticated API call needs the X-XSRF-TOKEN
+      // header echoing the XSRF-TOKEN cookie, or it answers 200 with no body.
+      const xsrf = (document.cookie.match(/(?:^|;\\s*)XSRF-TOKEN=([^;]+)/) || [])[1];
+      const headers = { 'Accept': 'application/json' };
+      if (xsrf) headers['X-XSRF-TOKEN'] = decodeURIComponent(xsrf);
+
+      // The cookie alone isn't enough: Kick's own frontend replays session_token
+      // as a bearer, and without it the API answers 200 with an empty object.
+      const sess = (document.cookie.match(/(?:^|;\\s*)session_token=([^;]+)/) || [])[1];
+      if (sess) headers['Authorization'] = 'Bearer ' + decodeURIComponent(sess);
+      tried.push('xsrf=' + (xsrf ? 'present' : 'MISSING') + ' bearer=' + (sess ? 'present' : 'MISSING'));
+
+      for (const path of ['/api/v1/user', '/api/v2/user']) {
+        try {
+          const r = await fetch(path, { credentials: 'include', headers });
+          const body = await r.text();
+          let j = null;
+          try { j = JSON.parse(body); } catch (e) {}
+          const n = pick(j);
+          tried.push(path + ' -> ' + r.status + (n ? ' name=' + n : ' len=' + body.length));
+          if (n) return { name: n, tried };
+        } catch (e) { tried.push(path + ' -> threw ' + e.message); }
+      }
+
+      // Next.js page state often carries the signed-in user.
+      try {
+        const raw = document.getElementById('__NEXT_DATA__');
+        if (raw) {
+          const found = JSON.stringify(JSON.parse(raw.textContent))
+            .match(/"(?:username|slug)":"([A-Za-z0-9_\\-]{2,30})"/);
+          if (found) { tried.push('__NEXT_DATA__ hit'); return { name: found[1], tried }; }
+          tried.push('__NEXT_DATA__ no match');
+        } else { tried.push('no __NEXT_DATA__'); }
+      } catch (e) { tried.push('__NEXT_DATA__ threw'); }
+      // Fall back to whatever the page itself exposes about the signed-in user.
+      try {
+        const a = document.querySelector('a[href^="/"][class*="username" i], [data-testid*="user" i] a[href^="/"]');
+        if (a && a.getAttribute('href')) {
+          const slug = a.getAttribute('href').replace(/^\\//, '').split(/[/?#]/)[0];
+          if (slug) return { name: slug, tried };
+        }
+      } catch (e) {}
+      // Nothing worked — report whether the page considers us signed in at all,
+      // so a dead Kick session is distinguishable from a naming problem.
+      const bodyText = (document.body && document.body.innerText || '').slice(0, 4000);
+      tried.push('pageLooksLoggedOut=' + /\\b(log in|sign up)\\b/i.test(bodyText));
+      return { name: null, tried, url: location.href, title: document.title };
+    })()
+  `, 6000);
+
+  if (!res) {
+    addLog('[Auth] Kick name lookup failed: the page did not load.');
+    return null;
+  }
+  if (!res.name) {
+    addLog(`[Auth] Kick name lookup found nothing (${(res.tried || []).join(' | ') || 'no attempts'}${res.title ? '; page=' + res.title : ''}).`);
+    return null;
+  }
+  return String(res.name).trim() || null;
+}
+
+// A stored name that carries no information, so it's worth replacing.
+function isPlaceholderName(name) {
+  return !name || /^(kick|youtube|twitch|rumble) user$/i.test(String(name).trim());
+}
+
+// Anyone connected before name resolution existed still has "Kick User" stored.
+// Resolve it once on startup so the Platform Logins card shows who they are.
+// (YouTube's name is picked up by checkYouTubeSessionHealth, which loads the
+// page anyway — no reason to load it twice.)
+async function refreshPlaceholderAccountNames() {
+  if (!config.accounts) return;
+  if (config.accounts.kick && isPlaceholderName(config.accounts.kick) && config.kickEnabled !== false) {
+    const name = await resolveKickUser();
+    if (name) {
+      config.accounts.kick = name;
+      saveConfig();
+      addLog(`[Auth] Resolved Kick account name: ${name}`);
+      notifyLoginSuccess('kick', name);
+    }
   }
 }
 
@@ -1578,11 +1717,19 @@ async function checkYouTubeSessionHealth() {
   if (!config.accounts || !config.accounts.youtube) return; // nothing to lose
   if (config.youtubeEnabled === false) return;
 
-  const state = await probeYouTubeLogin();
+  const { state, name } = await probeYouTubeLogin();
 
   if (state === 'live') {
     if (youtubeSignedOutStreak > 0) addLog('[Auth] YouTube session is healthy again.');
     youtubeSignedOutStreak = 0;
+    // The page is the only place the real account name is available, so take it
+    // while we're here if all we have is the "YouTube User" placeholder.
+    if (name && isPlaceholderName(config.accounts.youtube)) {
+      config.accounts.youtube = name;
+      saveConfig();
+      addLog(`[Auth] Resolved YouTube account name: ${name}`);
+      notifyLoginSuccess('youtube', name);
+    }
     return;
   }
   if (state === 'unknown') return; // never act on an inconclusive probe
@@ -3803,12 +3950,20 @@ async function importGoogleSession(cookieList, opts = {}) {
   // can't verify anything. checkYouTubeSessionHealth() answers that properly
   // from inside a real page, on its own schedule.
   config.accounts = config.accounts || {};
-  config.accounts.youtube = 'YouTube User';
-  saveConfig();
   youtubeSignedOutStreak = 0; // fresh cookies — give it a clean slate
-  if (!opts.auto) notifyLoginSuccess('youtube', 'YouTube User');
-  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Google/YouTube session (${setCount} cookies).`);
-  return { success: true, username: 'YouTube User', cookiesSet: setCount };
+
+  // The account name only exists inside a loaded YouTube page. Skip the page
+  // load on routine re-syncs where we already have a real name.
+  if (!opts.auto || isPlaceholderName(config.accounts.youtube)) {
+    const { name } = await probeYouTubeLogin();
+    config.accounts.youtube = name || config.accounts.youtube || 'YouTube User';
+  }
+  if (!config.accounts.youtube) config.accounts.youtube = 'YouTube User';
+
+  saveConfig();
+  if (!opts.auto) notifyLoginSuccess('youtube', config.accounts.youtube);
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Google/YouTube session as ${config.accounts.youtube} (${setCount} cookies).`);
+  return { success: true, username: config.accounts.youtube, cookiesSet: setCount };
 }
 
 async function importKickSession(cookieList, opts = {}) {
@@ -3817,10 +3972,19 @@ async function importKickSession(cookieList, opts = {}) {
   if (!relevant.some(c => /session/i.test(c.name))) return { success: false, error: 'Missing the Kick session cookie.' };
   const setCount = await writeCookieList(relevant, '.kick.com');
   config.accounts = config.accounts || {};
+
+  // Ask Kick who we are rather than showing "Kick User". Only worth a page load
+  // on a real connect, or when we still don't have a proper name.
+  if (!opts.auto || isPlaceholderName(config.accounts.kick)) {
+    const resolved = await resolveKickUser();
+    if (resolved) config.accounts.kick = resolved;
+    else if (!config.accounts.kick) config.accounts.kick = 'Kick User';
+  }
   if (!config.accounts.kick) config.accounts.kick = 'Kick User';
+
   saveConfig();
   if (!opts.auto) notifyLoginSuccess('kick', config.accounts.kick);
-  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Kick session (${setCount} cookies).`);
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Kick session as ${config.accounts.kick} (${setCount} cookies).`);
   return { success: true, username: config.accounts.kick, cookiesSet: setCount };
 }
 
