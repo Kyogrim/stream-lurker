@@ -5,7 +5,21 @@ const http = require('http');
 const crypto = require('crypto');
 const { exec } = require('child_process');
 const { autoUpdater } = require('electron-updater');
-const extractZip = require('extract-zip');
+const { extractZipBuffer } = require('./safe-unzip');
+const { migrateProfileCookies } = require('./cookie-migration');
+
+// One process per profile. Two Electron processes sharing a profile race the
+// cookie store (a real one was wiped this way) and overwrite each other's
+// config.json. A second launch just brings the running window forward (see the
+// 'second-instance' handler); it must exit before touching anything.
+if (!app.requestSingleInstanceLock()) {
+  process.exit(0);
+}
+
+// Must run before any session exists and before 'ready': Electron 42+ deletes a
+// cookie database it considers too old to migrate, taking every platform login
+// with it. See cookie-migration.js. Logged once addLog is usable.
+const cookieMigrationResults = migrateProfileCookies(app.getPath('userData'));
 
 // Enable extension support in Electron partitioned sessions & webviews by bypassing sandbox restrictions
 app.commandLine.appendSwitch('disable-extension-sandbox');
@@ -1241,8 +1255,26 @@ function sendCountdownToUI() {
 }
 
 // App lifecycle
+app.on('second-instance', (_event, argv) => {
+  // Autostart passes --hidden; a login-time relaunch must not pop the window.
+  if (argv.includes('--hidden')) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
 app.whenReady().then(async () => {
   addLog('Initializing Stream Lurker standalone desktop application...');
+  for (const r of cookieMigrationResults) {
+    const where = path.relative(app.getPath('userData'), r.file);
+    if (r.status === 'migrated') {
+      addLog(`[Upgrade] Carried cookie store ${where} from schema v${r.from} to v${r.to}: ${r.rowsAfter}/${r.rowsBefore} cookies kept. Backup: ${path.basename(r.backup)}`);
+    } else if (r.status === 'failed' || (r.status === 'skipped' && r.error)) {
+      addLog(`[Upgrade] Cookie store ${where} was not migrated (${r.status}: ${r.error}). If logins are missing, reconnect them in Platform Logins.`);
+    }
+  }
   loadConfig();
   applyStartupSettings();
 
@@ -2607,53 +2639,77 @@ function rmrf(p) {
   fs.rmSync(p, { recursive: true, force: true });
 }
 
-function fetchJson(url) {
+// GET with a hard deadline and a size cap. The previous helpers had neither, so a
+// stalled GitHub response left an install hanging forever with the UI waiting.
+function netGet(url, accept, { timeoutMs = 30000, maxBytes = 16 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     const req = net.request({
       method: 'GET',
       url,
-      headers: { 'User-Agent': 'stream-lurker', 'Accept': 'application/vnd.github+json' },
+      headers: { 'User-Agent': 'stream-lurker', 'Accept': accept },
       redirect: 'follow'
     });
-    let body = '';
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const fail = (err) => {
+      try { req.abort(); } catch (e) { /* already closed */ }
+      finish(reject, err);
+    };
+    const timer = setTimeout(() => fail(new Error(`Timed out after ${timeoutMs / 1000}s fetching ${url}`)), timeoutMs);
+    const chunks = [];
+    let size = 0;
     req.on('response', (res) => {
-      res.on('data', (chunk) => { body += chunk.toString(); });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-        } else {
-          reject(new Error(`GitHub API ${res.statusCode}: ${body.slice(0, 200)}`));
-        }
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > maxBytes) { fail(new Error(`Response from ${url} is larger than ${maxBytes} bytes`)); return; }
+        chunks.push(chunk);
       });
+      res.on('end', () => {
+        const body = Buffer.concat(chunks);
+        if (res.statusCode >= 200 && res.statusCode < 300) finish(resolve, body);
+        else finish(reject, new Error(`HTTP ${res.statusCode} from ${url}: ${body.toString('utf8', 0, 200)}`));
+      });
+      res.on('error', fail);
     });
-    req.on('error', reject);
+    req.on('error', fail);
     req.end();
   });
 }
 
-function downloadFile(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const req = net.request({
-      method: 'GET',
-      url,
-      headers: { 'User-Agent': 'stream-lurker', 'Accept': 'application/octet-stream' },
-      redirect: 'follow'
-    });
-    const out = fs.createWriteStream(destPath);
-    req.on('response', (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        out.close();
-        reject(new Error(`Download failed ${res.statusCode}`));
-        return;
-      }
-      res.on('data', (chunk) => out.write(chunk));
-      res.on('end', () => out.end(() => resolve()));
-      res.on('error', reject);
-    });
-    req.on('error', reject);
-    req.end();
-  });
+async function fetchJson(url) {
+  const body = await netGet(url, 'application/vnd.github+json');
+  return JSON.parse(body.toString('utf8'));
 }
+
+// Catalog assets are a few MB; holding one in memory avoids a temp file that
+// leaked on every failed install.
+function downloadBuffer(url) {
+  return netGet(url, 'application/octet-stream', { timeoutMs: 120000, maxBytes: 100 * 1024 * 1024 });
+}
+
+// Replace `live` with `staging` so that no failure leaves neither. Renaming the
+// live dir first is what fails on Windows while its files are locked, and that
+// failure happens before anything was changed.
+function swapDirectory(staging, live) {
+  const old = `${live}.old`;
+  rmrf(old);
+  const hadLive = fs.existsSync(live);
+  if (hadLive) fs.renameSync(live, old);
+  try {
+    fs.renameSync(staging, live);
+  } catch (e) {
+    if (hadLive) fs.renameSync(old, live);
+    throw e;
+  }
+  try { rmrf(old); } catch (e) { /* cleared by the next install */ }
+}
+
+const catalogInstallsInFlight = new Set();
 
 function getInstalledManifestForCatalogEntry(entry) {
   const root = getCatalogEntryInstallPath(entry.id);
@@ -2685,6 +2741,8 @@ ipcMain.handle('list-catalog-extensions', async () => {
 ipcMain.handle('install-catalog-extension', async (event, { id }) => {
   const entry = EXTENSION_CATALOG.find(e => e.id === id);
   if (!entry) return { ok: false, error: `Unknown catalog id: ${id}` };
+  if (catalogInstallsInFlight.has(entry.id)) return { ok: false, error: `${entry.name} is already being installed.` };
+  catalogInstallsInFlight.add(entry.id);
 
   addLog(`[Catalog] Installing ${entry.name}…`);
   try {
@@ -2701,27 +2759,30 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
       return { ok: false, error: `No matching .zip asset in ${entry.releaseTag || 'latest'} release of ${entry.repo}. Available: ${available || 'none'}` };
     }
 
-    const installRoot = getCatalogEntryInstallPath(entry.id);
-    // Wipe any prior install so updates don't leave stale files behind
-    rmrf(installRoot);
-    fs.mkdirSync(installRoot, { recursive: true });
-
-    const tmpZip = path.join(app.getPath('temp'), `${entry.id}-${Date.now()}.zip`);
     addLog(`[Catalog] Downloading ${asset.name} (${(asset.size / 1024 / 1024).toFixed(1)} MB)…`);
-    await downloadFile(asset.browser_download_url, tmpZip);
+    const zip = await downloadBuffer(asset.browser_download_url);
 
-    addLog(`[Catalog] Extracting ${asset.name}…`);
-    await extractZip(tmpZip, { dir: installRoot });
-    try { fs.unlinkSync(tmpZip); } catch {}
-
-    const manifestRoot = findManifestRoot(installRoot);
-    if (!manifestRoot) {
-      rmrf(installRoot);
-      return { ok: false, error: 'Extracted archive did not contain a manifest.json' };
+    // Build the new copy beside the live one and swap only when it is complete,
+    // so a failed download, a bad archive or a locked file leaves the working
+    // version installed and config.extensions still pointing at it.
+    const installRoot = getCatalogEntryInstallPath(entry.id);
+    const staging = `${installRoot}.staging`;
+    rmrf(staging);
+    try {
+      addLog(`[Catalog] Extracting ${asset.name}…`);
+      const { refused } = extractZipBuffer(zip, staging);
+      if (refused.length) addLog(`[Catalog] Skipped ${refused.length} unsafe path(s) in ${asset.name}.`);
+      const stagedManifest = findManifestRoot(staging);
+      if (!stagedManifest) throw new Error('Extracted archive did not contain a manifest.json');
+      // Per-extension post-install patches.
+      if (entry.id === '7tv') patchSevenTVManifestForKick(stagedManifest);
+      swapDirectory(staging, installRoot);
+    } catch (e) {
+      rmrf(staging);
+      throw e;
     }
 
-    // Per-extension post-install patches.
-    if (entry.id === '7tv') patchSevenTVManifestForKick(manifestRoot);
+    const manifestRoot = findManifestRoot(installRoot);
 
     // Replace any prior registration of any subpath of installRoot, then add the new manifestRoot
     config.extensions = (config.extensions || []).filter(p => !p.startsWith(installRoot));
@@ -2747,6 +2808,8 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
   } catch (err) {
     addLog(`[Catalog] Install failed for ${entry.name}: ${err.message}`);
     return { ok: false, error: err.message };
+  } finally {
+    catalogInstallsInFlight.delete(entry.id);
   }
 });
 
