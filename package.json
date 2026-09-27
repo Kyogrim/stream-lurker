@@ -68,8 +68,7 @@
     "files": [
       "main.js",
       "preload.js",
-      "cookie-migration.js",
-      "safe-unzip.js",
+      "main/**/*.js",
       "index.html",
       "style.css",
       "renderer.js",

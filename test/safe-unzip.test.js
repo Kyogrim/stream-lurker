@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { zipSync, strToU8 } = require('fflate');
-const { extractZipBuffer, safeEntryPath } = require('../safe-unzip');
+const { extractZipBuffer, safeEntryPath } = require('../main/safe-unzip');
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'sl-unzip-test-'));

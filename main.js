@@ -5,8 +5,8 @@ const http = require('http');
 const crypto = require('crypto');
 const { exec } = require('child_process');
 const { autoUpdater } = require('electron-updater');
-const { extractZipBuffer } = require('./safe-unzip');
-const { migrateProfileCookies } = require('./cookie-migration');
+const { extractZipBuffer } = require('./main/safe-unzip');
+const { migrateProfileCookies } = require('./main/cookie-migration');
 
 // One process per profile. Two Electron processes sharing a profile race the
 // cookie store (a real one was wiped this way) and overwrite each other's

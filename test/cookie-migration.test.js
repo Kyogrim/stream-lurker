@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
-const { migrateCookieDb, migrateProfileCookies, findCookieDbs } = require('../cookie-migration');
+const { migrateCookieDb, migrateProfileCookies, findCookieDbs } = require('../main/cookie-migration');
 
 const V21_META = 'CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR)';
 const V21_TABLE =
