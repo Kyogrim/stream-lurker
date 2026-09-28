@@ -81,6 +81,7 @@ function stubWebview(wv, url) {
   wv.isAudioMuted = () => wv.muted;
   wv.executeJavaScript = code => { wv.log.push(['exec', code]); return Promise.resolve(); };
   wv.reload = () => wv.log.push(['reload']);
+  wv.loadURL = u => { wv.log.push(['loadURL', u]); return Promise.resolve(); };
   wv.sendInputEvent = ev => wv.log.push(['input', ev.type]);
   const focus = wv.focus;
   wv.focus = () => { wv.log.push(['focus']); focus.call(wv); };
@@ -97,6 +98,11 @@ test.before(async () => {
   recovery = await load('src/cell-recovery.js');
 });
 
+// Cells can hold timers (a pending reload, the recovery watchdog). Tear them
+// down while the test that made them still has its mock clock: a later test's
+// mock clearTimeout given another mock's timer can drop an unrelated entry.
+test.afterEach(() => { ml.closeAllStreamTabs(); });
+
 function reset() {
   ml.closeAllStreamTabs();
   api.calls.length = 0;
@@ -109,7 +115,16 @@ function reset() {
   tabs.switchTab('dashboard');
 }
 
-function openCell(platform, username, url = `https://www.${platform}.tv/${username}`) {
+// Where a real cell of each platform sits. (A kick.tv or youtube.tv URL is off
+// the platform, and recovery rightly treats such a cell as having wandered.)
+const CELL_URL = {
+  twitch: u => `https://www.twitch.tv/${u}`,
+  kick: u => `https://kick.com/${u}`,
+  youtube: u => `https://www.youtube.com/@${u}/live`,
+  rumble: u => `https://rumble.com/c/${u}`,
+};
+
+function openCell(platform, username, url = CELL_URL[platform](username)) {
   ml.createStreamTab(platform, username);
   const cell = doc.getElementById(`grid-cell-${platform}-${username.toLowerCase()}`);
   return { cell, wv: stubWebview(cell.querySelector('webview'), url) };
@@ -173,6 +188,43 @@ test('F15: a crashed cell reloads after 5 s and clears once a platform page load
   await wv.dispatch('did-finish-load');
   assert.equal(cell.dataset.crashed, undefined);
   assert.match(logs().at(-1), /crashy \(TWITCH\) recovered/);
+  assert.equal(callsOf('closeStreamContainer').length, 0);
+});
+
+test('F15: a recovery reload that never finishes still counts, and the cell is eventually closed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'stalls');
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  // Each recovery load starts and then goes silent: no failure, no dom-ready,
+  // no did-finish-load (a cancelled navigation, a stalled request).
+  for (const delay of [5000, 30000, 120000]) {
+    t.mock.timers.tick(delay);
+    await wv.dispatch('did-start-loading');
+    t.mock.timers.tick(60 * 1000);
+  }
+  assert.equal(count(wv, 'reload'), 3, 'every silent attempt led to the next one');
+  assert.deepEqual(callsOf('closeStreamContainer'), [['closeStreamContainer', 'twitch', 'stalls']]);
+  assert.equal(cell.dataset.crashed, 'true');
+});
+
+test('F15: a cell that died off the platform recovers by loading its stream, not by reloading that page', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { wv } = openCell('youtube', 'offsite');
+  wv.url = 'https://evil.example/landing';
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  t.mock.timers.tick(5000);
+  assert.equal(count(wv, 'reload'), 0, 'main would stop a reload of the off-platform page');
+  const loads = wv.log.filter(e => e[0] === 'loadURL');
+  assert.equal(loads.length, 1);
+  assert.match(loads[0][1], /^https:\/\/(www\.)?youtube\.com\//);
+  // A recovered platform page cancels the watchdog: no extra attempt later.
+  wv.url = 'https://www.youtube.com/@offsite/live';
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-finish-load');
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(count(wv, 'reload') + wv.log.filter(e => e[0] === 'loadURL').length, 1);
   assert.equal(callsOf('closeStreamContainer').length, 0);
 });
 
@@ -273,7 +325,12 @@ test('F15: a recovered page that never fires load still clears on dom-ready', as
   await wv.dispatch('did-finish-load');
   assert.equal(cell.dataset.crashed, 'true', "Chromium's error page is never healthy");
   t.mock.timers.tick(120000);
-  assert.equal(count(wv, 'reload'), 3);
+  // Off the platform, recovery goes back to the stream itself rather than
+  // reloading the page it failed on.
+  assert.equal(count(wv, 'reload'), 2);
+  const loads = wv.log.filter(e => e[0] === 'loadURL').map(e => e[1]);
+  assert.equal(loads.length, 1);
+  assert.match(loads[0], /^https:\/\/www\.twitch\.tv\/noload/);
   await wv.dispatch('did-start-loading');
   await wv.dispatch('did-finish-load');
   assert.equal(cell.dataset.crashed, undefined);

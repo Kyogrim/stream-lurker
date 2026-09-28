@@ -4,7 +4,7 @@
 // Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { clipDownloadUrl, clipPageUrl, clipFileName, CLIP_MEDIA_HOSTS, CLIP_PAGE_HOSTS } = require('../main/clip-download');
+const { clipDownloadUrl, clipPageUrl, clipFileName, CLIP_MEDIA_HOSTS, CLIP_FILE_HOSTS, CLIP_PAGE_HOSTS } = require('../main/clip-download');
 
 test('F75: clip files download only over https from Twitch\'s clip hosts', () => {
   const ok = [
@@ -39,6 +39,23 @@ test('F75: the host lists match the dashboard\'s (src/state.js)', async () => {
   const state = await import('../src/state.js');
   assert.deepEqual([...CLIP_MEDIA_HOSTS].sort(), [...state.TWITCH_MEDIA_HOSTS].sort());
   assert.deepEqual([...CLIP_PAGE_HOSTS].sort(), [...state.TWITCH_PAGE_HOSTS].sort());
+  // The dashboard sends clip files from this list; main refusing any of them
+  // is what broke every clip download once Twitch moved to CloudFront.
+  assert.deepEqual([...CLIP_FILE_HOSTS].sort(), [...state.TWITCH_CLIP_FILE_HOSTS].sort());
+});
+
+test('clip files: Twitch\'s CloudFront distribution is accepted, any other CloudFront host is not', () => {
+  // The shape GQL returns for videoQualities[].sourceURL today (signed query).
+  const real = 'https://d1ndex63qxojbr.cloudfront.net/abc123/AT-cm%7Cabc/index.mp4?sig=deadbeef&token=%7B%7D';
+  assert.equal(clipDownloadUrl(real), new URL(real).href);
+  for (const bad of [
+    'https://cloudfront.net/x.mp4',
+    'https://evil.cloudfront.net/x.mp4',
+    'https://d1ndex63qxojbr.cloudfront.net.evil.example/x.mp4',
+    'http://d1ndex63qxojbr.cloudfront.net/x.mp4',
+    'https://user:pw@d1ndex63qxojbr.cloudfront.net/x.mp4',
+  ]) assert.equal(clipDownloadUrl(bad), '', bad);
+  assert.equal(clipPageUrl(real), '', 'a clip file is never a clip page');
 });
 
 test('F75 regression: the Save dialog name is a bare, legal .mp4 name', () => {

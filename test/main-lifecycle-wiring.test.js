@@ -10,8 +10,8 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
-const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8');
-const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8');
+const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
 
 // Source of a top-level function or handler: from its opening line to the
 // next line that is exactly "}" or "});".
@@ -281,7 +281,7 @@ test('F74: the tray menu is built when opened (stored only on Linux, and refresh
 });
 
 test('F106: packaged Linux builds ship icon.png and use it for the window and the tray', () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8').replace(/\r\n/g, '\n'));
   // Both in app.asar: path.join(__dirname, ...) looks there. (linux.icon only
   // feeds the .desktop / AppImage icon; extraResources lands outside the asar.)
   assert.ok(pkg.build.files.includes('icon.png'), 'icon.png is packaged');

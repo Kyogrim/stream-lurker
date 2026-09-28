@@ -1079,11 +1079,23 @@ function createMainWindow() {
 async function loadDashboard() {
   // Not while running on defaults: the real flag is in the unreadable file.
   if (!config.dashboardStorageMigrated && !configWriteLocked) {
-    const r = await migrateFileOriginStorage({
-      BrowserWindow,
-      appRoot: __dirname,
-      flushStorage: () => session.defaultSession.flushStorageData(),
-    });
+    // Every file:// page shares one localStorage, so a blank page on the real
+    // filesystem reads the old store. Nothing inside app.asar opens as a
+    // file:// page once the grantFileProtocolExtraPrivileges fuse is off.
+    const reader = path.join(app.getPath('userData'), 'legacy-storage-reader.html');
+    let r;
+    try {
+      fs.writeFileSync(reader, '<!doctype html><meta charset="utf-8"><title></title>');
+      r = await migrateFileOriginStorage({
+        BrowserWindow,
+        sourceFile: reader,
+        flushStorage: () => session.defaultSession.flushStorageData(),
+      });
+    } catch (e) {
+      r = { status: 'failed', keys: [], error: e.message };
+    } finally {
+      try { fs.unlinkSync(reader); } catch (e) { /* never written */ }
+    }
     if (r.status === 'failed') {
       addLog(`[Upgrade] Could not carry dashboard data (saved clips) over to the new app origin: ${r.error}. Will retry next launch.`);
     } else {
@@ -2413,6 +2425,10 @@ async function validateSavedSessions() {
     let checkErrored = false;
     // YouTube already confirmed these exact cookies signed out.
     let knownExpired = false;
+    // Taken before the first await: a Sign Out or a login while this platform
+    // is being checked (Twitch's name lookup can take 15 s) must not be undone
+    // by the writes below (F73).
+    let snap = accountEpochs.snapshot(platform, config.accounts);
 
     try {
       if (platform === 'twitch') {
@@ -2425,14 +2441,20 @@ async function validateSavedSessions() {
               const username = await fetchTwitchUsername(tokenCookie.value);
               // The dashboard's copy of the config is from page load, and
               // save-config no longer overwrites accounts with it: tell it.
-              if (username) {
+              if (!accountEpochs.isCurrent(snap, config.accounts)) {
+                // Signed out or in while the lookup ran: the tail skips too.
+              } else if (username) {
                 config.accounts[platform] = username;
                 saveConfig();
+                // Our own write changed the stored name: judge the rest of
+                // this check against it, not the placeholder it replaced.
+                snap = accountEpochs.snapshot(platform, config.accounts);
                 addLog(`[Auth] Recovered Twitch username: ${username}`);
                 notifyLoginSuccess(platform, username);
               } else if (config.accounts[platform] !== 'Twitch User') {
                 config.accounts[platform] = 'Twitch User';
                 saveConfig();
+                snap = accountEpochs.snapshot(platform, config.accounts);
                 notifyLoginSuccess(platform, 'Twitch User');
               }
             }
@@ -2474,6 +2496,10 @@ async function validateSavedSessions() {
     }
 
     if (checkErrored) continue;
+    if (!accountEpochs.isCurrent(snap, config.accounts)) {
+      addLog(`[Auth] ${platform.toUpperCase()} was signed in or out while its session was being checked; leaving it as it is.`);
+      continue;
+    }
     if (knownExpired) {
       addLog('[Auth] YouTube: the saved cookies are the ones YouTube already reported signed out, so the account stays disconnected. Reconnect from Platform Logins.');
       setTimeout(runSafely('recheckExpiredYouTube', recheckExpiredYouTube), 40000);
@@ -2954,8 +2980,12 @@ ipcMain.handle('get-twitch-follows', async () => {
     
     const token = twitchCookie.value;
     addLog('[Twitch Sync] Securely fetched auth-token cookie. Fetching live follows via GQL...');
-    
-    const response = await net.fetch('https://gql.twitch.tv/gql', {
+    // A Sign Out while the request runs must win over the name it returns (F73).
+    const snap = accountEpochs.snapshot('twitch', config.accounts);
+
+    // Bounded like every scan request: a stalled answer used to hold this
+    // handler, and the race window above, open indefinitely.
+    const response = await fetchTextWithDeadline(net.fetch, 'https://gql.twitch.tv/gql', {
       method: 'POST',
       headers: {
         'Client-ID': TWITCH_PUBLIC_CLIENT_ID,
@@ -2985,7 +3015,7 @@ ipcMain.handle('get-twitch-follows', async () => {
       throw new Error(`GQL request failed: status ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = parseJsonBody(response.text, 'Twitch GQL');
     const currentUser = data[0]?.data?.currentUser;
     if (!currentUser) {
       addLog('[Twitch Sync] GQL returned empty currentUser. Token might be invalid or expired.');
@@ -2997,7 +3027,10 @@ ipcMain.handle('get-twitch-follows', async () => {
     
     addLog(`[Twitch Sync] Successfully synced GQL for ${username}. Found ${follows.length} live follows.`);
     
-    if (config.accounts && config.accounts.twitch !== username) {
+    // Only while the same account is still connected: after a Sign Out the
+    // entry is gone, and writing it back would reconnect an account with no
+    // cookies behind it.
+    if (config.accounts && snap.name && accountEpochs.isCurrent(snap, config.accounts) && config.accounts.twitch !== username) {
       config.accounts.twitch = username;
       saveConfig();
     }

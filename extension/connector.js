@@ -393,7 +393,10 @@
       case 'verified': return { tone: 'ok', text: `Connected to Stream Lurker (port ${app.port})` };
       case 'no-code': return { tone: 'idle', text: 'Stream Lurker found. Enter the pairing code shown in the app.' };
       case 'short-code': return { tone: 'err', text: 'That pairing code is too short. Copy the current one from Platform Logins in the app; if it shows only 8 characters, click New code there first.' };
-      case 'mismatch': return { tone: 'err', text: "That pairing code doesn't match Stream Lurker. Copy the current one from Platform Logins in the app." };
+      // A proof that fails our code is either a changed code, or our app being
+      // closed while another program or another Windows user's copy answers.
+      // Only the user can tell which, so name both.
+      case 'mismatch': return { tone: 'err', text: "No Stream Lurker on this PC accepted this pairing code. If your app is open, copy the current code from Platform Logins. If it is closed, another program or another Windows user's copy is answering, and sync resumes once your app is open." };
       // The app's own note says to reload the connector first; this popup is
       // proof that already happened here, so it says so.
       case 'app-code-too-short': return { tone: 'err', text: 'Stream Lurker still has a pairing code from an older version, too short to pair with. Click New code in Platform Logins in the app (this extension is already up to date), then paste the new code here.' };
@@ -465,7 +468,7 @@
       switch (state.lastResyncStatus) {
         // Normal whenever the app is closed; nothing for the user to fix.
         case 'app-not-running': summary = { tone: 'idle', text: `Checked ${when}: Stream Lurker wasn't running. It syncs once the app is open.` }; break;
-        case 'code-mismatch': summary = { tone: 'err', text: `Checked ${when}: the pairing code doesn't match the app. Paste the current code from Stream Lurker.` }; break;
+        case 'code-mismatch': summary = { tone: 'err', text: `Checked ${when}: no Stream Lurker accepted this pairing code. If your app is open, paste its current code; if it is closed, sync resumes once it is open.` }; break;
         case 'app-code-too-short': summary = { tone: 'err', text: `Checked ${when}: Stream Lurker still has a pairing code from an older version, too short to pair with, so auto-sync is paused. Click New code in Platform Logins in the app, then paste the new code here.` }; break;
         case 'app-outdated': summary = { tone: 'err', text: `Checked ${when}: the Stream Lurker app needs updating before it can sync.` }; break;
         case 'not-paired': summary = { tone: 'err', text: 'No pairing code saved, so auto-sync is paused.' }; break;

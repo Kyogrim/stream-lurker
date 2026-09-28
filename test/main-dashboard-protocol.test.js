@@ -50,7 +50,7 @@ test('isDashboardUrl matches only the dashboard page', () => {
 });
 
 test('every file index.html loads resolves, with an explicit content type', () => {
-  const html = fs.readFileSync(path.join(REPO, 'index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(REPO, 'index.html'), 'utf8').replace(/\r\n/g, '\n');
   // Local (relative) src/href references in the page itself.
   const refs = [...html.matchAll(/\s(?:src|href)="([^"#:]+)"/g)].map(m => m[1]);
   assert.ok(refs.includes('style.css') && refs.includes('renderer.js'), `found ${refs.join(', ')}`);
@@ -217,32 +217,35 @@ function fakeElectron({ stores, failOn = null, hangOn = null }) {
   return { BrowserWindow: FakeWindow, log };
 }
 
+// A blank page the caller writes under userData (see loadDashboard in main.js).
+const READER = path.join(os.tmpdir(), 'stream-lurker', 'legacy-storage-reader.html');
+
 test('migration: copies the file:// store into app://bundle once, then reports already', async () => {
   const stores = { 'file://': { stream_lurker_saved_clips: JSON.stringify([clip('a')]) } };
   const { BrowserWindow, log } = fakeElectron({ stores });
   let flushed = 0;
-  const r = await migrateFileOriginStorage({ BrowserWindow, appRoot: REPO, flushStorage: () => { flushed++; }, settleMs: 0 });
+  const r = await migrateFileOriginStorage({ BrowserWindow, sourceFile: READER, flushStorage: () => { flushed++; }, settleMs: 0 });
   assert.equal(r.status, 'imported');
   assert.deepEqual(r.keys, ['stream_lurker_saved_clips']);
   assert.equal(flushed, 1, 'made durable before the caller records it as done');
   assert.equal(stores['app://bundle'].stream_lurker_saved_clips, stores['file://'].stream_lurker_saved_clips);
   assert.ok(stores['app://bundle'][IMPORT_MARKER]);
   assert.equal(stores['file://'][IMPORT_MARKER], undefined, 'the old store is left untouched for a downgrade');
-  assert.deepEqual(log.loads, [`file://${path.join(REPO, 'style.css')}`, 'app://bundle/style.css'], 'no dashboard script is ever loaded');
+  assert.deepEqual(log.loads, [`file://${READER}`, 'app://bundle/style.css'], 'no dashboard script is ever loaded');
   const prefs = log.windows[0].opts.webPreferences;
   assert.equal(log.windows[0].opts.show, false);
   assert.equal(prefs.sandbox, true);
   assert.equal(prefs.partition, undefined, 'the default session, the one the dashboard uses');
   assert.equal(log.destroyed, 1);
 
-  const again = await migrateFileOriginStorage({ BrowserWindow, appRoot: REPO, settleMs: 0 });
+  const again = await migrateFileOriginStorage({ BrowserWindow, sourceFile: READER, settleMs: 0 });
   assert.equal(again.status, 'already');
 });
 
 test('migration: a fresh install with nothing to carry still records the import', async () => {
   const stores = {};
   const { BrowserWindow } = fakeElectron({ stores });
-  const r = await migrateFileOriginStorage({ BrowserWindow, appRoot: REPO, settleMs: 0 });
+  const r = await migrateFileOriginStorage({ BrowserWindow, sourceFile: READER, settleMs: 0 });
   assert.equal(r.status, 'imported');
   assert.deepEqual(r.keys, []);
   assert.ok(stores['app://bundle'][IMPORT_MARKER]);
@@ -251,7 +254,7 @@ test('migration: a fresh install with nothing to carry still records the import'
 test('migration: a load failure reports failed, writes nothing, and always destroys the window', async () => {
   const stores = { 'file://': { stream_lurker_saved_clips: '[]' } };
   const { BrowserWindow, log } = fakeElectron({ stores, failOn: 'app://bundle' });
-  const r = await migrateFileOriginStorage({ BrowserWindow, appRoot: REPO, settleMs: 0 });
+  const r = await migrateFileOriginStorage({ BrowserWindow, sourceFile: READER, settleMs: 0 });
   assert.equal(r.status, 'failed');
   assert.match(r.error, /ERR_FAILED/);
   assert.equal(stores['app://bundle'], undefined);
@@ -259,9 +262,9 @@ test('migration: a load failure reports failed, writes nothing, and always destr
 });
 
 test('migration: a hung page times out instead of holding the dashboard back', async () => {
-  const { BrowserWindow, log } = fakeElectron({ stores: {}, hangOn: 'style.css' });
+  const { BrowserWindow, log } = fakeElectron({ stores: {}, hangOn: 'legacy-storage-reader' });
   const started = Date.now();
-  const r = await migrateFileOriginStorage({ BrowserWindow, appRoot: REPO, timeoutMs: 50, settleMs: 0 });
+  const r = await migrateFileOriginStorage({ BrowserWindow, sourceFile: READER, timeoutMs: 50, settleMs: 0 });
   assert.equal(r.status, 'failed');
   assert.match(r.error, /timed out/);
   assert.ok(Date.now() - started < 2000);
@@ -270,7 +273,30 @@ test('migration: a hung page times out instead of holding the dashboard back', a
 
 test('migration: a BrowserWindow that cannot even be created is a failure, not a crash', async () => {
   class Broken { constructor() { throw new Error('no display'); } }
-  const r = await migrateFileOriginStorage({ BrowserWindow: Broken, appRoot: REPO, settleMs: 0 });
+  const r = await migrateFileOriginStorage({ BrowserWindow: Broken, sourceFile: READER, settleMs: 0 });
   assert.equal(r.status, 'failed');
   assert.match(r.error, /no display/);
+});
+
+test('migration: the old store is never read through a page inside app.asar', async () => {
+  // Packaged, with grantFileProtocolExtraPrivileges off, a file:// page inside
+  // the archive cannot load, so reading through one failed on every launch.
+  for (const bad of [
+    'C:\\Program Files\\Stream Lurker\\resources\\app.asar\\style.css',
+    '/opt/stream-lurker/resources/app.asar/style.css',
+    'C:\\x\\resources\\app.asar',
+    '',
+    undefined,
+  ]) {
+    const { BrowserWindow, log } = fakeElectron({ stores: { 'file://': { k: 'v' } } });
+    const r = await migrateFileOriginStorage({ BrowserWindow, sourceFile: bad, settleMs: 0 });
+    assert.equal(r.status, 'failed', String(bad));
+    assert.deepEqual(log.loads, [], 'nothing is loaded');
+  }
+  // app.asar.unpacked is a real directory on disk, and a name merely
+  // containing "app.asar" is not the archive.
+  for (const ok of ['C:\\x\\resources\\app.asar.unpacked\\r.html', 'C:\\data\\my-app.asar-notes\\r.html']) {
+    const { BrowserWindow } = fakeElectron({ stores: {} });
+    assert.equal((await migrateFileOriginStorage({ BrowserWindow, sourceFile: ok, settleMs: 0 })).status, 'imported', ok);
+  }
 });

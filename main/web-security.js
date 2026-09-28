@@ -133,8 +133,12 @@ function sanitizeWebviewAttach(webPreferences, params) {
   if (p.partition !== STREAM_PARTITION) {
     return { allow: false, reason: `partition "${p.partition || '(none)'}" is not ${STREAM_PARTITION}` };
   }
-  if (!isPlatformUrl(p.src)) {
-    return { allow: false, reason: `src ${String(p.src || '(empty)').slice(0, 120)} is not a platform page` };
+  // The same list the cell's navigation guards use. A <webview> that is moved
+  // in the DOM (the cell reorder buttons) is re-attached from its last
+  // committed URL, which may be Google's consent or sign-in page; refusing
+  // what the cell was allowed to navigate to would kill it on reorder.
+  if (!isAllowedTopLevelUrl('stream', p.src)) {
+    return { allow: false, reason: `src ${String(p.src || '(empty)').slice(0, 120)} is not a page a stream cell may show` };
   }
   // The guest is created from webPreferences.partition, not params.partition,
   // and Electron spreads the markup's `webpreferences` attribute over the

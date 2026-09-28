@@ -9,6 +9,11 @@
 const path = require('path');
 
 const CLIP_MEDIA_HOSTS = ['twitch.tv', 'jtvnw.net', 'twitchcdn.net'];
+// Clip video files. Twitch serves every current clip (videoQualities[].sourceURL)
+// from this one CloudFront distribution, checked against live GQL answers. It
+// is named exactly: anyone can host on bare cloudfront.net. Must equal
+// TWITCH_CLIP_FILE_HOSTS in src/state.js, which builds the URLs sent here.
+const CLIP_FILE_HOSTS = [...CLIP_MEDIA_HOSTS, 'd1ndex63qxojbr.cloudfront.net'];
 const CLIP_PAGE_HOSTS = ['twitch.tv'];
 const MAX_NAME_LENGTH = 150;
 
@@ -23,7 +28,7 @@ function httpsUrlOn(value, hosts) {
 
 // The normalized URL, or '' when it is not an https Twitch clip file.
 function clipDownloadUrl(value) {
-  return httpsUrlOn(value, CLIP_MEDIA_HOSTS);
+  return httpsUrlOn(value, CLIP_FILE_HOSTS);
 }
 
 // The normalized URL, or '' when it is not an https twitch.tv page.
@@ -42,4 +47,4 @@ function clipFileName(value) {
   return `${name || 'clip'}.mp4`;
 }
 
-module.exports = { CLIP_MEDIA_HOSTS, CLIP_PAGE_HOSTS, clipDownloadUrl, clipPageUrl, clipFileName };
+module.exports = { CLIP_MEDIA_HOSTS, CLIP_FILE_HOSTS, CLIP_PAGE_HOSTS, clipDownloadUrl, clipPageUrl, clipFileName };

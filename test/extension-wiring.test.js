@@ -10,7 +10,7 @@ const vm = require('node:vm');
 const { makeStorage, makeCookieJar, makeLoopback, YT_COOKIES, APP_LOGIN_TEXT } = require('./extension-fakes.js');
 
 const EXT = path.join(__dirname, '..', 'extension');
-const read = (f) => fs.readFileSync(path.join(EXT, f), 'utf8');
+const read = (f) => fs.readFileSync(path.join(EXT, f), 'utf8').replace(/\r\n/g, '\n');
 // 128-bit codes, as the app makes them; 8-character ones are refused (F50).
 const CODE = 'ABCD1234ABCD1234ABCD1234ABCD1234';
 const OTHER_CODE = 'FFFF0000FFFF0000FFFF0000FFFF0000';
@@ -287,7 +287,7 @@ test('popup end to end: pair, connect, auto-sync, signed-out in app, reconnect, 
   p.byId.code.value = OTHER_CODE;
   p.byId.code.fire('input');
   p.flushTimers();
-  await waitFor(() => /doesn't match/.test(conn.textContent), 'mismatch status');
+  await waitFor(() => /accepted this pairing code/.test(conn.textContent), 'mismatch status');
   assert.equal(p.byId.dot.className, 'dot');
   assert.ok(p.platformButtons.every(b => b.disabled));
   assert.equal(net.imports.length, before);
@@ -420,8 +420,8 @@ test('popup: fixing the code clears a stored "code doesn\'t match" at once, not 
   });
   const net = makeLoopback({ 47100: { kind: 'app', code: CODE } });
   const p = loadPopup({ storage, net, cookies: makeCookieJar(YT_COOKIES) });
-  await waitFor(() => /doesn't match/.test(p.byId.conn.textContent), 'mismatch status');
-  await waitFor(() => /pairing code doesn't match/.test(p.byId['sync-summary'].textContent), 'stored mismatch summary');
+  await waitFor(() => /accepted this pairing code/.test(p.byId.conn.textContent), 'mismatch status');
+  await waitFor(() => /accepted this pairing code/.test(p.byId['sync-summary'].textContent), 'stored mismatch summary');
   assert.equal(net.imports.length, 0, 'a mismatch on open triggers nothing');
 
   p.byId.code.value = CODE;
@@ -430,7 +430,7 @@ test('popup: fixing the code clears a stored "code doesn\'t match" at once, not 
   await waitFor(() => /Connected to Stream Lurker/.test(p.byId.conn.textContent), 'verified status');
   await waitFor(() => storage.data.lastResyncStatus === 'done' && !p.byId['sync-now'].dataset.running, 'fresh pass');
   await waitFor(() => /^Last auto-sync just now\.$/.test(p.byId['sync-summary'].textContent), 'fresh summary');
-  assert.doesNotMatch(p.byId['sync-summary'].textContent, /doesn't match/);
+  assert.doesNotMatch(p.byId['sync-summary'].textContent, /accepted this pairing code/);
   assert.equal(p.byId['sync-summary'].className, 'sync-summary idle');
   assert.equal(net.imports.length, 1);
   assert.equal(net.imports[0].body.auto, true);
@@ -492,7 +492,7 @@ test('popup: shows the stored auto-sync outcome on open, including a code mismat
   });
   const p = loadPopup({ storage, net: makeLoopback({}), cookies: makeCookieJar([]) });
   await waitFor(() => p.byId['sync-summary'].textContent.startsWith('Checked'), 'summary');
-  assert.match(p.byId['sync-summary'].textContent, /Checked 4 min ago: the pairing code doesn't match/);
+  assert.match(p.byId['sync-summary'].textContent, /Checked 4 min ago: no Stream Lurker accepted this pairing code/);
   assert.equal(p.byId['sync-summary'].className, 'sync-summary err');
   assert.deepEqual(p.rows().map(r => [r.name, r.text, r.tone]), [['Twitch', 'Synced 3 h ago · 5 cookies', 'ok']]);
   await waitFor(() => /not found/.test(p.byId.conn.textContent), 'not-found status');

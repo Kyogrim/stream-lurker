@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
 
 // From a top-level declaration to the next one (good enough for this file:
 // every top-level declaration starts at column 0).
@@ -136,6 +136,36 @@ test('F73: background checks drop results when the account changed under them', 
   for (const fn of [/async function importGoogleSession\(/, /async function importKickSession\(/, /async function importTwitchSession\(/]) {
     assert.match(section(fn), /accountEpochs\.bump\(/);
   }
+});
+
+test('F73 (Twitch writers): the startup check and the follows sync never write over a Sign Out', () => {
+  // validateSavedSessions: snapshot before the platform's first await, then
+  // checked after the name lookup and again before the tail's writes.
+  const validate = section(/async function validateSavedSessions\(/);
+  const snapAt = validate.indexOf('let snap = accountEpochs.snapshot(platform, config.accounts);');
+  const firstAwait = validate.indexOf('await ', validate.indexOf('for (const platform of platformsToCheck)'));
+  assert.ok(snapAt > 0 && snapAt < firstAwait, 'snapshot before the first await of each platform');
+  const lookupAt = validate.indexOf('await fetchTwitchUsername(tokenCookie.value)');
+  const lookupGuard = validate.indexOf('accountEpochs.isCurrent(snap, config.accounts)', lookupAt);
+  assert.ok(lookupAt > 0 && lookupGuard > lookupAt, 'checked after the name lookup');
+  assert.ok(lookupGuard < validate.indexOf('config.accounts[platform] = username;'), 'before the recovery write');
+  const tailGuard = validate.indexOf('accountEpochs.isCurrent(snap, config.accounts)', validate.indexOf('if (checkErrored) continue;'));
+  assert.ok(tailGuard > 0, 'the tail is guarded');
+  assert.ok(tailGuard < validate.indexOf('delete config.accounts[platform];'), 'before the expiry delete');
+  assert.ok(tailGuard < validate.indexOf('config.accounts[platform] = placeholderName(platform);'), 'before the placeholder write');
+  // Its own recovery write re-bases the snapshot, or the tail would refuse it.
+  assert.ok(validate.indexOf('snap = accountEpochs.snapshot(platform, config.accounts);', validate.indexOf('config.accounts[platform] = username;')) > 0);
+
+  // get-twitch-follows: bounded request, snapshot before it, and the name is
+  // written only while the same, still-connected account is current.
+  const follows = section(/ipcMain\.handle\('get-twitch-follows'/);
+  const fSnap = follows.indexOf("const snap = accountEpochs.snapshot('twitch', config.accounts);");
+  const fFetch = follows.indexOf('await fetchTextWithDeadline(net.fetch');
+  assert.ok(fSnap > 0 && fFetch > fSnap, 'snapshot before the request');
+  assert.doesNotMatch(follows, /await net\.fetch\(/, 'no unbounded request');
+  const fWrite = follows.indexOf('config.accounts.twitch = username;');
+  const fGuard = follows.lastIndexOf('snap.name && accountEpochs.isCurrent(snap, config.accounts)', fWrite);
+  assert.ok(fGuard > fFetch && fGuard < fWrite, 'guarded after the request, before the write');
 });
 
 test('F38/F39/F40: pastes and imports go through the shared parser and shaped writes', () => {

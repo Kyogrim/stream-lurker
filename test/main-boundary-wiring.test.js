@@ -10,8 +10,8 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
-const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8');
-const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8');
+const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
 
 // Source of a top-level function or handler: from its opening line to the
 // next line that is exactly "}" or "});" (or "}));").
@@ -33,7 +33,7 @@ const before = (text, a, b) => {
 
 test('F16/F54/C1: the receiver is the checked handler, with no CORS and no pairing code in the log', () => {
   // (The gql.twitch.tv response rewrite for stream cells sets one; that is not the receiver.)
-  const receiverSrc = fs.readFileSync(path.join(REPO, 'main', 'cookie-receiver.js'), 'utf8');
+  const receiverSrc = fs.readFileSync(path.join(REPO, 'main', 'cookie-receiver.js'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(receiverSrc.replace(/^\s*\/\/.*$/gm, ''), /Access-Control-Allow/);
   const receiverArea = mainJs.slice(mainJs.indexOf('function getPairingCode('), mainJs.indexOf("ipcMain.handle('open-extension-folder'"));
   assert.doesNotMatch(receiverArea, /Access-Control-Allow|setHeader\(/);
@@ -136,7 +136,7 @@ test('r2-7: a YouTube paste holds re-sync off while it runs, and ends one alread
 
 test('r2-17: an automatic import answers within its budget and applies a late probe under the same checks', () => {
   // The budget sits below what the extension waits, with room for the writes.
-  const connector = fs.readFileSync(path.join(REPO, 'extension', 'connector.js'), 'utf8');
+  const connector = fs.readFileSync(path.join(REPO, 'extension', 'connector.js'), 'utf8').replace(/\r\n/g, '\n');
   const extensionTimeout = Number((connector.match(/AUTO_IMPORT_TIMEOUT_MS = (\d+)/) || [])[1]);
   const budget = Number((mainJs.match(/const AUTO_IMPORT_PROBE_BUDGET_MS = (\d+);/) || [])[1]);
   assert.ok(extensionTimeout > 0 && budget > 0, 'both constants found');
@@ -191,7 +191,7 @@ test('F96: automatic re-sync results reach Platform Logins and the log, rate-lim
 
 test('G2.4: every receiver port is one the extension looks on, the original five first', () => {
   const ports = JSON.parse(mainJs.match(/const RECEIVER_PORTS = (\[[\d,\s]+\]);/)[1]);
-  const connectorSrc = fs.readFileSync(path.join(REPO, 'extension', 'connector.js'), 'utf8');
+  const connectorSrc = fs.readFileSync(path.join(REPO, 'extension', 'connector.js'), 'utf8').replace(/\r\n/g, '\n');
   const extPorts = JSON.parse(connectorSrc.match(/const PORTS = (\[[\d,\s]+\]);/)[1]);
   assert.deepEqual(ports.slice(0, 5), [47100, 47101, 47102, 47103, 47104]);
   for (const p of ports) assert.ok(extPorts.includes(p), `port ${p} is not in extension/connector.js PORTS`);
@@ -246,7 +246,7 @@ test('F83: the dead Drops / page-GQL subsystem is gone', () => {
   // The device-id handshake is gone from both ends. They go together: a
   // sendSync nothing answers blocks the page until the event is collected.
   assert.doesNotMatch(mainJs, /get-twitch-unique-id-sync/);
-  const loginPreload = fs.readFileSync(path.join(REPO, 'src', 'twitch-preload.js'), 'utf8');
+  const loginPreload = fs.readFileSync(path.join(REPO, 'src', 'twitch-preload.js'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(loginPreload, /sendSync|get-twitch-unique-id-sync/);
 });
 
@@ -255,10 +255,10 @@ test('F57: the catalog no longer promises ad blocking the app cannot deliver', (
   assert.doesNotMatch(catalog, /pre-roll|mid-roll|Recommended for hiding/i);
   assert.match(catalog, /does not let extensions block network requests/);
   // Nor does the package metadata or the README (F57's own evidence).
-  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8').replace(/\r\n/g, '\n'));
   assert.doesNotMatch(pkg.description, /adblock|ad block|ad-block/i);
   assert.ok(!(pkg.keywords || []).some(k => /adblock|ad block|ad-block/i.test(k)), 'no adblock keyword');
-  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf8');
+  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(readme, /adblock support|ad-?block(ing)? (support|extensions?)/i, 'README.md does not advertise ad blocking');
 });
 
@@ -332,7 +332,7 @@ test('G4.5/F97: main stores the merged schedule itself, and never after a sync w
   assert.match(sync, /const saved = shouldStoreSchedule\(result\);\s*if \(saved\) \{\s*config\.syncedCalendarEvents = result\.events;\s*saveConfig\(\);\s*\}/);
   assert.match(sync, /return \{ \.\.\.result, saved \};/);
   // The dashboard reads exactly this shape (src/calendar.js readScheduleSync).
-  const calendar = fs.readFileSync(path.join(REPO, 'src', 'calendar.js'), 'utf8');
+  const calendar = fs.readFileSync(path.join(REPO, 'src', 'calendar.js'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(calendar, /persisted: res\.saved === true/);
 });
 

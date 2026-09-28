@@ -16,7 +16,7 @@ const ROOT = path.join(__dirname, '..');
 function appReceiverPorts() {
   const files = ['main.js', ...fs.readdirSync(path.join(ROOT, 'main')).filter(f => f.endsWith('.js')).map(f => path.join('main', f))];
   for (const f of files) {
-    const m = /\bRECEIVER_PORTS\s*=\s*\[([^\]]*)\]/.exec(fs.readFileSync(path.join(ROOT, f), 'utf8'));
+    const m = /\bRECEIVER_PORTS\s*=\s*\[([^\]]*)\]/.exec(fs.readFileSync(path.join(ROOT, f), 'utf8').replace(/\r\n/g, '\n'));
     if (m) return m[1].split(',').map(s => s.trim()).filter(Boolean).map(Number);
   }
   return null;

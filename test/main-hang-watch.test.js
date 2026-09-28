@@ -104,7 +104,7 @@ test('F15: a contents that throws while closing does not take main down', () => 
 });
 
 test('F15: main.js watches every webview guest, and only guests', () => {
-  const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
   const start = mainJs.indexOf("app.on('web-contents-created'");
   const body = mainJs.slice(start, mainJs.indexOf('\n});', start));
   const webviewOnly = body.indexOf("if (contents.getType() !== 'webview') return;");

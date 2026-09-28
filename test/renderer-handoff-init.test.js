@@ -24,7 +24,7 @@ const { createDocument, FakeElement } = require('./renderer-fake-dom.js');
 
 const ROOT = path.join(__dirname, '..');
 const flush = async (n = 8) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); };
-const RENDERER_SRC = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+const RENDERER_SRC = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8').replace(/\r\n/g, '\n');
 
 test('G4.8 + F77: one boot of the dashboard against a main with three open streams', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
@@ -395,7 +395,7 @@ test('G4.8: a scan that finishes while the dashboard boots still reaches the scr
 });
 
 test('F83: the portal refresh buttons are gone from renderer.js and index.html', () => {
-  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8').replace(/\r\n/g, '\n');
   for (const dead of ['setupRefreshWebviewButtons', 'WEBVIEW_LABEL', 'Portal refresh buttons', 'refresh-webview-btn', '-login-webview']) {
     assert.ok(!RENDERER_SRC.includes(dead), `renderer.js still has ${dead}`);
     assert.ok(!html.includes(dead), `index.html still has ${dead}`);

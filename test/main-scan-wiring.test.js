@@ -8,8 +8,8 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
-const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8');
-const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8');
+const mainJs = fs.readFileSync(path.join(REPO, 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+const preloadJs = fs.readFileSync(path.join(REPO, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
 
 // Source of a top-level function or handler: from its opening line to the
 // next line that is exactly "}" or "});".

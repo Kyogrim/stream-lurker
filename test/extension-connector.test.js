@@ -358,6 +358,19 @@ test('resync records its early skips so the popup never shows a stale "ok" as cu
   assert.deepEqual(closed.data.lastResyncResults.youtube, oldOk, 'the per-platform entry keeps its own, older timestamp');
 });
 
+test('another Windows user\'s app answering while ours is closed is not blamed on the code alone', async () => {
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch'] });
+  const net = makeLoopback({ 47100: { kind: 'app', code: OTHER_CODE } });
+  const found = await SL.findApp({ fetch: net.fetch, crypto: globalThis.crypto, code: CODE, ports: [47100], timeoutMs: 1000 });
+  assert.equal(found.status, 'mismatch');
+  const view = SL.describeConnection(found);
+  assert.equal(view.tone, 'err');
+  assert.match(view.text, /If it is closed, another program or another Windows user's copy is answering/);
+  assert.match(view.text, /If your app is open, copy the current code/);
+  assert.equal((await SL.runResync(resyncDeps(storage, net))).status, 'code-mismatch');
+  assert.match(SL.describeSync(storage.data, Date.now()).summary.text, /sync resumes once it is open/);
+});
+
 test('resync sends nothing to an unproven or mismatched listener', async () => {
   for (const [ports, status] of [
     [{ 47100: { kind: 'outdated' } }, 'app-outdated'],
@@ -686,7 +699,8 @@ test('"app not running" is calm; a code mismatch, an outdated app or a missing c
   assert.equal(s('app-not-running').tone, 'idle');
   assert.match(s('app-not-running').text, /wasn't running/);
   assert.equal(s('code-mismatch').tone, 'err');
-  assert.match(s('code-mismatch').text, /Paste the current code/);
+  assert.match(s('code-mismatch').text, /paste its current code/);
+  assert.match(s('code-mismatch').text, /if it is closed, sync resumes/, 'a closed app is named as a cause too');
   assert.equal(s('app-outdated').tone, 'err');
   assert.match(s('app-outdated').text, /needs updating/);
   assert.equal(s('app-code-too-short').tone, 'err');

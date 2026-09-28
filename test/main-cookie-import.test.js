@@ -84,6 +84,18 @@ test('F38: JSON expiry: -1, 0, milliseconds, date strings, session flag', () => 
   assert.equal(cookieSetDetails({ name: 'x', value: '1', domain: '.a.com', expirationDate: -1 }, { nowS: NOW_S }).expirationDate, NOW_S + ONE_YEAR_S);
 });
 
+test('normalizeExpiry: far-future seconds stay seconds; only raw numbers can be milliseconds', () => {
+  const NEVER = 253402300799; // 9999-12-31T23:59:59Z, the usual "never expires"
+  assert.equal(normalizeExpiry(NEVER), NEVER);
+  assert.equal(normalizeExpiry(String(NEVER)), NEVER);
+  assert.equal(normalizeExpiry('9999-12-31T23:59:59Z'), NEVER, 'a parsed date is never divided again');
+  assert.equal(normalizeExpiry('Fri, 31 Dec 9999 23:59:59 GMT'), NEVER);
+  assert.equal(normalizeExpiry(1830000000000), 1830000000, 'milliseconds');
+  assert.equal(normalizeExpiry('1830000000000'), 1830000000);
+  assert.equal(normalizeExpiry(1830000000.5), 1830000000.5, 'Chrome writes fractional seconds');
+  assert.ok(normalizeExpiry(NEVER) > Date.now() / 1000, 'a never-expiring cookie is not written expired');
+});
+
 test('normalizeExpiry rejects everything that is not a positive time', () => {
   for (const v of [undefined, null, '', 'Session', NaN, Infinity, -5, 0, '0', {}, []]) {
     assert.equal(normalizeExpiry(v), undefined, String(v));
@@ -424,7 +436,7 @@ test('issue-4: a domain that is not a bare hostname is refused by every platform
 });
 
 test('issue-4: the Kick and Twitch imports filter through isCookieDomainOf', () => {
-  const mainJs = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+  const mainJs = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = (marker) => mainJs.slice(mainJs.indexOf(marker), mainJs.indexOf('\n}\n', mainJs.indexOf(marker)));
   assert.match(body('async function importTwitchSession('), /\.filter\(c => c && c\.name && isCookieDomainOf\(c\.domain, 'twitch\.tv'\)\)/);
   assert.match(body('async function importKickSession('), /\.filter\(c => c && isCookieDomainOf\(c\.domain, 'kick\.com'\)\)/);

@@ -177,15 +177,24 @@ function withTimeout(promise, ms, what) {
 }
 
 // Copies the dashboard's file:// localStorage into app://bundle, in a hidden,
-// sandboxed window on the default session (the one the dashboard uses). Both
-// pages it loads are style.css, so no dashboard script runs. Resolves to
+// sandboxed window on the default session (the one the dashboard uses). Every
+// file:// page shares one localStorage, so the old store is read through
+// `sourceFile`: a blank page the caller writes on the real filesystem. It must
+// not be a file inside app.asar: a packaged build turns the
+// grantFileProtocolExtraPrivileges fuse off, and then nothing in the archive
+// opens as a file:// page, so the import would fail on every launch and the
+// saved clips would never arrive. The app:// side loads style.css, so no
+// dashboard script runs. Resolves to
 // { status: 'imported' | 'already' | 'failed', keys, error }; never rejects.
 //
 // The caller must already have another window open: destroying the last
 // window would fire window-all-closed and quit the app.
-async function migrateFileOriginStorage({ BrowserWindow, appRoot, flushStorage = () => {}, timeoutMs = 10000, settleMs = 300 }) {
+async function migrateFileOriginStorage({ BrowserWindow, sourceFile, flushStorage = () => {}, timeoutMs = 10000, settleMs = 300 }) {
   let win = null;
   try {
+    if (typeof sourceFile !== 'string' || !sourceFile || /[\\/]app\.asar([\\/]|$)/i.test(sourceFile)) {
+      throw new Error(`the legacy store must be read through a page outside app.asar (got ${sourceFile})`);
+    }
     win = new BrowserWindow({
       show: false,
       width: 400,
@@ -193,7 +202,7 @@ async function migrateFileOriginStorage({ BrowserWindow, appRoot, flushStorage =
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
     });
     const run = async () => {
-      await win.loadFile(path.join(appRoot, 'style.css'));
+      await win.loadFile(sourceFile);
       const source = await win.webContents.executeJavaScript(READ_STORAGE_SCRIPT);
       await win.loadURL(`${DASHBOARD_ORIGIN}/style.css`);
       const dest = await win.webContents.executeJavaScript(READ_STORAGE_SCRIPT);

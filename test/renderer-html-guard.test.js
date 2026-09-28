@@ -777,7 +777,7 @@ test('renderer code: every HTML and URL sink is escaped or validated', () => {
   const all = [];
   const totals = { html: 0, url: 0, templates: 0 };
   for (const file of FILES) {
-    const { violations, sinks } = scanSource(file, fs.readFileSync(path.join(ROOT, file), 'utf8'));
+    const { violations, sinks } = scanSource(file, fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n'));
     all.push(...violations);
     for (const k of Object.keys(totals)) totals[k] += sinks[k];
   }

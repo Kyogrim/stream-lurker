@@ -9,7 +9,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { FakeDocument, FakeMutationObserver, FakeEvent } = require('./page-fake-dom');
 
-const PRELOAD = fs.readFileSync(path.join(__dirname, '..', 'src', 'twitch-preload.js'), 'utf8');
+const PRELOAD = fs.readFileSync(path.join(__dirname, '..', 'src', 'twitch-preload.js'), 'utf8').replace(/\r\n/g, '\n');
 const tick = () => new Promise(r => setImmediate(r));
 
 function runPreload({ rootAtStart = false } = {}) {

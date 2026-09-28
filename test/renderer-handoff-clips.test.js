@@ -119,6 +119,6 @@ test('F10: no renderer module falls back to window.open', () => {
   const skip = new Set(['inject.js', 'twitch-preload.js']); // run inside third-party pages
   const files = ['renderer.js', ...fs.readdirSync(path.join(ROOT, 'src')).filter(f => f.endsWith('.js') && !skip.has(f)).map(f => `src/${f}`)];
   for (const f of files) {
-    assert.doesNotMatch(fs.readFileSync(path.join(ROOT, f), 'utf8'), /window\.open\s*\(/, f);
+    assert.doesNotMatch(fs.readFileSync(path.join(ROOT, f), 'utf8').replace(/\r\n/g, '\n'), /window\.open\s*\(/, f);
   }
 });

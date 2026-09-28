@@ -11,7 +11,7 @@ const { pathToFileURL } = require('url');
 
 const ROOT = path.join(__dirname, '..');
 const load = rel => import(pathToFileURL(path.join(ROOT, rel)).href);
-const RAW_HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+const RAW_HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 // Comments may mention handlers; only real markup counts.
 const HTML = RAW_HTML.replace(/<!--[\s\S]*?-->/g, '');
 
@@ -150,7 +150,7 @@ test('G4.7: nothing render- or script-blocking is fetched from the network', () 
   const withoutCsp = HTML.replace(/<meta\s+http-equiv="Content-Security-Policy"[^>]*>/i, '');
   assert.doesNotMatch(withoutCsp, /fonts\.googleapis\.com|fonts\.gstatic\.com/, 'Google Fonts must be attached from script');
   // The CSS falls back to system fonts while (or if) the web fonts never load.
-  const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(css, /--font-sans:\s*'Outfit',\s*sans-serif;/);
   assert.match(css, /--font-mono:\s*'JetBrains Mono',\s*monospace;/);
 });
@@ -160,7 +160,7 @@ test('G4.7: nothing render- or script-blocking is fetched from the network', () 
 // (that event). Checked in Chrome 152: a stalled stylesheet inserted from a
 // module script kept readyState at 'interactive' for as long as it stalled.
 test('G4.7: renderer.js defers the fonts to the load event, never attaching them itself', () => {
-  const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+  const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /^loadWebFontsAfterLoad\(\);$/m, 'top-level, never awaited');
   assert.doesNotMatch(src, /\bloadWebFonts\(/, 'no direct loadWebFonts() call, which would hold the load event');
 });

@@ -21,13 +21,21 @@ function normalizeSameSite(s) {
 // already expired and drops the cookie on the spot.
 function normalizeExpiry(value) {
   let n;
-  if (typeof value === 'number') n = value;
-  else if (typeof value === 'string' && value.trim()) {
+  let numeric = false;
+  if (typeof value === 'number') {
+    n = value;
+    numeric = true;
+  } else if (typeof value === 'string' && value.trim()) {
     const s = value.trim();
-    n = /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : Date.parse(s) / 1000;
+    numeric = /^-?\d+(\.\d+)?$/.test(s);
+    n = numeric ? Number(s) : Date.parse(s) / 1000;
   } else return undefined;
   if (!Number.isFinite(n) || n <= 0) return undefined;
-  if (n > 1e11) n /= 1000; // milliseconds
+  // Milliseconds: every millisecond timestamp since Sept 2001 is >= 1e12, and
+  // a seconds value only gets there in the year 33658. The old 1e11 cut read
+  // the usual "never expires" date, 9999-12-31 (253402300799 s), as 1978, and
+  // the cookie was written already expired. A parsed date is already seconds.
+  if (numeric && n >= 1e12) n /= 1000;
   return n;
 }
 

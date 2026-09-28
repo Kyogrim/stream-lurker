@@ -172,6 +172,17 @@ test('webview attach: wrong partition or a non-platform src is refused', () => {
   assert.equal(sanitizeWebviewAttach(undefined, undefined).allow, false, 'missing arguments do not throw');
 });
 
+test('webview attach: accepts exactly what a stream cell may navigate to (reordering a cell re-attaches it)', () => {
+  for (const ok of ['https://consent.google.com/ml?continue=x', 'https://accounts.google.com/ServiceLogin', 'https://kick.com/x']) {
+    assert.equal(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: ok }).allow, true, ok);
+    assert.equal(isAllowedTopLevelUrl('stream', ok), true, ok);
+  }
+  for (const bad of ['https://www.google.com/search?q=x', 'http://accounts.google.com/', 'https://mail.google.com/']) {
+    assert.equal(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: bad }).allow, false, bad);
+    assert.equal(isAllowedTopLevelUrl('stream', bad), false, bad);
+  }
+});
+
 test('webview attach: the guest\'s own partition preference is pinned to the stream partition', () => {
   // Electron builds webPreferences from params, then spreads the markup's
   // `webpreferences` attribute over it; the guest is created from the result.

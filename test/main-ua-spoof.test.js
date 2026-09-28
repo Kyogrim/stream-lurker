@@ -62,7 +62,7 @@ test('the preload derives the same brands and full version from the spoofed UA',
   // src/twitch-preload.js reads navigator.userAgent with these regexes and
   // reports fullVersionList with the Chrome/<full> version: the headers above
   // must say the same.
-  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'twitch-preload.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'twitch-preload.js'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(preload, /Chrome\\\\\/\(\\\\d\+\)\\\\\./, 'major from the UA string');
   assert.match(preload, /brand: 'Google Chrome', version: chromeVersion/);
   const { major, full } = spoofedChromeVersion('152.0.7632.45');

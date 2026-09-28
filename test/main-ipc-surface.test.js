@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
-const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
+const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8').replace(/\r\n/g, '\n');
 const mainJs = read('main.js');
 const preloadJs = read('preload.js');
 

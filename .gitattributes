@@ -1,0 +1,8 @@
+# Sources are written with LF, and the wiring tests read them as text. Pin LF so
+# a Windows clone (Git for Windows defaults to core.autocrlf=true) checks out
+# the same bytes the tests were written against. The tests also normalize line
+# endings when they read sources, so an editor saving CRLF cannot break them.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.ico binary

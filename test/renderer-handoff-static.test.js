@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8').replace(/\r\n/g, '\n');
 
 function section(id) {
   const start = html.indexOf(`<section id="${id}"`);
@@ -58,13 +58,13 @@ test('every window.api method the dashboard calls is exposed by preload.js', () 
   // rotatePairingCode, openExtensionFolder, openClipWindow, downloadClip)
   // must exist, or the call throws and the feature silently does nothing.
   const root = path.join(__dirname, '..');
-  const preload = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(root, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
   const exposed = new Set([...preload.matchAll(/^\s*(\w+)\s*:/gm)].map(m => m[1]));
   const skip = new Set(['inject.js', 'twitch-preload.js', 'points.js']);
   const files = ['renderer.js', ...fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.js') && !skip.has(f)).map(f => `src/${f}`)];
   const missing = [];
   for (const f of files) {
-    for (const m of fs.readFileSync(path.join(root, f), 'utf8').matchAll(/window\.api\.(\w+)/g)) {
+    for (const m of fs.readFileSync(path.join(root, f), 'utf8').replace(/\r\n/g, '\n').matchAll(/window\.api\.(\w+)/g)) {
       if (!exposed.has(m[1])) missing.push(`${f}: ${m[1]}`);
     }
   }
@@ -75,7 +75,7 @@ test('every window.api method the dashboard calls is exposed by preload.js', () 
 });
 
 test('F17: the pairing code can be selected by hand', () => {
-  const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'style.css'), 'utf8').replace(/\r\n/g, '\n');
   // The global `* { user-select: none }` would otherwise leave typing all 32
   // characters as the only way to move a new code into the extension.
   const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)]
