@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  SETTING_RANGES, clampSetting, scanIntervalMs, normalizeConfigNumbers, normalizeStreamers, sanitizeConfig,
+  SETTING_RANGES, clampSetting, scanIntervalMs, normalizeConfigNumbers, normalizeStreamers, sanitizeConfig, normalizeEventList,
   streamerPlatform, streamerName,
 } = require('../main/config-sanitize');
 
@@ -84,6 +84,35 @@ test('G2.2: sanitizeConfig runs both and makes a scan-style filter safe', () => 
   assert.doesNotThrow(() => cfg.streamers.filter(s => s.platform.toLowerCase() === 'kick').map(s => s.username.toLowerCase()));
   assert.deepEqual(sanitizeConfig(null), { clamped: [], dropped: [] });
   assert.deepEqual(sanitizeConfig([]), { clamped: [], dropped: [] });
+});
+
+test('F93 layer 2: both calendar lists reach the dashboard as lists of event objects', () => {
+  const ev = { title: 'a', day: 1, time: '20:00' };
+  const cfg = {
+    calendarEvents: [ev, null, 'x', 5, ['nested'], { ...ev, title: 'b' }],
+    syncedCalendarEvents: { 0: ev },
+  };
+  const { clamped } = sanitizeConfig(cfg);
+  assert.deepEqual(cfg.calendarEvents, [ev, { ...ev, title: 'b' }]);
+  assert.equal(cfg.calendarEvents[0], ev, 'kept entries are the same objects, untouched');
+  assert.deepEqual(cfg.syncedCalendarEvents, []);
+  assert.deepEqual(clamped, [
+    { key: 'calendarEvents', from: '6 entries', to: '2 events' },
+    { key: 'syncedCalendarEvents', from: 'an object', to: '0 events' },
+  ]);
+  // Clean lists and absent keys are left exactly as they are, unreported.
+  const clean = { calendarEvents: [ev], syncedCalendarEvents: [] };
+  assert.deepEqual(sanitizeConfig(clean).clamped, []);
+  assert.deepEqual([clean.calendarEvents, clean.syncedCalendarEvents], [[ev], []]);
+  const absent = {};
+  sanitizeConfig(absent);
+  assert.equal('calendarEvents' in absent, false);
+  // A damaged value is described in the log, never echoed.
+  assert.deepEqual(normalizeEventList('calendarEvents', 'x'.repeat(10000)).change.from, 'a string');
+  assert.deepEqual(normalizeEventList('calendarEvents', null).change.from, null);
+  assert.equal(normalizeEventList('calendarEvents', undefined), null);
+  // The expressions the calendar runs over every entry.
+  assert.doesNotThrow(() => cfg.calendarEvents.forEach(e => `${e.title}`.toLowerCase()));
 });
 
 test('streamerPlatform / streamerName never throw', () => {

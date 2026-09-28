@@ -39,6 +39,13 @@ function createDashboardHealth() {
       return state !== 'dead';
     },
 
+    // The user asked to see the dashboard (tray, second launch). A dead one
+    // is a blank window until its scheduled reload, up to SLOW_RELOAD_DELAY_MS
+    // away, and with no application menu there is no Ctrl+R: reload now.
+    get reloadOnShow() {
+      return state === 'dead';
+    },
+
     loaded() {
       state = 'alive';
     },

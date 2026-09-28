@@ -4,7 +4,7 @@
 // minute ticker the way main.js does. Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { OFFLINE_CONFIRMATIONS, staleAfterMs, createStreamLiveness } = require('../main/stream-liveness');
+const { OFFLINE_CONFIRMATIONS, OFFLINE_MIN_SPAN_SHARE, offlineMinSpanMs, staleAfterMs, createStreamLiveness } = require('../main/stream-liveness');
 const { applyScanResults, streamKey } = require('../main/scan-planner');
 
 const MIN = 60 * 1000;
@@ -55,6 +55,31 @@ test('offline streak counts consecutive clean offline results', () => {
   assert.equal(l.observe('kick:x', live('x'), T0 + 3 * INTERVAL), 0);
   l.start('kick:x', T0); // reopening resets it
   assert.equal(l.offlineStreak('kick:x'), 0);
+});
+
+test('issue-7: an offline confirmation needs the streak and half an interval since the first offline', () => {
+  const l = createStreamLiveness();
+  assert.equal(OFFLINE_MIN_SPAN_SHARE, 0.5);
+  assert.equal(offlineMinSpanMs(INTERVAL), 90 * 1000);
+  assert.equal(offlineMinSpanMs(undefined), 0, 'no interval known: the count alone decides, as before');
+  l.start('kick:x', T0);
+  l.observe('kick:x', offline('x'), T0 + INTERVAL);
+  assert.equal(l.offlineSince('kick:x'), T0 + INTERVAL);
+  assert.equal(l.offlineConfirmed('kick:x', T0 + INTERVAL + 5000, INTERVAL), false, 'one result');
+  l.observe('kick:x', offline('x'), T0 + INTERVAL + 5000);
+  assert.equal(l.offlineSince('kick:x'), T0 + INTERVAL, 'the clock starts at the first offline');
+  assert.equal(l.offlineConfirmed('kick:x', T0 + INTERVAL + 5000, INTERVAL), false, 'two results, 5 s apart');
+  assert.equal(l.offlineConfirmed('kick:x', T0 + INTERVAL + 90 * 1000, INTERVAL), true);
+  // Live, an error or a reopen starts over.
+  for (const reset of [(t) => l.observe('kick:x', live('x'), t), (t) => l.observe('kick:x', errored('x'), t), (t) => l.start('kick:x', t)]) {
+    reset(T0 + 10 * INTERVAL);
+    assert.equal(l.offlineSince('kick:x'), undefined);
+    assert.equal(l.offlineConfirmed('kick:x', T0 + 20 * INTERVAL, INTERVAL), false);
+    l.observe('kick:x', offline('x'), T0 + 11 * INTERVAL);
+    l.observe('kick:x', offline('x'), T0 + 12 * INTERVAL);
+    assert.equal(l.offlineConfirmed('kick:x', T0 + 12 * INTERVAL, INTERVAL), true);
+  }
+  assert.equal(l.offlineConfirmed('kick:unknown', T0, INTERVAL), false);
 });
 
 test('sessionEnd: cut one interval after the last confirmation when no longer confirmed', () => {

@@ -62,7 +62,12 @@ test('F34: an expiry leaves a fingerprint that validateSavedSessions honours', (
   const health = section(/async function runYouTubeSessionHealthCheck\(/);
   assert.match(health, /config\.youtubeExpiredFingerprint = expiredFingerprint/);
   const validate = section(/async function validateSavedSessions\(/);
-  assert.match(validate, /youtubeAuthFingerprint\(cookies\) === config\.youtubeExpiredFingerprint/);
+  // Issue 17: signed in means a fingerprint exists, so an expiry always has
+  // a marker to leave (rotating cookies alone used to count and never match).
+  const ytBranch = validate.slice(validate.indexOf("platform === 'youtube'"), validate.indexOf("platform === 'rumble'"));
+  assert.match(ytBranch, /const fingerprint = youtubeAuthFingerprint\(cookies\);\s*isValid = fingerprint !== null;/);
+  assert.match(ytBranch, /if \(fingerprint === config\.youtubeExpiredFingerprint\)/);
+  assert.doesNotMatch(mainJs, /YOUTUBE_AUTH_COOKIE/);
   assert.match(validate, /placeholderName\(platform\)/);
   // A marker is a heuristic verdict: re-asked silently once per launch, and
   // it can only reconnect, never announce an expiry.
@@ -78,6 +83,34 @@ test('F34: an expiry leaves a fingerprint that validateSavedSessions honours', (
   assert.ok(save.indexOf('rendererConfigPatch(newConfig, config') >= 0);
   assert.ok(save.indexOf('const next = { ...config, ...patch };') < save.indexOf('saveConfig(next)'));
   assert.ok(!require('../main/config-boundary').RENDERER_KEYS.includes('youtubeExpiredFingerprint'));
+});
+
+test('issue-16: the login modal counts a YouTube cookie hit only for a session that is new since it opened', () => {
+  const modal = section(/ipcMain\.handle\('open-login-modal'/);
+  const atOpen = modal.indexOf('const youtubeAtOpen = ');
+  assert.ok(atOpen > 0 && atOpen < modal.indexOf('loginWin.loadURL(loginUrl'), 'read before the page loads');
+  assert.match(modal, /readYouTubeAuthCookies\(\)\.then\(youtubeAuthFingerprint\)\.catch\(\(\) => undefined\)/);
+  const detect = modal.slice(modal.indexOf('async function detectLogin('));
+  const yt = detect.slice(detect.indexOf("} else if (p === 'youtube') {"), detect.indexOf("} else if (p === 'rumble') {"));
+  assert.match(yt, /isNewYouTubeSignIn\(youtubeAuthFingerprint\(await readYouTubeAuthCookies\(ses\)\), \{\s*atOpen: await youtubeAtOpen,\s*expired: config\.youtubeExpiredFingerprint,/);
+  assert.match(yt, /\) return \{\};/);
+});
+
+test('issue-19: a paste YouTube rejects puts the previous cookies back, or disconnects; the error says which', () => {
+  const importGoogle = section(/async function importGoogleSession\(/);
+  assert.ok(importGoogle.indexOf('jarBefore = await readYouTubeJar()') < importGoogle.indexOf('writeCookieList(relevant'), 'copied before anything is written');
+  assert.ok(importGoogle.indexOf('const markerBefore = config.youtubeExpiredFingerprint;') < importGoogle.indexOf('delete config.youtubeExpiredFingerprint'));
+  assert.match(importGoogle, /probe\.state === 'signed-out' && opts\.paste\) \{[\s\S]*?await restorePastedOver\(jarBefore, markerBefore\);[\s\S]*?\$\{restored\.userMessage\}/);
+  assert.match(importGoogle, /const restored = opts\.paste \? await restorePastedOver\(jarBefore, markerBefore\) : null;/, 'a paste nothing of which could be written also restores');
+  const restore = section(/async function restorePastedOver\(/);
+  assert.ok(restore.indexOf('ses.cookies.remove(removalUrl(c), c.name)') < restore.indexOf('writeCookieList(jarBefore'), 'the pasted and probe cookies go first');
+  assert.match(restore, /if \(back === jarBefore\.length\) \{/);
+  // The fallback: the card must match the jar.
+  const fallback = restore.slice(restore.lastIndexOf('youtubeAuthFingerprint('));
+  for (const step of ['delete config.accounts.youtube', "accountEpochs.bump('youtube')", 'saveConfig()', "send('session-expired', { platform: 'youtube' })"]) {
+    assert.ok(fallback.includes(step), step);
+  }
+  assert.match(section(/async function readYouTubeJar\(/), /youtubeJarCookies\(\[/);
 });
 
 test('F73: background checks drop results when the account changed under them', () => {

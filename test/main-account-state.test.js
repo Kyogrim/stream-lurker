@@ -5,7 +5,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   placeholderName, isPlaceholderName, sameAccountName, hasKickSessionToken, youtubeAuthFingerprint,
-  createAccountEpochs,
+  isNewYouTubeSignIn, youtubeRenameDecision, createAccountEpochs, createSyncTickets,
 } = require('../main/account-state');
 
 const ck = (name, value = 'v', domain = 'kick.com') => ({ name, value, domain });
@@ -92,6 +92,116 @@ test('F73: nothing changed, the probe result applies; other platforms do not int
 
 // The expiry marker surviving a stale dashboard save is now part of the
 // config boundary (main-config-boundary.test.js, F18/F22).
+
+// F53 item 4. The shape of main.js's importers (see the wiring test in
+// main-boundary-wiring): ticket first, then the slow account check, the
+// write, and the account save, each gated on the ticket.
+function simulatedImport({ tickets, blocked, auto, platform = 'twitch', during = {} }) {
+  const account = {};
+  const cookies = [];
+  return (async () => {
+    const ticket = tickets.take(platform, { auto, isBlocked: (p) => blocked.has(p) });
+    await null; during.resolve && during.resolve();          // resolveTwitchUser
+    if (!ticket.valid()) return { refused: true, cookies, account };
+    await null; cookies.push('auth-token'); during.write && during.write(); // writeCookieList
+    if (!ticket.valid()) { cookies.length = 0; return { undone: true, cookies, account }; }
+    account.twitch = 'someone';
+    return { ok: true, cookies, account };
+  })();
+}
+
+test('F53 item 4 regression: a Sign Out while a re-sync resolves the account stops it before any cookie is written', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  const signOut = () => { blocked.add('twitch'); tickets.bump('twitch'); };
+  const r = await simulatedImport({ tickets, blocked, auto: true, during: { resolve: signOut } });
+  assert.deepEqual(r, { refused: true, cookies: [], account: {} });
+});
+
+test('F53 item 4: a Sign Out while it writes cookies undoes the write and never saves the account', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  const r = await simulatedImport({ tickets, blocked, auto: true, during: { write: () => { blocked.add('twitch'); tickets.bump('twitch'); } } });
+  assert.equal(r.undone, true);
+  assert.deepEqual(r.account, {});
+});
+
+test('F53 item 4: signed out and reconnected by hand while a re-sync ran still stops that re-sync', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  // Sign Out, then a click in the extension clears the block, all mid-flight:
+  // the flag reads clear again, only the count remembers.
+  const r = await simulatedImport({ tickets, blocked, auto: true, during: { resolve: () => { blocked.add('twitch'); tickets.bump('twitch'); blocked.delete('twitch'); } } });
+  assert.equal(r.refused, true);
+});
+
+test('F53 item 4: manual imports, other platforms and undisturbed re-syncs go through', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  const signOut = () => { blocked.add('twitch'); tickets.bump('twitch'); };
+  assert.equal((await simulatedImport({ tickets, blocked, auto: false, during: { resolve: signOut } })).ok, true, 'a click is the user deciding');
+  blocked.clear();
+  const kick = await simulatedImport({ tickets, blocked, auto: true, platform: 'kick', during: { resolve: signOut } });
+  assert.equal(kick.ok, true, 'a Twitch sign-out does not touch Kick');
+  blocked.clear();
+  assert.equal((await simulatedImport({ tickets, blocked, auto: true })).ok, true);
+});
+
+test('issue-17: a jar with only the rotating Google cookies has no session to validate', () => {
+  // validateSavedSessions counts YouTube as signed in only when the jar has a
+  // fingerprint, so an expiry can always leave a marker for the same cookies.
+  const rotatingOnly = [yt('LOGIN_INFO', 'li'), yt('__Secure-1PSIDTS', 'ts'), yt('__Secure-3PSIDCC', 'cc')];
+  assert.equal(youtubeAuthFingerprint(rotatingOnly), null);
+  assert.notEqual(youtubeAuthFingerprint([...rotatingOnly, yt('__Secure-1PSID', 'p')]), null, 'the modern stable identifier alone counts');
+});
+
+test('issue-16 regression: the login modal does not take a session already in the jar for a new sign-in', () => {
+  const dead = youtubeAuthFingerprint([yt('SID', 'dead'), yt('HSID', 'dead-h')]);
+  const fresh = youtubeAuthFingerprint([yt('SID', 'new'), yt('HSID', 'new-h')]);
+  // The jar still holds the session YouTube reported signed out.
+  assert.equal(isNewYouTubeSignIn(dead, { atOpen: dead, expired: dead }), false);
+  assert.equal(isNewYouTubeSignIn(dead, { atOpen: undefined, expired: dead }), false, 'even if the jar could not be read when the window opened');
+  // A live session already there when the window opened is not a sign-in made in it.
+  assert.equal(isNewYouTubeSignIn(fresh, { atOpen: fresh, expired: null }), false);
+  // The user signed in: the identifiers changed.
+  assert.equal(isNewYouTubeSignIn(fresh, { atOpen: dead, expired: dead }), true);
+  assert.equal(isNewYouTubeSignIn(fresh, { atOpen: null, expired: null }), true, 'an empty jar at open');
+  assert.equal(isNewYouTubeSignIn(null, { atOpen: null }), false, 'no stable identifiers: nothing signed in');
+});
+
+test('issue-14 regression: a label-sourced name never renames a real YouTube account', () => {
+  // The account menu's aria-label, or the avatar alt, is not a name.
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: 'Account menu', source: 'label' }), { rename: false, pending: null });
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: 'Account menu', source: 'label', pending: 'Account menu' }), { rename: false, pending: null });
+  assert.equal(youtubeRenameDecision({ stored: '@alice', name: 'Alice S', source: 'account-name', pending: 'Alice S' }).rename, false, 'the menu\'s display name either');
+  // A placeholder takes any name, at once.
+  assert.deepEqual(youtubeRenameDecision({ stored: 'YouTube User', name: 'Alice S', source: 'label' }), { rename: true, pending: null });
+  assert.equal(youtubeRenameDecision({ stored: undefined, name: '@alice', source: 'ytcfg' }).rename, true);
+});
+
+test('issue-14 regression: a handle and the same account\'s display name do not flip the stored name', () => {
+  // ytcfg gives CHANNEL_HANDLE on one load and USER_NAME on the next.
+  let pending = null;
+  for (const name of ['Alice Smith', '@alice', 'Alice Smith', 'Alice Smith', '@ALICE']) {
+    const d = youtubeRenameDecision({ stored: '@alice', name, source: 'ytcfg', pending });
+    assert.equal(d.rename, false, name);
+    pending = d.pending;
+  }
+  // The same account named the same way: nothing to do, nothing pending.
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: 'alice', source: 'ytcfg', pending: '@bob' }), { rename: false, pending: null });
+});
+
+test('issue-14: a different account from a trusted source renames only when two probes in a row agree', () => {
+  const first = youtubeRenameDecision({ stored: '@alice', name: '@bob', source: 'ytcfg' });
+  assert.deepEqual(first, { rename: false, pending: '@bob' });
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: '@bob', source: 'channel-handle', pending: first.pending }), { rename: true, pending: null });
+  // A different name the second time starts over.
+  const other = youtubeRenameDecision({ stored: '@alice', name: '@carol', source: 'ytcfg', pending: '@bob' });
+  assert.deepEqual(other, { rename: false, pending: '@carol' });
+  // A display name may become a handle (same kind of upgrade, still twice).
+  assert.equal(youtubeRenameDecision({ stored: 'Alice Smith', name: '@alice', source: 'ytcfg', pending: '@alice' }).rename, true);
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: '', source: 'ytcfg', pending: '@bob' }), { rename: false, pending: null });
+});
 
 test('F52: the same account is recognised however its name is spelled', () => {
   assert.equal(sameAccountName('@Streamer', 'streamer'), true, 'a handle with and without its @');

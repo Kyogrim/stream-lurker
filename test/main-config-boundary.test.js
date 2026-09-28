@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const {
   RENDERER_KEYS, IMPORT_KEYS, rendererConfigPatch, importedConfig, importedStreamer, importedWatchTime,
   repairWatchTime, exportableConfig, normalizePairingCode, newPairingCode, isSignedOutIn, withSignedOut,
+  signedOutReasonIn, channelNameProblem,
 } = require('../main/config-boundary');
 const { sanitizeConfig } = require('../main/config-sanitize');
 
@@ -116,6 +117,28 @@ test('F18: extensions: removals and reorders pass, a new folder only if picked i
   }
 });
 
+test('F22 regression: a stale extension list sent after a catalog install keeps the new folder', () => {
+  const [one, sevenTv] = mainConfig().extensions;
+  // The dashboard fetched [one]; then install-catalog-extension added 7TV and
+  // saved, and a settings toggle sent the page's copy before its refetch.
+  const current = { ...mainConfig(), extensions: [one, sevenTv] };
+  const seen = new Set([one]);
+  let r = merge(current, { ...staleCopy(current), extensions: [one], autoOpen: false }, { dashboardExtensions: seen });
+  assert.deepEqual(r.next.extensions, [one, sevenTv], 'not dropped, so not unloaded');
+  assert.deepEqual(r.patch.extensions, [one, sevenTv]);
+  assert.equal(r.next.autoOpen, false, 'the setting the user changed still saves');
+  assert.deepEqual(rendererConfigPatch({ extensions: [one] }, current, { dashboardExtensions: seen }).keptExtensions, [sevenTv]);
+
+  // Once the dashboard has fetched the list with 7TV in it, Remove works.
+  r = merge(current, { extensions: [one] }, { dashboardExtensions: new Set([one, sevenTv]) });
+  assert.deepEqual(r.next.extensions, [one]);
+  // An uninstall main did since is not undone by the stale copy either.
+  r = merge({ ...current, extensions: [one] }, { extensions: [one, sevenTv] }, { dashboardExtensions: new Set([one, sevenTv]) });
+  assert.deepEqual(r.next.extensions, [one]);
+  // Without a snapshot (older callers), the copy is taken as is.
+  assert.deepEqual(merge(current, { extensions: [one] }).next.extensions, [one]);
+});
+
 test('F18: settings are type-checked and clamped; unusable values keep main\'s', () => {
   const current = mainConfig();
   const { next, refused } = merge(current, {
@@ -140,18 +163,78 @@ test('F18: settings are type-checked and clamped; unusable values keep main\'s',
   assert.deepEqual(refused.map(r => r.key).sort(), ['autoOpen', 'defaultQuality', 'maxRumbleTabs', 'maxYoutubeTabs', 'startMinimized', 'twitchClientSecret'].sort());
 });
 
-test('F18: streamers keep order and mode; entries are reduced to their fields; junk is set aside', () => {
+test('F18: streamers keep order and mode; main\'s stored entries are kept; junk is refused', () => {
   const current = mainConfig();
-  const { next, patch } = merge(current, {
+  const { next, patch, refused } = merge(current, {
     streamers: [
       { platform: 'kick', username: 'b', mode: 'ignore', extra: '<img>' },
       { platform: 'twitch', username: 'a', mode: 'bogus' },
       null,
     ],
   });
-  assert.deepEqual(patch.streamers.slice(0, 2), [{ platform: 'kick', username: 'b', mode: 'ignore' }, { platform: 'twitch', username: 'a' }]);
-  assert.deepEqual(next.streamers, [{ platform: 'kick', username: 'b', mode: 'ignore' }, { platform: 'twitch', username: 'a' }]);
+  // An invalid mode leaves main's; the extra field never reaches config.json.
+  assert.deepEqual(patch.streamers, [{ platform: 'kick', username: 'b', mode: 'ignore' }, { platform: 'twitch', username: 'a', mode: 'notify' }]);
+  assert.deepEqual(next.streamers, patch.streamers);
+  assert.deepEqual(refused, [{ key: 'streamers', reason: 'not an object: null' }]);
   assert.deepEqual(merge(current, { streamers: 'x' }).next.streamers, current.streamers);
+});
+
+test('F18 regression: save-config cannot add an unknown platform, a path-like name or a 5 MB name', () => {
+  const current = mainConfig();
+  const huge = 'y'.repeat(5 * 1024 * 1024);
+  const { next, refused } = merge(current, {
+    streamers: [
+      ...staleCopy(current).streamers,
+      { platform: 'myspace', username: 'x' },
+      { platform: 'kick', username: '../../v2/secret?x=' },
+      { platform: 'youtube', username: huge },
+      { platform: 'twitch', username: 'has-dash' },
+    ],
+  });
+  assert.deepEqual(next.streamers, current.streamers, 'main\'s list is unchanged');
+  assert.deepEqual(refused.map(r => r.reason.split(':')[0]), ['unknown platform', 'not a channel name', 'not a channel name', 'not a valid channel name']);
+  for (const r of refused) assert.ok(r.reason.length < 200, 'a refusal never echoes the whole value');
+  // The same checks as add-streamer: a real new channel still goes in.
+  const added = merge(current, { streamers: [...current.streamers, { platform: 'KICK', username: ' new_one ', mode: 'notify' }] });
+  assert.deepEqual(added.next.streamers.at(-1), { platform: 'kick', username: 'new_one', mode: 'notify' });
+  assert.deepEqual(added.refused, []);
+});
+
+test('F18: reorder, mode change and removal of existing entries still work; stored spelling wins', () => {
+  const current = { ...mainConfig(), streamers: [{ platform: 'twitch', username: 'Old-Name', mode: 'notify' }, { platform: 'kick', username: 'b' }, { platform: 'youtube', username: '@Me' }] };
+  // Reorder (the drag handle) and a mode change on one entry.
+  let r = merge(current, { streamers: [{ platform: 'youtube', username: '@Me', mode: 'ignore' }, { platform: 'kick', username: 'b' }, { platform: 'twitch', username: 'Old-Name', mode: 'notify' }] });
+  assert.deepEqual(r.next.streamers, [{ platform: 'youtube', username: '@Me', mode: 'ignore' }, { platform: 'kick', username: 'b' }, { platform: 'twitch', username: 'Old-Name', mode: 'notify' }]);
+  assert.deepEqual(r.refused, []);
+  // Removal.
+  r = merge(current, { streamers: [{ platform: 'kick', username: 'b' }] });
+  assert.deepEqual(r.next.streamers, [{ platform: 'kick', username: 'b' }]);
+  // An existing name that would fail today's rules is still main's, spelled as
+  // stored, so its watch history stays attached (F89).
+  r = merge(current, { streamers: [{ platform: 'TWITCH', username: 'old-name', mode: 'auto' }] });
+  assert.deepEqual(r.next.streamers, [{ platform: 'twitch', username: 'Old-Name', mode: 'auto' }]);
+  // A duplicate keeps the first.
+  r = merge(current, { streamers: [{ platform: 'kick', username: 'b', mode: 'notify' }, { platform: 'kick', username: 'B', mode: 'ignore' }] });
+  assert.deepEqual(r.next.streamers, [{ platform: 'kick', username: 'b', mode: 'notify' }]);
+  assert.match(r.refused[0].reason, /^duplicate: kick:B$/);
+});
+
+test('F18: the monitored list and the refusal log are both bounded', () => {
+  const current = mainConfig();
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ platform: 'twitch', username: `n${i}` }));
+  // Longer than the cap plus everything main has: refused whole, main's kept.
+  let r = merge(current, { streamers: many(2003) });
+  assert.deepEqual(r.next.streamers, current.streamers);
+  assert.match(r.refused[0].reason, /more than 2000 entries/);
+  // At the edge: new entries stop at the cap.
+  r = merge(current, { streamers: many(2002) });
+  assert.equal(r.next.streamers.length, 2000);
+  assert.equal(r.refused.length, 2);
+  // Thirty bad entries log ten lines and one count.
+  r = merge(current, { streamers: [...current.streamers, ...Array.from({ length: 30 }, () => ({ platform: 'myspace', username: 'x' }))] });
+  assert.equal(r.refused.length, 11);
+  assert.equal(r.refused[10].reason, '20 more entries refused');
+  assert.deepEqual(r.next.streamers, current.streamers);
 });
 
 test('F18: calendar and quality maps keep their shape and size', () => {
@@ -168,6 +251,17 @@ test('F18: calendar and quality maps keep their shape and size', () => {
   assert.equal(next.syncedCalendarEvents.length, 5000);
   assert.deepEqual(next.disabledAutoQuality, { 'twitch:a': true });
   assert.deepEqual(merge(current, { calendarEvents: {} }).next.calendarEvents, current.calendarEvents);
+});
+
+test('F18 regression: an event field name is capped too, from the dashboard and from a backup', () => {
+  const current = mainConfig();
+  const bigKey = 'k'.repeat(2 * 1024 * 1024);
+  const event = { id: 'manual-1', [bigKey]: 'v', day: 2, ['x'.repeat(51)]: 1, ['y'.repeat(50)]: 1 };
+  const { next } = merge(current, { calendarEvents: [event] });
+  assert.deepEqual(Object.keys(next.calendarEvents[0]), ['id', 'day', 'y'.repeat(50)]);
+  assert.ok(JSON.stringify(next.calendarEvents).length < 200);
+  const imported = importedConfig({ streamers: [], watchTime: {}, syncedCalendarEvents: [event] }, current);
+  assert.deepEqual(Object.keys(imported.config.syncedCalendarEvents[0]), ['id', 'day', 'y'.repeat(50)]);
 });
 
 test('F18: every key the dashboard writes is renderer-owned, and none that main owns', () => {
@@ -303,6 +397,66 @@ test('F17: stored pairing codes: 8 to 64 upper-case hex; new ones are 128-bit', 
   assert.match(code, /^[0-9A-F]{32}$/);
   assert.notEqual(newPairingCode(crypto.randomBytes), code);
   assert.equal(normalizePairingCode(code), code);
+});
+
+test('F89 layer 2: channel names are checked per platform, case-insensitively', () => {
+  const ok = [
+    ['twitch', 'xQc'], ['twitch', 'a_b_1'], ['twitch', 'x'.repeat(25)], ['twitch', 42],
+    ['kick', 'Some-Slug_2'], ['KICK', 'adin'],
+    ['youtube', '@Some.Channel-name_1'], ['youtube', 'plainhandle'], ['youtube', 'UCabcdefghijklmnopqrstuv'],
+    ['youtube', '@日本語チャンネル'], ['youtube', '@Café'],
+    ['rumble', 'c.name-1'],
+  ];
+  for (const [p, u] of ok) assert.equal(channelNameProblem(p, u), null, `${p}:${u}`);
+  const bad = [
+    ['twitch', 'x'.repeat(26)], ['twitch', 'has-dash'], ['twitch', 'a.b'], ['twitch', 'https://www.twitch.tv/xqc'],
+    ['kick', 'dot.name'], ['kick', 'a b'],
+    ['youtube', '@@double'], ['youtube', 'x" onmouseover="1'], ['youtube', 'channel/UCabc'], ['youtube', '<b>'],
+    ['youtube', `@${'y'.repeat(101)}`],
+    ['twitch', 'x" webpreferences="contextIsolation=no'],
+  ];
+  for (const [p, u] of bad) assert.match(channelNameProblem(p, u), /not a valid/, `${p}:${u}`);
+  assert.match(channelNameProblem('twitch', 'https://www.twitch.tv/xqc'), /not a link/);
+  assert.equal(channelNameProblem('myspace', 'x'), 'Unknown platform.');
+  assert.equal(channelNameProblem('twitch', '   '), 'Username cannot be empty');
+  assert.equal(channelNameProblem('twitch', null), 'Username cannot be empty');
+});
+
+test('F89 layer 2: an import checks names only for entries this install does not have yet', () => {
+  const current = { ...mainConfig(), streamers: [{ platform: 'twitch', username: 'Old-Name', mode: 'notify' }] };
+  const r = importedConfig({
+    streamers: [
+      { platform: 'twitch', username: 'old-name', mode: 'notify' }, // already monitored here: kept as stored
+      { platform: 'twitch', username: 'new-name' },                 // new and not a Twitch name
+      { platform: 'kick', username: 'fine_name' },
+    ],
+    watchTime: { streamers: { 'twitch:old-name': 90 } },
+  }, current);
+  assert.deepEqual(r.config.streamers, [{ platform: 'twitch', username: 'old-name', mode: 'notify' }, { platform: 'kick', username: 'fine_name' }]);
+  assert.deepEqual(r.dropped.map(d => [d.index, d.reason]), [[1, 'not a valid channel name']]);
+  assert.equal(r.config.watchTime.streamers['twitch:old-name'], 90, 'its history comes with it');
+});
+
+test('F53 item 3: a platform connected in the app blocks re-sync with its own reason', () => {
+  let map = withSignedOut(undefined, 'twitch', true, 111, 'app-login');
+  assert.deepEqual(map, { twitch: { at: 111, reason: 'app-login' } });
+  assert.equal(isSignedOutIn(map, 'twitch'), true, 'an older build reading this still refuses');
+  assert.equal(signedOutReasonIn(map, 'twitch'), 'app-login');
+  map = withSignedOut(map, 'kick', true, 222);
+  assert.equal(signedOutReasonIn(map, 'kick'), 'signed-out');
+  assert.equal(map.kick, 222, 'a sign-out is stored exactly as before');
+  // A sign-out after an app login replaces the reason; clearing removes it.
+  map = withSignedOut(map, 'twitch', true, 333, 'signed-out');
+  assert.equal(signedOutReasonIn(map, 'twitch'), 'signed-out');
+  map = withSignedOut(map, 'twitch', false);
+  assert.equal(signedOutReasonIn(map, 'twitch'), null);
+  for (const damaged of [undefined, null, [], 'x', { twitch: 0 }, { twitch: { reason: 'app-login' } }]) {
+    const reason = signedOutReasonIn(damaged, 'twitch');
+    assert.equal(reason, isSignedOutIn(damaged, 'twitch') ? 'app-login' : null, JSON.stringify(damaged));
+  }
+  // Never crosses a boundary: not exported, not imported, not the dashboard's.
+  assert.equal('signedOutPlatforms' in exportableConfig({ signedOutPlatforms: map }), false);
+  assert.ok(!RENDERER_KEYS.includes('signedOutPlatforms') && !IMPORT_KEYS.includes('signedOutPlatforms'));
 });
 
 test('C1: signed-out state defaults to not signed out and round-trips', () => {

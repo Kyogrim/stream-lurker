@@ -16,3 +16,15 @@ export function loadWebFonts(doc = document) {
   doc.head.appendChild(link);
   return link;
 }
+
+// Not before the window's load event, though. A script-inserted stylesheet
+// still holds that event until its request settles, and main starts crediting
+// watch time on did-finish-load, which is that event: where the font request
+// stalled, nothing was credited for ~21 s (Google blackholed) or for as long
+// as a stalling proxy held it. Blink sends did-finish-load straight after
+// dispatching `load`, so a request started from the handler cannot delay it.
+export function loadWebFontsAfterLoad(win = window, doc = document) {
+  if (doc?.readyState === 'complete') return loadWebFonts(doc);
+  win?.addEventListener?.('load', () => loadWebFonts(doc), { once: true });
+  return null;
+}

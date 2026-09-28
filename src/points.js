@@ -16,12 +16,36 @@ let polling = false;
 // guest answers. So a stuck guest gets no second call until the first one
 // returns: at most one pending call per cell, never one more every 30 s.
 const inFlight = new WeakSet();
+// A call sent into a renderer that then dies, or a document that is then
+// replaced, is never answered. multi-lurk.js recovers a crashed cell by
+// reloading the same <webview>, so holding it until that call settles would
+// skip the recovered cell for good. The bound is one pending call per page.
+const RELEASE_ON = ['render-process-gone', 'did-start-loading', 'destroyed'];
+
+function holdWhilePending(webview, call) {
+  let held = true;
+  const release = () => {
+    // Once only: after a reload has released it, a late answer from the old
+    // page must not clear the hold of a call made into the new one.
+    if (!held) return;
+    held = false;
+    for (const type of RELEASE_ON) webview.removeEventListener(type, release);
+    inFlight.delete(webview);
+  };
+  inFlight.add(webview);
+  for (const type of RELEASE_ON) webview.addEventListener(type, release);
+  call.then(release, release);
+}
 
 // Worth calling into: attached, renderer alive, not mid-navigation. Main holds
 // executeJavaScript until a loading page stops loading and never answers for a
 // dead renderer, so calling into either only piles up pending calls.
 function guestReady(cell, webview) {
   if (!cell.isConnected || !webview.isConnected) return false;
+  // multi-lurk.js flags a crashed or failed page until a platform page loads
+  // again (C6). A failed load leaves Chromium's error page up, alive and not
+  // loading, so the checks below alone would still call into it.
+  if (cell.dataset.crashed === 'true') return false;
   try {
     // Both throw until the webview is attached, which is also "not ready".
     return !webview.isCrashed() && !webview.isLoadingMainFrame();
@@ -43,9 +67,7 @@ async function claimOne(webview, username, timeoutMs, log) {
     // One round trip: the claim script is its own readiness probe, it does
     // nothing on a page without a chest.
     const call = webview.executeJavaScript(autoClaimPointsScript());
-    inFlight.add(webview);
-    const release = () => inFlight.delete(webview);
-    call.then(release, release);
+    holdWhilePending(webview, call);
     if (await withTimeout(call, timeoutMs) === true) {
       log(`[Rewards - ${username}] Claimed channel points chest!`);
     }

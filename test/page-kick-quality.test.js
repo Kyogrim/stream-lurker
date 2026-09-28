@@ -19,7 +19,10 @@ test.before(async () => { ({ qualityAndTheaterScript } = await import('../src/in
 //   furniture     the cog sits in an always-visible bottom control bar that
 //                 says "Autoplay", which findActiveMenu's first branch takes
 //                 for the menu
-// Escape on the document closes the menu, as Radix-style menus do.
+//   closeAfter    ms after opening, the page closes the menu on its own
+// Escape on the document closes the menu, as Radix-style menus do. Each
+// Escape's target is recorded in stats.escapeTargets ('document', 'menu',
+// or 'other').
 function kickPage({
   pathname = '/streamer',
   options = ['Auto', '1080p60', '720p60', '480p30', '360p30', '160p30'],
@@ -29,11 +32,12 @@ function kickPage({
   theater = 'off',
   cog: hasCog = true,
   furniture = false,
+  closeAfter = 0,
   height = 1080,
 } = {}) {
   const page = makePage({ host: 'kick.com', pathname });
   const { doc } = page;
-  const stats = { cogToggles: 0, opens: 0, theaterToggles: 0, picks: 0, escapes: 0 };
+  const stats = { cogToggles: 0, opens: 0, theaterToggles: 0, picks: 0, escapes: 0, escapeTargets: [] };
   const container = doc.body.appendChild(doc.el('div', { id: 'video-player' }, '', { left: 0, top: 0, width: 1280, height: 720 }));
   const holder = container.appendChild(doc.el('div', { class: 'video-holder' }));
   const video = holder.appendChild(doc.el('video', {}, '', { left: 0, top: 0, width: 1280, height: 720 }));
@@ -47,6 +51,7 @@ function kickPage({
   doc.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape') return;
     stats.escapes++;
+    stats.escapeTargets.push(ev.target === doc ? 'document' : (menu && menu.contains(ev.target) ? 'menu' : 'other'));
     closeMenu();
   });
   const bar = furniture
@@ -60,7 +65,8 @@ function kickPage({
       stats.cogToggles++;
       if (menu) { closeMenu(); return; }
       stats.opens++;
-      menu = container.appendChild(doc.el('div', { role: 'menu', class: 'z-50 rounded' }, '', { left: 1000, top: 400, width: 250, height: 280 }));
+      const m = menu = container.appendChild(doc.el('div', { role: 'menu', class: 'z-50 rounded' }, '', { left: 1000, top: 400, width: 250, height: 280 }));
+      if (closeAfter) page.clock.setTimeout(() => { if (menu === m) closeMenu(); }, closeAfter);
       options.forEach((label, i) => {
         const row = menu.appendChild(doc.el('div', { role: 'menuitemradio', 'aria-checked': String(label === current) }, '', { left: 1000, top: 400 + i * 40, width: 250, height: 40 }));
         row.appendChild(doc.el('span', { class: 'pointer-events-none' }, label, { left: 1010, top: 405 + i * 40, width: 80, height: 30 }));
@@ -165,16 +171,29 @@ test('a menu with no renditions: bounded tries, menu closed each time, two log l
   assert.match(lines[1], /Giving up on 160p for \/streamer after 7 attempts/);
 });
 
-test('a control bar mistaken for the menu is never used to decide "open": Escape closes instead of a toggle (F44)', async () => {
+test('a control bar mistaken for the menu is never used to decide "open": the menu the click opened is (F44)', async () => {
   const p = kickPage({ furniture: true });
   p.start('160p');
   await p.clock.advance(60 * 60_000);
   // The heuristic reads the bar, so no rendition is found and the budget runs
-  // out. Each round opens the menu once and closes it with Escape; a toggle
-  // keyed on the always-visible bar would reopen a menu the page had closed.
+  // out. A toggle keyed on the always-visible bar would reopen a menu the page
+  // had closed; the close is keyed on the role="menu" element that appeared
+  // after the cog click instead: one toggle to open, one to close, per round.
   assert.equal(p.stats.opens, 7);
-  assert.equal(p.stats.cogToggles, 7);
-  assert.equal(p.stats.escapes, 7);
+  assert.equal(p.stats.cogToggles, 14);
+  assert.equal(p.stats.escapes, 0);
+  assert.equal(p.menuOpen, false);
+});
+
+test('a control bar and a menu the page already closed: no toggle and no blind Escape', async () => {
+  // Nothing concrete is left to close: the bar is furniture and the menu is
+  // gone. An Escape at the document here lands on the page's own hotkeys.
+  const p = kickPage({ furniture: true, closeAfter: 200 });
+  p.start('160p');
+  await p.clock.advance(60 * 60_000);
+  assert.equal(p.stats.opens, 7);
+  assert.equal(p.stats.cogToggles, 7, 'only the opening clicks');
+  assert.deepEqual(p.stats.escapeTargets, []);
   assert.equal(p.menuOpen, false);
 });
 
@@ -218,4 +237,16 @@ test('a theater button that does nothing is tried five times, then left alone (F
   await p.clock.advance(10 * 60_000);
   assert.equal(p.stats.theaterToggles, 5);
   assert.equal(p.logText('[Kick Theater]').length, 1);
+});
+
+test('a grid relayout right after a theater click that did nothing is not taken as confirmation', async () => {
+  const p = kickPage({ theater: 'dead' });
+  p.start('160p');
+  await p.clock.advance(3000);
+  assert.equal(p.stats.theaterToggles, 1);
+  // Another cell auto-opens and the grid shrinks this one before the next tick.
+  p.video.rect = { left: 0, top: 0, width: 640, height: 360 };
+  await p.clock.advance(10 * 60_000);
+  assert.equal(p.stats.theaterToggles, 5, 'still retried: only the button can confirm a click');
+  assert.match(p.logText('[Kick Theater]')[0] || '', /did not respond after 5 clicks/);
 });

@@ -266,6 +266,49 @@ test('F25: a stream auto-closed on a false offline is reopened when it shows up 
   assert.deepEqual(w.notified, ['twitch:x'], 'but it is not alerted twice');
 });
 
+test('issue-7 regression: two offline results seconds apart (Scan Now after a scheduled scan) do not close', () => {
+  const w = makeWorld([{ platform: 'twitch', username: 'x' }]);
+  const liveX = live('twitch', 'x', { liveSince: '2026-09-27T07:00:00Z' });
+  w.scan([liveX], T0);
+  w.scan([offline('twitch', 'x')], T0 + INTERVAL);
+  w.scan([offline('twitch', 'x')], T0 + INTERVAL + 5000); // Scan Now
+  assert.deepEqual(w.closed, [], 'one false offline seen twice is still one observation');
+  assert.ok(w.logs.some(l => /reported offline again, 5 s after the first/.test(l)));
+  // The false offline passes: nothing closed, nothing reopened, one session.
+  w.scan([liveX], T0 + 2 * INTERVAL);
+  assert.deepEqual(w.closed, []);
+  assert.deepEqual(w.spawned, ['twitch:x']);
+});
+
+test('issue-7: two offline results an interval apart still close; the span counts from the first offline', () => {
+  const w = makeWorld([{ platform: 'twitch', username: 'x' }]);
+  w.scan([live('twitch', 'x', { liveSince: 's' })], T0);
+  w.scan([offline('twitch', 'x')], T0 + INTERVAL);
+  w.scan([offline('twitch', 'x')], T0 + INTERVAL + 5000);
+  w.scan([offline('twitch', 'x')], T0 + 2 * INTERVAL);
+  assert.deepEqual(w.closed, ['twitch:x'], 'the next scheduled scan agrees');
+
+  // Exactly half an interval is enough, just under is not; the interval
+  // comes from ctx when given (main.js passes it), else from the config.
+  const edge = (gapMs, ctxInterval) => {
+    const e = makeWorld([{ platform: 'kick', username: 'k' }], { checkInterval: 10 });
+    const scan = (results, now) => applyScanResults(results, {
+      now, config: e.config, intervalMs: ctxInterval, activeWindows: e.activeWindows, openedSessions: e.openedSessions,
+      notifiedSessions: e.notifiedSessions, liveness: e.liveness, modeOf: () => 'auto', notify: () => {}, log: () => {},
+      spawn: (p, u) => { e.activeWindows.set(streamKey(p, u), true); e.liveness.start(streamKey(p, u), now); },
+      closeTab: (p, u) => e.closed.push(streamKey(p, u)),
+    });
+    scan([live('kick', 'k', { liveSince: 's' })], T0);
+    scan([offline('kick', 'k')], T0 + MIN);
+    scan([offline('kick', 'k')], T0 + MIN + gapMs);
+    return e.closed.length === 1;
+  };
+  assert.equal(edge(5 * MIN, undefined), true, 'checkInterval 10: half is 5 min');
+  assert.equal(edge(5 * MIN - 1000, undefined), false);
+  assert.equal(edge(90 * 1000, 3 * MIN), true, 'ctx.intervalMs wins over the config');
+  assert.equal(edge(89 * 1000, 3 * MIN), false);
+});
+
 test('F66: a null or NaN tab limit falls back to the default instead of blocking every open', () => {
   for (const bad of [null, NaN, 'abc', '', undefined]) {
     const w = makeWorld([{ platform: 'twitch', username: 'a' }], { maxTwitchTabs: bad });

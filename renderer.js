@@ -3,7 +3,7 @@ console.log('=== RENDERER.JS RUNNING ===');
 // the dashboard once on DOMContentLoaded and bridges main-process events to UI
 // updates.
 
-import { state, appendLogMessage, gridCellId } from './src/state.js';
+import { state, appendLogMessage, gridCellId, monitoredStreamers } from './src/state.js';
 import { setupTabs } from './src/tabs.js';
 import {
   createStreamTab,
@@ -13,6 +13,7 @@ import {
   setupGlobalGhostButton,
   setCellPoppedOut,
   refreshGridCellMeta,
+  syncActiveTabs,
 } from './src/multi-lurk.js';
 import { setupLiveNow, renderLiveNow } from './src/live-now.js';
 import { setupOnboarding, maybeShowOnboarding } from './src/onboarding.js';
@@ -26,12 +27,13 @@ import { setupLoginPortalListeners } from './src/login.js';
 import { hydrateSettingsUI, applyServiceToggles, setupSettingsHandlers } from './src/settings.js';
 import { startPointsPoller } from './src/points.js';
 import { initClipsManager } from './src/clips.js';
-import { loadWebFonts } from './src/fonts.js';
+import { loadWebFontsAfterLoad } from './src/fonts.js';
 import { setupExternalLinks } from './src/external-links.js';
 
-// First thing, and never awaited: the fonts are cosmetic and must not hold up
-// the dashboard (see src/fonts.js).
-loadWebFonts();
+// Never awaited, and only once the window has loaded: the fonts are cosmetic
+// and must not hold up the dashboard or main's watch-time crediting (see
+// src/fonts.js).
+loadWebFontsAfterLoad();
 
 const BACKGROUND_CALENDAR_SYNC_DELAY_MS = 5000;
 const SCAN_BTN_COOLDOWN_MS = 1500;
@@ -135,7 +137,13 @@ function setupTopBarHandlers() {
     scanNowBtn.classList.remove('btn-cyan');
     scanNowBtn.innerHTML = `<span class="pulse-dot"></span> Scanning...`;
 
-    await window.api.forceScan();
+    // Resolves when the scan has run, which can take a while; a rejection
+    // must still give the button back.
+    try {
+      await window.api.forceScan();
+    } catch (err) {
+      appendLogMessage(`[ERROR] Scan Now failed: ${err?.message || err}`);
+    }
 
     setTimeout(() => {
       scanNowBtn.disabled = false;
@@ -200,45 +208,35 @@ function setupAddExtensionButton() {
   });
 }
 
-const WEBVIEW_LABEL = {
-  'twitch-login-webview': 'Twitch',
-  'kick-login-webview': 'Kick',
-  'youtube-login-webview': 'YouTube',
-  'rumble-login-webview': 'Rumble',
-};
-
-function setupRefreshWebviewButtons() {
-  document.querySelectorAll('.refresh-webview-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const webviewId = btn.dataset.webview;
-      const webview = document.getElementById(webviewId);
-      if (!webview) return;
-      webview.reload();
-      appendLogMessage(`[System] Refreshing ${WEBVIEW_LABEL[webviewId] || 'Platform'} Portal view.`);
-    });
-  });
-}
-
 // Re-create grid cells for containers the main process still considers open.
 // Runs on every dashboard load, so after a manual refresh or an automatic
 // crash-recovery reload the grid matches what main is tracking (and still
 // counting watch time for) instead of silently drifting to an empty grid.
+// Main hears the result once, as one full list (see createStreamTab), and
+// even when nothing was restored: a key that failed to restore is then
+// dropped by main rather than credited for a cell nobody can see.
 function restoreOpenStreamTabs() {
-  for (const key of state.activeContainers) {
-    const [platform, username] = key.split(':');
-    if (!platform || !username) continue;
-    if (document.getElementById(gridCellId(platform, username))) continue;
+  try {
+    for (const key of state.activeContainers) {
+      const [platform, username] = key.split(':');
+      if (!platform || !username) continue;
+      if (document.getElementById(gridCellId(platform, username))) continue;
 
-    // One stream that can't be rebuilt must not cost the others their cells.
-    try {
-      // activeContainers keys are lowercased; recover the display casing.
-      const tracked = state.currentConfig?.streamers?.find(
-        s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
-      );
-      createStreamTab(platform, tracked ? tracked.username : username);
-    } catch (err) {
-      reportInitFailure(`Restoring ${key}`, err);
+      // One stream that can't be rebuilt must not cost the others their cells.
+      try {
+        // activeContainers keys are lowercased; recover the display casing.
+        // monitoredStreamers() skips a malformed entry, which would otherwise
+        // throw here for every key whose match comes after it.
+        const tracked = monitoredStreamers().find(
+          s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
+        );
+        createStreamTab(platform, tracked ? tracked.username : username, { sync: false });
+      } catch (err) {
+        reportInitFailure(`Restoring ${key}`, err);
+      }
     }
+  } finally {
+    syncActiveTabs();
   }
 }
 
@@ -270,7 +268,12 @@ function setupBackendListeners() {
   window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username));
   window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username));
   window.api.onCloseAllStreamTabs(() => closeAllStreamTabs());
-  window.api.onReloadStreamContainers(() => reloadAllStreamContainers());
+  // Sent whenever the loaded extensions changed, including a folder that was
+  // unreachable at startup loading late: its "Unavailable" badge goes too.
+  window.api.onReloadStreamContainers(() => {
+    reloadAllStreamContainers();
+    renderExtensionsList();
+  });
   window.api.onStreamPopoutClosed(({ platform, username }) => setCellPoppedOut(platform, username, false));
 
   window.api.onWatchTimeUpdate((data) => {
@@ -308,7 +311,6 @@ async function init() {
   initStep('Top bar', setupTopBarHandlers);
   initStep('Add streamer form', setupAddStreamerForm);
   initStep('Add extension button', setupAddExtensionButton);
-  initStep('Portal refresh buttons', setupRefreshWebviewButtons);
   initStep('Settings', setupSettingsHandlers);
   initStep('Follows', setupFollowsHandlers);
   initStep('Calendar handlers', setupCalendarHandlers);
@@ -325,6 +327,17 @@ async function init() {
     console.error('Failed to initialize application dashboard:', err);
     appendLogMessage(`[ERROR] Initialization failed: ${err.message}`);
     return;
+  }
+
+  // The last scan's results, so a reloaded dashboard shows who is live now
+  // instead of "Checking..." cards until the next scan. Before the service
+  // toggles (they render the monitor grid) and before open streams are
+  // restored (their cells show viewers and uptime). [] before the first scan.
+  try {
+    const statuses = await window.api.getStatuses();
+    state.currentStatuses = Array.isArray(statuses) ? statuses : [];
+  } catch (err) {
+    reportInitFailure('Loading the last scan results', err);
   }
 
   initStep('Settings form', hydrateSettingsUI);
@@ -352,6 +365,7 @@ async function init() {
   initStep('Login portal listeners', setupLoginPortalListeners);
   initStep('Backend listeners', setupBackendListeners);
   initStep('Restoring open streams', restoreOpenStreamTabs);
+  initStep('Live Now count', renderLiveNow);
   initStep('Points poller', startPointsPoller);
   initStep('Clips', initClipsManager);
   console.log('Dashboard initialization completed fully!');

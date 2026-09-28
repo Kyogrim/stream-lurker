@@ -1,6 +1,6 @@
 // Monitor Panel grid of streamer cards, plus stats counters.
 
-import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled, escapeHtml } from './state.js';
+import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled, escapeHtml, monitoredStreamers } from './state.js';
 
 function streamersGridEl() { return document.getElementById('streams-grid'); }
 
@@ -100,12 +100,13 @@ export function renderStreamsGrid() {
   grid.innerHTML = '';
 
   const cfg = state.currentConfig;
-  if (!cfg || cfg.streamers.length === 0) {
+  const streamers = monitoredStreamers(cfg);
+  if (!cfg || streamers.length === 0) {
     grid.innerHTML = EMPTY_NO_STREAMERS;
     return;
   }
 
-  const enabledStreamers = cfg.streamers.filter(s => isPlatformEnabled(s.platform));
+  const enabledStreamers = streamers.filter(s => isPlatformEnabled(s.platform));
   if (enabledStreamers.length === 0) {
     grid.innerHTML = EMPTY_NO_ENABLED;
     return;
@@ -118,7 +119,7 @@ export function renderStreamsGrid() {
 
   // Sort: Live first, then by user-defined priority order.
   const priorityIndex = new Map();
-  cfg.streamers.forEach((s, idx) => priorityIndex.set(`${s.platform.toLowerCase()}:${s.username.toLowerCase()}`, idx));
+  streamers.forEach((s, idx) => priorityIndex.set(`${s.platform.toLowerCase()}:${s.username.toLowerCase()}`, idx));
 
   const sortedStatuses = [...state.currentStatuses].sort((a, b) => {
     if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
@@ -140,7 +141,7 @@ export function updateStats() {
   const cfg = state.currentConfig;
   if (!cfg) return;
 
-  const enabledStreamers = cfg.streamers.filter(s => isPlatformEnabled(s.platform));
+  const enabledStreamers = monitoredStreamers(cfg).filter(s => isPlatformEnabled(s.platform));
   const enabledLiveCount = state.currentStatuses.filter(s => s.isLive && isPlatformEnabled(s.platform)).length;
 
   document.getElementById('total-streamers-stat').textContent = enabledStreamers.length;

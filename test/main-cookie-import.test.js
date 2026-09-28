@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const {
   parseCookieBlob, normalizeExpiry, isHostOnlyCookie, cookieSetDetails, planCookieWrites,
   shouldClearExisting, removalUrl, isYouTubeCookieDomain, assignPastedYouTubeDomains, hasGoogleSessionCookies,
+  youtubeJarCookies,
 } = require('../main/cookie-import');
 
 const NOW_S = 1_800_000_000;
@@ -187,6 +188,56 @@ test('F39: one import can hold the same name on two hosts of a site; both surviv
   assert.equal(find('PREF', 'www.youtube.com')[0].hostOnly, true);
   assert.equal(find('__Host-GAPS', 'accounts.google.com')[0].hostOnly, true);
   assert.equal(find('SID', '.twitch.tv')[0].value, 'other-site', 'another site keeps its same-named cookie');
+});
+
+test('issue-19: a pasted session YouTube rejects is undone exactly, the probe page\'s cookies included', () => {
+  // A working session as ses.cookies.get returns it, plus neighbours that
+  // are not the YouTube import's business.
+  const live = [
+    { name: 'SID', value: 'live-sid', domain: '.google.com', path: '/', hostOnly: false, httpOnly: true, secure: true, sameSite: 'unspecified', expirationDate: 1830000000.5 },
+    { name: '__Secure-1PSID', value: 'live-psid', domain: '.google.com', path: '/', hostOnly: false, httpOnly: true, secure: true, sameSite: 'unspecified', expirationDate: 1830000000 },
+    { name: 'LOGIN_INFO', value: 'li', domain: '.youtube.com', path: '/', hostOnly: false, httpOnly: true, secure: true, sameSite: 'no_restriction', expirationDate: 1830000000 },
+    { name: 'PREF', value: 'f6=1', domain: 'www.youtube.com', path: '/', hostOnly: true, httpOnly: false, secure: true, sameSite: 'lax', expirationDate: 1830000000 },
+    { name: '__Host-GAPS', value: 'gaps', domain: 'accounts.google.com', path: '/', hostOnly: true, httpOnly: true, secure: true, sameSite: 'unspecified', expirationDate: 1830000000 },
+    { name: 'YSC', value: 'session', domain: '.youtube.com', path: '/', hostOnly: false, httpOnly: true, secure: true, sameSite: 'no_restriction', session: true },
+  ];
+  const neighbours = [
+    { name: 'SID', value: 'twitch', domain: '.twitch.tv', path: '/', hostOnly: false },
+    { name: 'OSID', value: 'mail', domain: 'mail.google.com', path: '/', hostOnly: true },
+  ];
+  const jar = createJar([...live, ...neighbours]);
+  const before = youtubeJarCookies([...jar.get({ name: 'SID' }), ...jar.cookies, null, { name: 'x', domain: '.doubleclick.net' }]);
+  assert.equal(before.length, live.length, 'the Google/YouTube session only, each cookie once');
+
+  // The paste (a dead session), then cookies the probe page set for it.
+  applyPlan(jar, [
+    { name: 'SID', value: 'dead-sid', domain: '.google.com', path: '/', httpOnly: true },
+    { name: '__Secure-1PSID', value: 'dead-psid', domain: '.google.com', path: '/', httpOnly: true },
+    { name: 'PREF', value: 'f6=2', domain: 'www.youtube.com', path: '/' },
+    { name: 'NEWONE', value: 'n', domain: '.youtube.com', path: '/' },
+  ], '.youtube.com');
+  jar.set({ url: 'https://google.com/', name: '__Secure-1PSIDCC', value: 'probe', path: '/', domain: '.google.com' });
+
+  // restorePastedOver: clear the YouTube/Google cookies, write the copy back.
+  for (const c of youtubeJarCookies(jar.cookies)) jar.remove(removalUrl(c), c.name);
+  assert.equal(applyPlan(jar, before, '.youtube.com'), live.length, 'every cookie went back');
+
+  const shape = (list) => list.map(c => `${c.name}|${c.domain}|${c.path}|${c.value}|${!!c.hostOnly}`).sort();
+  assert.deepEqual(shape(youtubeJarCookies(jar.cookies)), shape(live), 'the session is exactly what it was');
+  assert.deepEqual(shape(jar.cookies.filter(c => !youtubeJarCookies([c]).length)), shape(neighbours), 'nothing else was touched');
+
+  // The attributes the model does not keep survive the round trip too.
+  const writes = new Map(planCookieWrites(before, { defaultDomain: '.youtube.com', nowS: NOW_S }).writes.map(d => [`${d.name}|${d.domain || d.url}`, d]));
+  const sid = writes.get('SID|.google.com');
+  assert.equal(sid.httpOnly, true);
+  assert.equal(sid.secure, true);
+  assert.equal(sid.expirationDate, 1830000000.5);
+  assert.equal(writes.get('LOGIN_INFO|.youtube.com').sameSite, 'no_restriction');
+  const pref = writes.get('PREF|https://www.youtube.com/');
+  assert.equal('domain' in pref, false, 'host-only stays host-only');
+  assert.equal(pref.sameSite, 'lax');
+  assert.equal('domain' in writes.get('__Host-GAPS|https://accounts.google.com/'), false);
+  assert.equal(writes.get('YSC|.youtube.com').expirationDate, NOW_S + ONE_YEAR_S, 'a session cookie comes back for a year, as imports always did');
 });
 
 test('C1: YouTube imports keep youtube.com (any subdomain) and exactly google.com / accounts.google.com', () => {

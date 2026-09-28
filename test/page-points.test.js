@@ -75,28 +75,40 @@ test('the aria-label fallback only ever clicks a button', () => {
 
 // A Twitch cell as pollOnce sees it. mode: 'ok' answers `answer`, 'hang'
 // never settles (crashed or hung guest), 'reject' fails, 'throw' throws
-// synchronously (webview not attached).
+// synchronously (webview not attached). `guest` is live: tests flip crashed,
+// loading or mode mid-test the way a crash and a reload would. emit() fires a
+// webview event such as 'render-process-gone' at whatever is listening.
 function fakeCell(username, { mode = 'ok', answer = false, crashed = false, loading = false, attached = true, connected = true } = {}) {
+  const guest = { mode, answer, crashed, loading, attached };
   const calls = [];
-  let settle = null;
+  const settles = [];
+  const listeners = new Map();
   const webview = {
     isConnected: connected,
-    isCrashed() { if (!attached) throw new Error('The WebView must be attached to the DOM'); return crashed; },
-    isLoadingMainFrame() { if (!attached) throw new Error('The WebView must be attached to the DOM'); return loading; },
+    isCrashed() { if (!guest.attached) throw new Error('The WebView must be attached to the DOM'); return guest.crashed; },
+    isLoadingMainFrame() { if (!guest.attached) throw new Error('The WebView must be attached to the DOM'); return guest.loading; },
     executeJavaScript(code) {
       calls.push(code);
-      if (mode === 'throw') throw new Error('The WebView must be attached to the DOM');
-      if (mode === 'reject') return Promise.reject(new Error('Script failed to execute'));
-      if (mode === 'hang') return new Promise(resolve => { settle = resolve; });
-      return Promise.resolve(answer);
+      if (guest.mode === 'throw') throw new Error('The WebView must be attached to the DOM');
+      if (guest.mode === 'reject') return Promise.reject(new Error('Script failed to execute'));
+      if (guest.mode === 'hang') return new Promise(resolve => { settles.push(resolve); });
+      return Promise.resolve(guest.answer);
     },
+    addEventListener(type, fn) { listeners.set(type, [...(listeners.get(type) || []), fn]); },
+    removeEventListener(type, fn) { listeners.set(type, (listeners.get(type) || []).filter(f => f !== fn)); },
   };
   const cell = {
     isConnected: connected,
     dataset: { username },
     querySelector: (sel) => (sel === 'webview' ? webview : null),
   };
-  return { cell, webview, calls, finish: (v) => settle && settle(v) };
+  return {
+    cell, webview, calls, guest,
+    // Settles the i-th hung call (default: the latest).
+    finish: (v, i = settles.length - 1) => settles[i] && settles[i](v),
+    emit: (type) => { for (const fn of (listeners.get(type) || []).slice()) fn({ type }); },
+    listenerCount: () => [...listeners.values()].reduce((n, l) => n + l.length, 0),
+  };
 }
 
 test('a hung cell no longer blocks the cells after it (F41)', async () => {
@@ -141,6 +153,78 @@ test('crashed, loading, detached and unattached guests are skipped without a cal
   ];
   await points.pollOnce({ cells: cells.map(c => c.cell), timeoutMs: 20, log: () => {} });
   for (const c of cells) assert.equal(c.calls.length, 0, c.cell.dataset.username);
+});
+
+test('a cell multi-lurk.js flagged as crashed is skipped until the flag clears (F15, F41)', async () => {
+  // A failed load: Chromium's error page is alive and done loading, so only
+  // the cell's flag says there is nothing to claim on it.
+  const failed = fakeCell('failed');
+  failed.cell.dataset.crashed = 'true';
+  const healthy = fakeCell('healthy');
+  await points.pollOnce({ cells: [failed.cell, healthy.cell], timeoutMs: 20, log: () => {} });
+  assert.equal(failed.calls.length, 0);
+  assert.equal(healthy.calls.length, 1);
+  // Recovered: multi-lurk.js deletes the flag once a platform page loads.
+  delete failed.cell.dataset.crashed;
+  await points.pollOnce({ cells: [failed.cell], timeoutMs: 20, log: () => {} });
+  assert.equal(failed.calls.length, 1);
+});
+
+test('a call left hanging by a guest crash does not stop claims after the cell recovers (F41)', async () => {
+  // Both cells have a call in flight when their guest renderer dies; that
+  // call is never answered. multi-lurk.js flags the cell, reloads the same
+  // <webview> and clears the flag once a platform page is up again. Only the
+  // first cell's webview reports that through its events; the second is the
+  // control: with no event, its hung call still holds it.
+  const phoenix = fakeCell('phoenix', { mode: 'hang' });
+  const control = fakeCell('control', { mode: 'hang' });
+  const both = [phoenix, control];
+  const poll = () => points.pollOnce({ cells: both.map(c => c.cell), timeoutMs: 20, log: () => {} });
+  await poll();
+
+  for (const c of both) { c.guest.crashed = true; c.cell.dataset.crashed = 'true'; }
+  phoenix.emit('render-process-gone');
+  await poll();
+  for (const c of both) assert.equal(c.calls.length, 1, `${c.cell.dataset.username}: nothing is sent into a dead guest`);
+
+  for (const c of both) { c.guest.crashed = false; c.guest.loading = true; c.guest.mode = 'ok'; }
+  phoenix.emit('did-start-loading');
+  await poll();
+  for (const c of both) assert.equal(c.calls.length, 1, `${c.cell.dataset.username}: nothing is sent into a loading page`);
+
+  for (const c of both) { c.guest.loading = false; delete c.cell.dataset.crashed; }
+  for (let i = 0; i < 3; i++) await poll();
+  assert.equal(phoenix.calls.length, 4, 'the recovered cell is claimed on every poll again');
+  assert.equal(control.calls.length, 1, 'without a crash or load event the hung call still holds the cell');
+  assert.equal(phoenix.listenerCount(), 0, 'release removes its listeners');
+});
+
+test('each page-lifetime event releases a hung call, and only once (F41)', async () => {
+  for (const type of ['render-process-gone', 'did-start-loading', 'destroyed']) {
+    const c = fakeCell(type, { mode: 'hang' });
+    const poll = () => points.pollOnce({ cells: [c.cell], timeoutMs: 20, log: () => {} });
+    await poll();
+    c.emit(type);
+    await poll();
+    assert.equal(c.calls.length, 2, `${type} releases the hold`);
+    // The first page answers late. That must not free the call made into the
+    // new page, or a stuck new page would get a call every 30 s again.
+    c.finish(false, 0);
+    await new Promise(r => setImmediate(r));
+    for (let i = 0; i < 5; i++) await poll();
+    assert.equal(c.calls.length, 2, `${type}: a late answer from the old page leaves the new hold alone`);
+    c.finish(false, 1);
+    await new Promise(r => setImmediate(r));
+    await poll();
+    assert.equal(c.calls.length, 3, `${type}: the new call's own answer releases it`);
+  }
+});
+
+test('a healthy cell polled all day leaves no listeners behind (F41)', async () => {
+  const c = fakeCell('steady');
+  for (let i = 0; i < 200; i++) await points.pollOnce({ cells: [c.cell], timeoutMs: 20, log: () => {} });
+  assert.equal(c.calls.length, 200);
+  assert.equal(c.listenerCount(), 0);
 });
 
 test('one round trip per cell: the claim script is sent, no separate cookie probe', async () => {

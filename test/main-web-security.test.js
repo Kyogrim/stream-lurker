@@ -9,6 +9,7 @@ const {
   isAllowedFrameUrl,
   mayOpenExternally,
   sanitizeWebviewAttach,
+  isBlockedStreamLoad,
   isPermissionAllowed,
   isTrustedDashboardSender,
   createExternalOpenGate,
@@ -54,16 +55,26 @@ test('hidden probe windows accept the YouTube consent and re-auth hops', () => {
   assert.equal(isAllowedTopLevelUrl('hidden', 'https://ads.example.com/landing'), false);
 });
 
-test('login windows reach Google (incl. country hosts), Apple and the platforms, and nothing else', () => {
+test('login windows reach Google\'s sign-in hosts, Apple and the platforms, and nothing else', () => {
   for (const ok of [
     'https://kick.com/login', 'https://passport.twitch.tv/x', 'https://id.twitch.tv/oauth2',
-    'https://accounts.google.com/o/oauth2/v2/auth', 'https://accounts.google.co.uk/accounts/SetSID',
-    'https://www.google.com.br/accounts/x', 'https://myaccount.google.com/', 'https://accounts.youtube.com/accounts/SetSID',
+    'https://accounts.google.com/o/oauth2/v2/auth', 'https://accounts.google.com/v3/signin/identifier?x=1',
+    'https://www.google.com/accounts/x', 'https://myaccount.google.com/', 'https://consent.google.com/ml',
+    'https://gds.google.com/web/chip?x=1', 'https://accounts.youtube.com/accounts/SetSID',
+    // Google's per-country cookie hop, on the accounts host and that path only.
+    'https://accounts.google.co.uk/accounts/SetSID?ssdc=1', 'https://accounts.google.de/accounts/SetSID',
+    'https://accounts.google.com.br/accounts/SetSID', 'https://ACCOUNTS.GOOGLE.FR/accounts/setsid',
     'https://appleid.apple.com/auth/authorize', 'https://idmsa.apple.com/x',
   ]) assert.equal(isAllowedTopLevelUrl('login', ok), true, ok);
   for (const bad of [
     'https://google.com.evil.net/', 'https://evil-google.com/', 'https://notapple.com/', 'https://phish.example/login',
     'http://accounts.google.com/', 'file:///C:/x',
+    // Any google.<two letters> used to pass, subdomains included.
+    'https://google.tk/', 'https://evil.google.ly/phish', 'https://www.google.com.br/accounts/x',
+    'https://accounts.google.tk/signin', 'https://accounts.google.co.uk/ServiceLogin', 'https://accounts.google.de/accounts/SetSID/../phish',
+    // google.com hosts that serve pages anyone can write.
+    'https://sites.google.com/view/phish', 'https://docs.google.com/forms/d/x', 'https://translate.google.com/',
+    'https://accounts.google.co.uk.evil.net/accounts/SetSID',
   ]) assert.equal(isAllowedTopLevelUrl('login', bad), false, bad);
 });
 
@@ -144,6 +155,37 @@ test('webview attach: wrong partition or a non-platform src is refused', () => {
     assert.ok(v.reason.length > 0);
   }
   assert.equal(sanitizeWebviewAttach(undefined, undefined).allow, false, 'missing arguments do not throw');
+});
+
+test('webview attach: the guest\'s own partition preference is pinned to the stream partition', () => {
+  // Electron builds webPreferences from params, then spreads the markup's
+  // `webpreferences` attribute over it; the guest is created from the result.
+  // <webview partition="persist:default" webpreferences="partition=..."> used
+  // to pass the params check and attach on another session.
+  const src = 'https://www.twitch.tv/x';
+  for (const spoofed of ['', 'persist:other', 'other', undefined]) {
+    const prefs = spoofed === undefined ? {} : { partition: spoofed };
+    const verdict = sanitizeWebviewAttach(prefs, { partition: STREAM_PARTITION, src });
+    assert.equal(verdict.allow, true);
+    assert.equal(prefs.partition, STREAM_PARTITION, JSON.stringify(spoofed));
+  }
+});
+
+test('a load started after attach (webview.src / loadURL) keeps a stream cell on the platforms', () => {
+  const main = (url) => ({ url, isMainFrame: true, isSameDocument: false });
+  for (const bad of ['https://evil.example/', 'https://www.google.com/search?q=x', 'data:text/html,<h1>x', 'file:///C:/x', 'http://www.twitch.tv/x', 'about:blank']) {
+    assert.equal(isBlockedStreamLoad('stream', main(bad)), true, bad);
+  }
+  for (const ok of ['https://www.twitch.tv/raid', 'https://kick.com/x', 'https://consent.youtube.com/m', 'https://accounts.google.com/ServiceLogin']) {
+    assert.equal(isBlockedStreamLoad('stream', main(ok)), false, ok);
+  }
+  // Subframes, in-page changes and every other surface are someone else's rule.
+  assert.equal(isBlockedStreamLoad('stream', { url: 'https://evil.example/', isMainFrame: false, isSameDocument: false }), false);
+  assert.equal(isBlockedStreamLoad('stream', { url: 'https://evil.example/', isMainFrame: true, isSameDocument: true }), false);
+  for (const role of ['login', 'hidden', 'clip', 'dashboard', 'other']) {
+    assert.equal(isBlockedStreamLoad(role, main('https://evil.example/')), false, role);
+  }
+  assert.equal(isBlockedStreamLoad('stream'), false, 'no details: nothing to stop');
 });
 
 test('permissions: fullscreen anywhere, sanitized clipboard writes for trusted origins, everything else denied', () => {

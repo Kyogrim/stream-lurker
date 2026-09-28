@@ -14,6 +14,16 @@ export const state = {
   draggedItem: null,
 };
 
+// The monitored list, minus any entry the dashboard cannot render. Main
+// normalizes config.streamers on load, import and save, so this only matters
+// for a bad entry that reached the renderer some other way; one used to throw
+// out of every render and out of startup. Same objects, same order.
+export function monitoredStreamers(cfg = state.currentConfig) {
+  const list = Array.isArray(cfg?.streamers) ? cfg.streamers : [];
+  return list.filter(s => s && typeof s === 'object'
+    && typeof s.platform === 'string' && typeof s.username === 'string');
+}
+
 export function isPlatformEnabled(platform) {
   const cfg = state.currentConfig;
   if (!cfg) return true;

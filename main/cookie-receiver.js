@@ -127,20 +127,39 @@ function readBodyCapped(req, maxBytes = MAX_IMPORT_BODY_BYTES) {
 }
 
 const SIGNED_OUT_ERROR = 'You signed this platform out in Stream Lurker, so automatic re-sync is off for it. Connect it again from the extension to turn it back on.';
+const APP_LOGIN_ERROR = 'You connected this platform inside Stream Lurker, so automatic re-sync is off for it: it would replace that session with this browser\'s. Connect it again from the extension to turn it back on.';
+
+// The 409 text for a platform whose auto re-sync is off, by why it is off
+// (config-boundary.js signedOutReasonIn), or null when it is on.
+function autoSyncRefusalFor(reason) {
+  if (reason === 'app-login') return APP_LOGIN_ERROR;
+  return reason ? SIGNED_OUT_ERROR : null;
+}
 
 // The request handler. deps:
 //   getPort()               the port actually bound
 //   getPairingCode()        the current code (upper-case)
 //   guard                   createPairingGuard()
-//   importers               { twitch, youtube, kick }: (cookies, { auto }) => result
-//   isSignedOut(platform)   the user signed it out in the app (C1 SIGNED_OUT)
+//   importers               { twitch, youtube, kick }: (cookies, { auto }) => result;
+//                           a result with code 'SIGNED_OUT' (the user signed out
+//                           while it ran) is answered like a refusal up front
+//   isSignedOut(platform)   auto re-sync is refused for it (C1 SIGNED_OUT); a
+//                           string is the error to send, anything else truthy
+//                           sends SIGNED_OUT_ERROR
 //   onManualImport(platform, result)  after a manual import succeeded
+//   onAutoAttempt({ platform, ok, error, status })  after every automatic
+//                           re-sync that got past the pairing code, platform
+//                           from the allowlist, error a fixed server-side text
+//   onCodeRejected()        after an import with a wrong pairing code
 //   log(text)
 function createReceiverHandler(deps) {
   const { getPort, getPairingCode, guard, importers, log = () => {} } = deps;
   const isSignedOut = deps.isSignedOut || (() => false);
   const onManualImport = deps.onManualImport || (() => {});
+  const onAutoAttempt = deps.onAutoAttempt || (() => {});
+  const onCodeRejected = deps.onCodeRejected || (() => {});
   const maxBodyBytes = deps.maxBodyBytes || MAX_IMPORT_BODY_BYTES;
+  const signedOutError = (refusal) => (typeof refusal === 'string' && refusal ? refusal : SIGNED_OUT_ERROR);
 
   return async function handleReceiverRequest(req, res) {
     const send = (status, obj, { close = false, headers = {} } = {}) => {
@@ -175,6 +194,7 @@ function createReceiverHandler(deps) {
       const expected = getPairingCode();
       const rejectCode = (given) => {
         const r = guard.fail();
+        try { onCodeRejected(); } catch (e) { /* bookkeeping must not change the answer */ }
         if (r.failures === 1) log(`[Ext] Refused an import with the wrong pairing code (${maskCode(given)}). If that was your browser extension, paste the current code from Platform Logins into it.`);
         if (r.lockedNow) log(`[Ext] ${r.failures} wrong pairing codes in a row; refusing imports for ${Math.round(LOCKOUT_MS / 1000)} s.`);
         return send(403, { success: false, error: 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.' }, { close: true });
@@ -205,8 +225,19 @@ function createReceiverHandler(deps) {
       if (!IMPORT_PLATFORMS.includes(platform) || typeof importers[platform] !== 'function') {
         return send(200, { success: false, error: 'Unknown platform' });
       }
-      if (auto && isSignedOut(platform)) {
-        return send(409, { success: false, code: 'SIGNED_OUT', error: SIGNED_OUT_ERROR });
+      // Only automatic re-syncs are recorded (F96): the popup already shows
+      // the user the answer to a click.
+      const noteAuto = (status, ok, error) => {
+        if (!auto) return;
+        try {
+          onAutoAttempt({ platform, ok, error: ok ? '' : String(error || 'Import failed').slice(0, 200), status });
+        } catch (e) { /* bookkeeping must not change the answer */ }
+      };
+      const refusal = auto ? isSignedOut(platform) : false;
+      if (refusal) {
+        const error = signedOutError(refusal);
+        noteAuto(409, false, error);
+        return send(409, { success: false, code: 'SIGNED_OUT', error });
       }
 
       let result;
@@ -214,12 +245,22 @@ function createReceiverHandler(deps) {
         result = await importers[platform](cookies, { auto });
       } catch (err) {
         log(`[Ext] ${platform} import failed: ${err && err.message}`);
-        return send(500, { success: false, error: err && err.message ? err.message : 'Import failed' });
+        const error = err && err.message ? err.message : 'Import failed';
+        noteAuto(500, false, error);
+        return send(500, { success: false, error });
       }
       const out = result && typeof result === 'object' ? { ...result } : { success: false, error: 'Import failed' };
+      // Signed out (or connected in the app) while this re-sync was running:
+      // the same answer as if it had arrived a moment later.
+      if (out.code === 'SIGNED_OUT' && !out.success) {
+        const error = signedOutError(out.error);
+        noteAuto(409, false, error);
+        return send(409, { success: false, code: 'SIGNED_OUT', error });
+      }
       if (!auto && out.success) onManualImport(platform, out);
       // A background re-sync never needs to learn whose account the app holds.
       if (auto) delete out.username;
+      noteAuto(200, !!out.success, out.error);
       return send(200, out);
     } catch (err) {
       log(`[Ext] Cookie receiver error: ${err && err.message}`);
@@ -242,8 +283,9 @@ function createReceiverServer(handler, { headersTimeoutMs = 10000, requestTimeou
 // Binds the first port in `ports` that works, on `host`. Any bind error moves
 // on to the next port: on Windows a port inside a Hyper-V/WSL/Docker reserved
 // range fails with EACCES, not EADDRINUSE, and used to stop the walk at the
-// first port. Resolves { server, port } or { server: null, errors }.
-// Errors after a successful bind go to onRuntimeError.
+// first port. Resolves { server, port, errors } (errors: the ports skipped on
+// the way) or { server: null, errors }. Errors after a successful bind go to
+// onRuntimeError.
 async function listenOnFirstPort({ ports, host = '127.0.0.1', createServer, onRuntimeError = () => {} }) {
   const errors = [];
   for (const port of ports) {
@@ -269,7 +311,7 @@ async function listenOnFirstPort({ ports, host = '127.0.0.1', createServer, onRu
     });
     if (!bound.err) {
       server.on('error', onRuntimeError);
-      return { server, port };
+      return { server, port, errors };
     }
     errors.push({ port, code: (bound.err && bound.err.code) || (bound.err && bound.err.message) || 'error' });
     try { server.close(); } catch (e) { /* never listened */ }
@@ -295,4 +337,6 @@ module.exports = {
   createReceiverServer,
   listenOnFirstPort,
   SIGNED_OUT_ERROR,
+  APP_LOGIN_ERROR,
+  autoSyncRefusalFor,
 };

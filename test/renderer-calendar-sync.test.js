@@ -193,13 +193,14 @@ test('F97: at midnight the Today column, the form labels and the date filter rol
   state.currentConfig = { calendarEvents: [] };
   state.platformSchedules = [synced('wed night', at(2026, 9, 30, 22)), synced('next wed', at(2026, 10, 7, 22))];
 
+  cal.setupCalendarHandlers(); // listens for the user picking a day
   cal.populateCalendarFormDays();
   cal.renderCalendar();
-  env.daySelect.value = '5'; // the user picked Friday in a half-filled form
   cal.startCalendarAutoRefresh({ firstSyncDelayMs: 24 * HOUR });
   assert.equal(columns(env.doc)[0].day, '3');
   assert.deepEqual(columns(env.doc)[0].events.map(e => e.title), ['wed night']);
   assert.equal(env.daySelect.children[0].textContent, 'Today (Wednesday)');
+  assert.equal(env.daySelect.value, '3', 'the untouched form defaults to Today');
 
   t.mock.timers.tick(61 * 1000);
   const cols = columns(env.doc);
@@ -209,11 +210,19 @@ test('F97: at midnight the Today column, the form labels and the date filter rol
   assert.deepEqual(cols[6].events.map(e => e.title), ['next wed'], "last night's event is gone, next week's appears");
   assert.equal(env.daySelect.children[0].textContent, 'Today (Thursday)');
   assert.equal(env.daySelect.children[1].textContent, 'Tomorrow (Friday)');
-  assert.equal(env.daySelect.value, '5', 'the picked weekday survives the rebuild');
+  // Nobody touched the form: it follows Today, rather than keeping
+  // Wednesday, which is now the last option, six days out.
+  assert.equal(env.daySelect.value, '4', 'an untouched form reads the new Today');
 
+  // The user picks Tuesday in a half-filled form. Only the 'change' a real
+  // pick fires marks it; the rebuild setting .value does not.
+  env.daySelect.value = '2';
+  await env.daySelect.dispatch('change');
   // And again the next night: the timer re-arms itself.
   t.mock.timers.tick(24 * HOUR);
   assert.equal(columns(env.doc)[0].day, '5');
+  assert.equal(env.daySelect.children[0].textContent, 'Today (Friday)');
+  assert.equal(env.daySelect.value, '2', 'the picked weekday survives the rebuild');
 
   // A night whose render throws still leaves the timer armed for the next.
   // Watched at setTimeout itself: Node's mock re-runs a timer whose callback
@@ -358,6 +367,116 @@ test('G4.5: an offline or empty background sync keeps the schedule and retries s
   await flush();
   assert.equal(syncs(), 2);
   assert.deepEqual(state.platformSchedules.map(e => e.title), ['new sat']);
+});
+
+test('F97: nextScheduleSyncDelay backs off from 30 minutes to the 6 hour interval', async () => {
+  const { nextScheduleSyncDelay, SCHEDULE_SYNC_INTERVAL_MS: SIX_H, SCHEDULE_SYNC_RETRY_MS: HALF_H } = await loadCalendar();
+  assert.equal(SIX_H, 6 * HOUR);
+  assert.equal(HALF_H, HOUR / 2);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 50, 5000].map(nextScheduleSyncDelay),
+    [SIX_H, HALF_H, HOUR, 2 * HOUR, 4 * HOUR, SIX_H, SIX_H, SIX_H, SIX_H]);
+  for (const junk of [undefined, null, NaN, -3, 'x']) assert.equal(nextScheduleSyncDelay(junk), SIX_H, String(junk));
+});
+
+test('F97: a sync where only some streamers failed waits the full 6 hours, with no online retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: WED_NOON });
+  const merged = [synced('merged', at(2026, 10, 1, 18))];
+  // One deleted YouTube handle 404s on every sync; main merged and saved the
+  // other twenty.
+  const env = setup({
+    api: { syncPlatformSchedules: async () => { env.calls.push(['sync']); return { events: merged, failed: ['youtube:gone'], ok: 20, saved: true }; } },
+  });
+  t.after(env.restore);
+  const cal = await loadCalendar();
+  state.currentConfig = { calendarEvents: [], syncedCalendarEvents: [] };
+  state.platformSchedules = [];
+  const syncs = () => env.calls.filter(c => c[0] === 'sync').length;
+
+  cal.startCalendarAutoRefresh({ firstSyncDelayMs: 5000 });
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.equal(syncs(), 1);
+  assert.equal(state.platformSchedules, merged, 'the merge was taken');
+  assert.equal((env.listeners.online || []).length, 0, 'no online retry for a sync that learned something');
+
+  t.mock.timers.tick(cal.SCHEDULE_SYNC_RETRY_MS);
+  await flush();
+  assert.equal(syncs(), 1, 'not re-run after 30 minutes');
+  t.mock.timers.tick(cal.SCHEDULE_SYNC_INTERVAL_MS - cal.SCHEDULE_SYNC_RETRY_MS - 1);
+  await flush();
+  assert.equal(syncs(), 1);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(syncs(), 2, 'the next sync runs at 6 h');
+
+  // A whole day of it: 4 syncs and 8 calendar lines, not 49 and 98. Lines
+  // are counted as they are appended: appendLogMessage keeps the console
+  // element of whichever test logged first.
+  const appended = t.mock.method(FakeElement.prototype, 'appendChild');
+  for (let h = 0; h < 24; h += 6) {
+    t.mock.timers.tick(6 * HOUR);
+    await flush();
+  }
+  assert.equal(syncs(), 6);
+  const lines = appended.mock.calls.map(c => c.arguments[0].textContent).filter(s => s.startsWith('[Calendar]'));
+  assert.equal(lines.length, 8, lines.join('\n'));
+  assert.match(lines.at(-1), /Background sync complete: 1 platform scheduled streams; 1 streamer\(s\) failed/);
+  assert.equal((env.listeners.online || []).length, 0);
+  assert.equal(env.calls.filter(c => c[0] === 'saveConfig').length, 0);
+});
+
+test('F97: syncs that learn nothing back off instead of retrying every 30 minutes forever', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: WED_NOON });
+  let answer = () => ({ events: [], failed: ['twitch:a', 'youtube:b'], ok: 0, saved: false });
+  const syncTimes = [];
+  const env = setup({ api: { syncPlatformSchedules: async () => { syncTimes.push(Date.now()); return answer(); } } });
+  t.after(env.restore);
+  const errors = t.mock.method(console, 'error', () => {});
+  const cal = await loadCalendar();
+  const stored = [synced('stored fri', at(2026, 10, 2, 18))];
+  state.currentConfig = { calendarEvents: [], syncedCalendarEvents: stored };
+  state.platformSchedules = stored;
+
+  cal.startCalendarAutoRefresh({ firstSyncDelayMs: 5000 });
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.equal(syncTimes.length, 1);
+  // Each retry in turn, timed in 15-minute steps. Every answer tells the
+  // renderer nothing: all streamers failed, the IPC threw, or an older
+  // main's empty list while the stored schedule is still ahead.
+  const gaps = [];
+  for (let i = 0; i < 6; i++) {
+    if (i === 2) answer = () => { throw new Error('ipc down'); };
+    if (i === 3) answer = () => [];
+    const before = syncTimes.length;
+    let waited = 0;
+    while (syncTimes.length === before) {
+      assert.ok(waited < 7 * HOUR, `retry ${i + 1} never came`);
+      t.mock.timers.tick(15 * 60 * 1000);
+      waited += 15 * 60 * 1000;
+      await flush();
+    }
+    gaps.push(waited / HOUR);
+  }
+  assert.deepEqual(gaps, [0.5, 1, 2, 4, 6, 6]);
+  assert.equal(errors.mock.callCount(), 1, 'the IPC failure was reported once');
+  assert.equal(state.platformSchedules, stored, 'nothing learned, nothing replaced');
+  assert.equal(env.calls.filter(c => c[0] === 'saveConfig').length, 0);
+
+  // A sync that works resets it: the next one is 6 h out, and a failure
+  // after that starts again at 30 minutes.
+  answer = () => ({ events: [synced('fresh', at(2026, 10, 5, 18))], failed: [], ok: 3, saved: true });
+  t.mock.timers.tick(6 * HOUR);
+  await flush();
+  assert.equal(state.platformSchedules[0].title, 'fresh');
+  answer = () => ({ events: [], failed: ['twitch:a'], ok: 0, saved: false });
+  const n = syncTimes.length;
+  t.mock.timers.tick(6 * HOUR);
+  await flush();
+  assert.equal(syncTimes.length, n + 1);
+  t.mock.timers.tick(cal.SCHEDULE_SYNC_RETRY_MS);
+  await flush();
+  assert.equal(syncTimes.length, n + 2, 'the backoff restarted at 30 minutes');
 });
 
 test('G4.5: the Sync button reports failed streamers and saves only for an older main', async (t) => {

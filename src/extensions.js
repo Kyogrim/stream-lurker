@@ -63,44 +63,74 @@ export async function renderExtensionCatalog() {
     const installBtn = card.querySelector('.catalog-install-btn');
     const uninstallBtn = card.querySelector('.catalog-uninstall-btn');
 
+    // Both handlers give the buttons back whatever happens: a rejected IPC
+    // call used to leave them disabled until the tab was re-rendered. On
+    // success the card is re-rendered and these buttons are discarded anyway.
+    const setBusy = (busy) => {
+      installBtn.disabled = busy;
+      if (uninstallBtn) uninstallBtn.disabled = busy;
+    };
+
     installBtn.addEventListener('click', async () => {
-      installBtn.disabled = true;
-      if (uninstallBtn) uninstallBtn.disabled = true;
+      setBusy(true);
       statusEl.textContent = 'Downloading & extracting…';
-      const res = await window.api.installCatalogExtension(item.id);
-      if (res.ok) {
-        statusEl.textContent = `Installed v${res.version}. Restart the app to finish loading it.`;
-        statusEl.style.color = 'var(--cyan-color)';
-        state.currentConfig = await window.api.getConfig();
-        renderExtensionsList();
-        renderExtensionCatalog();
-        appendLogMessage(`[Catalog] ${item.name} v${res.version} installed. Restart Stream Lurker for it to load fully.`);
-      } else {
-        statusEl.textContent = `Failed: ${res.error}`;
+      try {
+        const res = await window.api.installCatalogExtension(item.id);
+        if (res?.ok) {
+          // Main loads it into the live session and reloads open streams; its
+          // own log line says so, or that it will load on the next start.
+          statusEl.textContent = `Installed v${res.version}.`;
+          statusEl.style.color = 'var(--cyan-color)';
+          appendLogMessage(`[Catalog] ${item.name} v${res.version} installed.`);
+          state.currentConfig = await window.api.getConfig();
+          renderExtensionsList();
+          await renderExtensionCatalog();
+          showCatalogStatus(item.id, `Installed v${res.version}.`);
+        } else {
+          statusEl.textContent = `Failed: ${res?.error || 'unknown error'}`;
+          statusEl.style.color = 'var(--text-muted)';
+        }
+      } catch (err) {
+        statusEl.textContent = `Failed: ${err?.message || err}`;
         statusEl.style.color = 'var(--text-muted)';
-        installBtn.disabled = false;
-        if (uninstallBtn) uninstallBtn.disabled = false;
+      } finally {
+        setBusy(false);
       }
     });
 
     uninstallBtn?.addEventListener('click', async () => {
-      uninstallBtn.disabled = true;
-      installBtn.disabled = true;
-      const res = await window.api.uninstallCatalogExtension(item.id);
-      if (res.ok) {
-        state.currentConfig = await window.api.getConfig();
-        renderExtensionsList();
-        renderExtensionCatalog();
-        appendLogMessage(`[Catalog] ${item.name} removed.`);
-      } else {
-        statusEl.textContent = `Failed: ${res.error}`;
-        uninstallBtn.disabled = false;
-        installBtn.disabled = false;
+      setBusy(true);
+      try {
+        const res = await window.api.uninstallCatalogExtension(item.id);
+        if (res?.ok) {
+          // Main unloads it at once and reloads open streams, so nothing it
+          // injected survives. A warning means some files were left on disk;
+          // it stays on the re-rendered card, where the user clicked.
+          appendLogMessage(`[Catalog] ${item.name} removed and unloaded.`);
+          state.currentConfig = await window.api.getConfig();
+          renderExtensionsList();
+          await renderExtensionCatalog();
+          if (res.warning) showCatalogStatus(item.id, res.warning);
+        } else {
+          statusEl.textContent = `Failed: ${res?.error || 'unknown error'}`;
+        }
+      } catch (err) {
+        statusEl.textContent = `Failed: ${err?.message || err}`;
+      } finally {
+        setBusy(false);
       }
     });
 
     host.appendChild(card);
   });
+}
+
+// A note on one catalog card, found by id after a re-render replaced them all.
+function showCatalogStatus(id, text) {
+  const btn = [...(catalogEl()?.querySelectorAll('.catalog-install-btn') || [])]
+    .find(b => b.dataset.id === id);
+  const status = btn?.closest('.ext-catalog-item')?.querySelector('.catalog-status');
+  if (status) status.textContent = text;
 }
 
 export function renderExtensionsList() {
@@ -127,6 +157,7 @@ export function renderExtensionsList() {
 
     const row = document.createElement('div');
     row.className = 'ext-item';
+    row.dataset.extPath = extPath;
     row.innerHTML = `
       <div class="ext-item-header">
         <span class="ext-item-title">${escapeHtml(extName)}</span>
@@ -144,9 +175,35 @@ export function renderExtensionsList() {
       state.currentConfig.extensions.splice(index, 1);
       await window.api.saveConfig(state.currentConfig);
       renderExtensionsList();
-      appendLogMessage('[Extensions] Extension removed from list. It will take effect upon reloading or window restarts.');
+      // Main unloads it on this save, and reloads open streams if it was
+      // running so what it injected goes too.
+      appendLogMessage(`[Extensions] Removed ${extName}; it is no longer loaded.`);
     });
 
     host.appendChild(row);
+  });
+
+  markUnavailableExtensions(host);
+}
+
+// Rows are drawn at once as "Active", then the folders main could not reach
+// at its last load (a drive not mounted yet) are relabelled. The entries stay
+// in the list, removable as usual; main never drops them on its own.
+async function markUnavailableExtensions(host) {
+  let unavailable;
+  try {
+    unavailable = (await window.api.getExtensionStatus())?.unavailable;
+  } catch (err) {
+    return;
+  }
+  if (!Array.isArray(unavailable) || unavailable.length === 0) return;
+  const missing = new Set(unavailable.filter(p => typeof p === 'string'));
+  host.querySelectorAll('.ext-item').forEach(row => {
+    if (!missing.has(row.dataset.extPath)) return;
+    const badge = row.querySelector('.ext-item-ver');
+    if (!badge) return;
+    badge.textContent = 'Unavailable (drive not found)';
+    badge.classList.add('unavailable');
+    badge.title = 'This folder could not be reached when extensions were loaded, so it is not running. It loads by itself once the folder is back (checked again shortly after start and at every launch). Remove it if the folder is gone for good.';
   });
 }

@@ -12,7 +12,7 @@ const {
 } = require('./main/dashboard-protocol');
 const {
   isPlatformUrl, isOAuthPopupUrl, isAllowedTopLevelUrl, isAllowedFrameUrl, mayOpenExternally,
-  sanitizeWebviewAttach, isPermissionAllowed, isTrustedDashboardSender,
+  sanitizeWebviewAttach, isBlockedStreamLoad, isPermissionAllowed, isTrustedDashboardSender,
   createExternalOpenGate, createLogThrottle, createDownloadAllowlist,
 } = require('./main/web-security');
 const { sanitizeConfig, scanIntervalMs, streamerPlatform, streamerName } = require('./main/config-sanitize');
@@ -24,7 +24,7 @@ const { parseYoutubeLivePage } = require('./main/youtube-live');
 const { createStreamLiveness } = require('./main/stream-liveness');
 const { applyScanResults } = require('./main/scan-planner');
 const { createSingleFlight } = require('./main/scan-runner');
-const { createFatalReporter, formatConsoleMessage } = require('./main/app-log');
+const { createFatalReporter, createLoadGuard, formatConsoleMessage } = require('./main/app-log');
 const { loadConfigFromDisk, readConfigFileResult } = require('./main/config-store');
 const { syncLoginItem } = require('./main/login-item');
 const { createAlertKeeper } = require('./main/live-alerts');
@@ -35,23 +35,29 @@ const { existingDir, extensionPickerDir } = require('./main/dialog-dirs');
 const { runPageScript, runScriptWithin, createProbeGate } = require('./main/hidden-page');
 const {
   parseCookieBlob, planCookieWrites, shouldClearExisting, removalUrl,
-  isYouTubeCookieDomain, assignPastedYouTubeDomains, hasGoogleSessionCookies,
+  isYouTubeCookieDomain, youtubeJarCookies, assignPastedYouTubeDomains, hasGoogleSessionCookies,
 } = require('./main/cookie-import');
 const {
   placeholderName, isPlaceholderName, sameAccountName, hasKickSessionToken, youtubeAuthFingerprint,
-  createAccountEpochs,
+  isNewYouTubeSignIn, youtubeRenameDecision, createAccountEpochs, createSyncTickets,
 } = require('./main/account-state');
 const { resolveTwitchUser: resolveTwitchUserVia, twitchUserFailureMessage, describeTwitchUserResult } = require('./main/twitch-user');
 const { createLoginFlow } = require('./main/login-flow');
-const { KICK_USER_SCRIPT, kickNameFrom } = require('./main/kick-user');
+const { KICK_USER_SCRIPT, kickNameFrom, kickNameToStore } = require('./main/kick-user');
 const {
-  rendererConfigPatch, importedConfig, repairWatchTime, exportableConfig,
-  normalizePairingCode, newPairingCode, isSignedOutIn, withSignedOut,
+  rendererConfigPatch, importedConfig, repairWatchTime, exportableConfig, channelNameProblem,
+  normalizePairingCode, newPairingCode, isSignedOutIn, signedOutReasonIn, withSignedOut,
 } = require('./main/config-boundary');
-const { createReceiverHandler, createReceiverServer, createPairingGuard, listenOnFirstPort } = require('./main/cookie-receiver');
-const { extensionPathKey, planExtensionSync, isInsideDir, checkReleaseAsset } = require('./main/extension-sync');
+const {
+  createReceiverHandler, createReceiverServer, createPairingGuard, listenOnFirstPort, autoSyncRefusalFor,
+} = require('./main/cookie-receiver');
+const {
+  extensionPathKey, planExtensionSync, isInsideDir, checkReleaseAsset,
+  findManifestRoot, readStagedManifest, promoteStaged, createInstallLocks,
+} = require('./main/extension-sync');
 const { clipDownloadUrl, clipPageUrl, clipFileName } = require('./main/clip-download');
-const { createScheduleSync } = require('./main/schedule-sync');
+const { createScheduleSync, shouldStoreSchedule } = require('./main/schedule-sync');
+const { HANG_GRACE_MS, watchForHang } = require('./main/hang-watch');
 
 // One process per profile. Two Electron processes sharing a profile race the
 // cookie store (a real one was wiped this way) and overwrite each other's
@@ -69,7 +75,22 @@ const reportFatal = createFatalReporter({
   log: (text) => addLog(text),
   filePath: () => path.join(app.getPath('userData'), 'logs', 'main-errors.log'),
 });
-process.on('uncaughtException', (err, origin) => reportFatal(origin || 'uncaughtException', err));
+// Told by the last line of this file that it loaded. A throw before then is
+// this script failing to load: no whenReady handler, window or tray will ever
+// exist, and the single-instance lock held above would make every relaunch
+// exit silently (see app-log.js). So it says so, with a modal box since
+// nothing else is running for it to stop, and exits, releasing the lock.
+const mainScript = createLoadGuard({
+  report: reportFatal,
+  onLoadFailure: (err) => {
+    try {
+      dialog.showErrorBox('Stream Lurker could not start',
+        `${err && err.stack ? err.stack : err}\n\nDetails are in ${path.join(app.getPath('userData'), 'logs', 'main-errors.log')}.`);
+    } catch (e) { /* still exit */ }
+    app.exit(1);
+  },
+});
+process.on('uncaughtException', (err, origin) => mainScript.uncaught(err, origin));
 process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', reason));
 
 // For fire-and-forget work (timers, background checks): a throw or rejection
@@ -104,11 +125,6 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 const TWITCH_PUBLIC_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-// Cookie names that indicate a live Google/YouTube session. Covers the legacy
-// pair (SID/SSID/HSID/APISID/SAPISID), the modern __Secure-1P/3P families that
-// Google rotates on its own schedule, and YouTube's own LOGIN_INFO.
-const YOUTUBE_AUTH_COOKIE = /^(SID|SSID|HSID|APISID|SAPISID|LOGIN_INFO|__Secure-[13]PSID(TS|CC)?|__Secure-[13]PAPISID)$/;
-
 // Global variables
 let mainWindow = null;
 let tray = null;
@@ -140,6 +156,9 @@ const approvedExtensionPaths = new Set();
 // in memory and saveConfig writes nothing, so the user's file is never
 // overwritten (see config-store.js).
 let configWriteLocked = false;
+// Whether loadConfig has run at all. Until it has, `config` is the in-code
+// defaults with writes unlocked, and any save would replace the user's file.
+let configLoadAttempted = false;
 let configLockReason = '';
 let configSkipLogged = false;
 let configPromptOpen = false;
@@ -233,8 +252,9 @@ function readConfigFile(filePath) {
 // tool, an unreachable drive) turns saving off instead, so it is never
 // overwritten (see config-store.js).
 function loadConfig() {
-  const configPath = getConfigPath();
+  configLoadAttempted = true;
   try {
+    const configPath = getConfigPath();
     const result = loadConfigFromDisk(configPath, { log: addLog });
     const loaded = result.status === 'loaded' || result.status === 'recovered' ? result.data : null;
     const recovered = result.status === 'recovered';
@@ -374,7 +394,8 @@ function retryConfigLoad() {
 function saveConfig(newConfig) {
   if (newConfig) config = newConfig;
   // Before .tmp, .bak or config.json is touched: defaults in memory must never
-  // replace a config that exists but could not be read.
+  // replace a config that exists but could not be read, or one not read yet.
+  if (!configLoadAttempted) return;
   if (configWriteLocked) {
     if (!configSkipLogged) {
       configSkipLogged = true;
@@ -735,6 +756,26 @@ app.on('web-contents-created', (event, contents) => {
     if (!guardTopLevelNavigation(contents, e.url || legacyUrl, 'redirect')) e.preventDefault();
   });
 
+  // A load the embedder starts after attach (setting webview.src, or
+  // webview.loadURL) is browser-initiated: it fires neither will-navigate nor
+  // will-frame-navigate, so the attach-time src check alone would let a
+  // compromised dashboard put any https page in a cell on the logged-in
+  // session. Stopped here instead. Deferred a tick: cancelling a navigation
+  // from inside its own start notification is not something Chromium
+  // promises to survive, and a tick is far shorter than any network request.
+  contents.on('did-start-navigation', (e, legacyUrl, legacyInPlace, legacyIsMainFrame) => {
+    const url = e.url || legacyUrl;
+    if (!isBlockedStreamLoad(contentsRole(contents), {
+      url,
+      isMainFrame: e.isMainFrame !== undefined ? e.isMainFrame : legacyIsMainFrame,
+      isSameDocument: e.isSameDocument !== undefined ? e.isSameDocument : legacyInPlace,
+    })) return;
+    setImmediate(() => {
+      try { if (!contents.isDestroyed()) contents.stop(); } catch (err) { /* already gone */ }
+    });
+    logSecurityOnce(`start|stream|${originOf(url)}`, `Stopped a stream page from loading ${originOf(url)}: stream cells only hold platform pages.`);
+  });
+
   // Any frame of a third-party page: web schemes only, so an iframe cannot be
   // pointed at file:, app: or a registered protocol handler.
   contents.on('will-frame-navigate', (e) => {
@@ -743,6 +784,17 @@ app.on('web-contents-created', (event, contents) => {
     e.preventDefault();
     const scheme = String(e.url || '').split(':')[0].slice(0, 40);
     logSecurityOnce(`frame|${role}|${scheme}`, `Blocked a frame in a ${role} page from opening ${scheme}: (only web addresses are allowed).`);
+  });
+
+  // The old default menu's Ctrl+/- zoomed whatever had focus and saved that
+  // level per host in the session, where every later page on that host picked
+  // it up: stream cells (reflowing every cell of that platform), the dashboard
+  // (which cascaded onto every attached cell), clip and login windows, OAuth
+  // popups and pop-outs. The menu and its Ctrl+0 are gone, so nothing could
+  // undo a saved level. This clears it on every surface (level 0 removes the
+  // host's saved entry).
+  contents.on('did-finish-load', () => {
+    try { contents.setZoomLevel(0); } catch (e) { /* already gone */ }
   });
 
   // Mute every stream webview the instant its webContents exists. The renderer
@@ -755,12 +807,10 @@ app.on('web-contents-created', (event, contents) => {
   if (contents.getType() !== 'webview') return;
   try { contents.setAudioMuted(true); } catch (e) { /* already gone */ }
 
-  // The old default menu's Ctrl+/- zoomed a cell's site and saved that level
-  // per host in the profile, reflowing every cell of that platform, with no
-  // way back in the UI. The menu is gone; this clears what it left behind
-  // (level 0 removes the saved entry).
-  contents.on('did-finish-load', () => {
-    try { contents.setZoomLevel(0); } catch (e) { /* already gone */ }
+  // A hung cell would otherwise stay frozen for the rest of the run; crashing
+  // it hands it to the dashboard's crash recovery (see hang-watch.js).
+  watchForHang(contents, {
+    onKill: (url) => addLog(`[Streams] A stream page stopped responding for over ${Math.round(HANG_GRACE_MS / 1000)} s; restarting it: ${originOf(url)}`),
   });
 });
 
@@ -898,11 +948,10 @@ function createMainWindow() {
     }, plan.delayMs);
   });
 
+  // (A zoom level the old default menu saved is cleared for every surface in
+  // web-contents-created.)
   mainWindow.webContents.on('did-finish-load', () => {
     dashboardHealth.loaded();
-    // A zoom level the old default menu saved for the dashboard (it also
-    // cascaded onto every attached cell).
-    try { mainWindow.webContents.setZoomLevel(0); } catch (e) { /* closing */ }
   });
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
@@ -1458,7 +1507,7 @@ async function checkStreamersParallel(usernames, checkerFn, concurrency = 3, del
   return results;
 }
 
-/// Usernames monitored on one platform. Reads entries defensively: one the
+// Usernames monitored on one platform. Reads entries defensively: one the
 // config normalizer has not seen must not make every scan throw.
 function monitoredUsernames(platform) {
   return config.streamers.filter(s => streamerPlatform(s) === platform).map(streamerName).filter(Boolean);
@@ -1558,6 +1607,7 @@ async function doScan() {
   // sits this scan out.
   applyScanResults(results, {
     now: Date.now(),
+    intervalMs: scanIntervalMs(config),
     config: dashboardHealth.canOpenStreams ? config : { ...config, autoOpen: false },
     activeWindows,
     openedSessions,
@@ -1627,6 +1677,19 @@ function sendCountdownToUI() {
   }
 }
 
+// The user asked to see the dashboard. One that crashed and is waiting out
+// its slow retry (see dashboard-health.js) would come forward as a blank
+// window with no Ctrl+R to fix it, so it is reloaded now instead.
+function reloadDeadDashboardOnShow() {
+  if (!mainWindow || mainWindow.isDestroyed() || !dashboardHealth.reloadOnShow) return;
+  if (dashboardReloadTimer) {
+    clearTimeout(dashboardReloadTimer);
+    dashboardReloadTimer = null;
+  }
+  addLog('[System - MainWindow] Dashboard opened while it was down after a crash; reloading it now.');
+  mainWindow.reload();
+}
+
 // App lifecycle
 app.on('second-instance', (_event, argv) => {
   // Autostart passes --hidden; a login-time relaunch must not pop the window.
@@ -1635,18 +1698,33 @@ app.on('second-instance', (_event, argv) => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+    reloadDeadDashboardOnShow();
   }
 });
 
-app.whenReady().then(async () => {
-  // Without an application menu of our own, every window (including any a page
-  // manages to open) gets Electron's default one: reload, zoom and DevTools on
-  // accelerators. macOS keeps the app and Edit menus so Cmd+Q and copy/paste
-  // still work there. First, so even a window the startup-failure path below
-  // creates never has them.
+// Without an application menu of our own, every window (including any a page
+// manages to open) gets Electron's default one: reload, zoom and DevTools on
+// accelerators. macOS keeps the app and Edit menus so Cmd+Q and copy/paste
+// still work there.
+function installApplicationMenu() {
   Menu.setApplicationMenu(process.platform === 'darwin'
     ? Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }])
     : null);
+}
+
+app.whenReady().then(async () => {
+  // These three come first, in this order, and the startup-failure path below
+  // repeats whichever did not happen: the window it opens loads app://, the
+  // runtime it starts saves config.json, and neither may run without them.
+  // The dashboard's origin depends on nothing.
+  protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));
+  // Before anything else can throw: the runtime on in-code defaults with
+  // writes unlocked would save those defaults over the user's config.json
+  // (and roll the real file into .bak). loadConfig never throws; on a failed
+  // read it locks writes.
+  loadConfig();
+  // Before any window exists.
+  installApplicationMenu();
 
   addLog('Initializing Stream Lurker standalone desktop application...');
   for (const r of cookieMigrationResults) {
@@ -1657,7 +1735,6 @@ app.whenReady().then(async () => {
       addLog(`[Upgrade] Cookie store ${where} was not migrated (${r.status}: ${r.error}). If logins are missing, reconnect them in Platform Logins.`);
     }
   }
-  loadConfig();
   applyStartupSettings();
 
   const rawUA = session.defaultSession.getUserAgent();
@@ -1675,7 +1752,6 @@ app.whenReady().then(async () => {
   // here first; lockDownSession ignores a second call.
   lockDownSession(session.defaultSession);
   lockDownSession(session.fromPartition('persist:default'));
-  protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));
 
   // Spoof Sec-CH-UA client hints to match the spoofed User-Agent fingerprint.
   const clientHints = { major: SPOOF_CHROME.major, full: SPOOF_CHROME.full, platform: process.platform };
@@ -1748,6 +1824,13 @@ app.whenReady().then(async () => {
   // or tray holding the profile. Not a blocking dialog: it would freeze the
   // app it is reporting on.
   reportFatal('startup', err);
+  // What threw may have come before any of the three steps the runtime needs
+  // (see the top of the ready handler).
+  try {
+    if (!protocol.isProtocolHandled(DASHBOARD_SCHEME)) protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));
+  } catch (e) { reportFatal('startup: dashboard protocol', e); }
+  if (!configLoadAttempted) loadConfig();
+  try { installApplicationMenu(); } catch (e) { reportFatal('startup: menu', e); }
   startRuntime();
   dialog.showMessageBox({
     type: 'warning',
@@ -1875,6 +1958,7 @@ function createTray() {
           mainWindow.show();
           mainWindow.focus();
         }
+        reloadDeadDashboardOnShow();
       }
     });
     
@@ -1892,6 +1976,7 @@ function buildTrayMenu() {
         if (mainWindow) {
           mainWindow.show();
           mainWindow.focus();
+          reloadDeadDashboardOnShow();
         }
       }
     },
@@ -1994,50 +2079,59 @@ const YOUTUBE_PROBE_SCRIPT = `
       const hasAvatar = !!document.querySelector('button#avatar-btn, #avatar-btn, [aria-label*="Account"]');
       const hasSignIn = !!document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com/ServiceLogin"]');
 
+      // nameSource says how far down this list the name came from; only the
+      // first two may rename a stored account (youtubeRenameDecision).
       let name = null;
+      let nameSource = null;
+      const fromMenu = () => {
+        const handle = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle');
+        if (handle && handle.textContent.trim()) { name = handle.textContent.trim(); nameSource = 'channel-handle'; return; }
+        const display = document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
+        if (display && display.textContent.trim()) { name = display.textContent.trim(); nameSource = 'account-name'; }
+      };
       if (loggedIn === true || hasAvatar) {
         if (cfgReady) name = window.ytcfg.get('CHANNEL_HANDLE') || window.ytcfg.get('USER_NAME') || null;
         if (!name && window.ytcfg && window.ytcfg.data_) {
           name = window.ytcfg.data_.CHANNEL_HANDLE || window.ytcfg.data_.USER_NAME || null;
         }
-        if (!name) {
-          const el = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle')
-                  || document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
-          if (el && el.textContent.trim()) name = el.textContent.trim();
-        }
+        if (name) nameSource = 'ytcfg';
+        if (!name) fromMenu();
         if (!name) {
           // Opening the account menu is what actually renders the handle.
           const btn = document.querySelector('button#avatar-btn, #avatar-btn');
           if (btn) {
             btn.click();
             await sleep(900);
-            const el = document.querySelector('ytd-active-account-header-renderer #channel-handle, #channel-handle')
-                    || document.querySelector('ytd-active-account-header-renderer #account-name, #account-name');
-            if (el && el.textContent.trim()) name = el.textContent.trim();
+            fromMenu();
             if (!name) {
+              // Not the button's aria-label: that is a generic, localized
+              // label ("Account menu"), not a name.
               const img = btn.querySelector('img');
-              name = clean(img && img.alt) || clean(btn.getAttribute('aria-label'));
+              name = clean(img && img.alt);
+              if (name) nameSource = 'label';
             }
           }
         }
       }
-      return { cfgReady, loggedIn, hasAvatar, hasSignIn, name: name || null };
+      return { cfgReady, loggedIn, hasAvatar, hasSignIn, name: name || null, nameSource: name ? nameSource : null };
     } catch (e) { return null; }
   })()
 `;
 
-// Returns { state: 'live' | 'signed-out' | 'unknown', name }. Background
-// callers go through youtubeProbe.run() (joins a probe in flight), importers
-// through youtubeProbe.fresh() (a page loaded after their cookies were written).
+// Returns { state: 'live' | 'signed-out' | 'unknown', name, nameSource }.
+// Background callers go through youtubeProbe.run() (joins a probe in flight),
+// importers through youtubeProbe.fresh() (a page loaded after their cookies
+// were written).
 async function probeYouTubeLogin() {
   const probe = await runInHiddenPage('https://www.youtube.com/', YOUTUBE_PROBE_SCRIPT, 6000);
-  if (!probe || !probe.cfgReady) return { state: 'unknown', name: null }; // page never really loaded
+  if (!probe || !probe.cfgReady) return { state: 'unknown', name: null, nameSource: null }; // page never really loaded
   const name = probe.name || null;
-  if (probe.loggedIn === true || probe.hasAvatar) return { state: 'live', name };
+  const nameSource = name ? probe.nameSource || null : null;
+  if (probe.loggedIn === true || probe.hasAvatar) return { state: 'live', name, nameSource };
   // Only call it dead when the player config says so AND the page is actually
   // offering a sign-in link.
-  if (probe.loggedIn === false && probe.hasSignIn) return { state: 'signed-out', name: null };
-  return { state: 'unknown', name };
+  if (probe.loggedIn === false && probe.hasSignIn) return { state: 'signed-out', name: null, nameSource: null };
+  return { state: 'unknown', name, nameSource };
 }
 
 const youtubeProbe = createProbeGate(probeYouTubeLogin);
@@ -2045,6 +2139,8 @@ const youtubeProbe = createProbeGate(probeYouTubeLogin);
 // Kick's own API, called from inside a kick.com page so it carries the session
 // cookies and isn't turned away by Cloudflare (see kick-user.js). Background
 // callers go through kickNameProbe.run(), importers through .fresh().
+// Resolves { name, source } or null; only source 'api' may rename a known
+// account (kickNameToStore).
 async function resolveKickUser() {
   const res = await runInHiddenPage('https://kick.com/', KICK_USER_SCRIPT, 6000);
 
@@ -2057,7 +2153,7 @@ async function resolveKickUser() {
     addLog(`[Auth] Kick name lookup found nothing (${(res.tried || []).join(' | ') || 'no attempts'}${res.title ? '; page=' + res.title : ''}).`);
     return null;
   }
-  return name;
+  return { name, source: res.source };
 }
 
 const kickNameProbe = createProbeGate(resolveKickUser);
@@ -2091,9 +2187,10 @@ async function refreshPlaceholderAccountNames() {
     try { signedIn = hasKickSessionToken(await readKickSessionCookies()); } catch (e) { /* treat as unknown */ }
     if (!signedIn) return;
     const snap = accountEpochs.snapshot('kick', config.accounts);
-    const name = await kickNameProbe.run();
+    const found = await kickNameProbe.run();
     // Signed out, or connected again by an import, while the page loaded.
     if (!accountEpochs.isCurrent(snap, config.accounts)) return;
+    const name = kickNameToStore(snap.name, found);
     if (name) {
       config.accounts.kick = name;
       saveConfig();
@@ -2106,6 +2203,10 @@ async function refreshPlaceholderAccountNames() {
 // Consecutive confirmed signed-out probes. One is a warning; two in a row is
 // what it takes to actually mark the account disconnected.
 let youtubeSignedOutStreak = 0;
+// { stored, name }: a different account name the last live probe reported
+// for the stored name `stored`, which the next one must repeat before the
+// stored name changes (see youtubeRenameDecision). Void once `stored` changes.
+let youtubePendingName = null;
 
 // One check at a time: two overlapping checks would share one probe and count
 // a single signed-out answer twice.
@@ -2118,7 +2219,7 @@ async function runYouTubeSessionHealthCheck() {
   if (config.youtubeEnabled === false) return;
 
   const snap = accountEpochs.snapshot('youtube', config.accounts);
-  const { state, name } = await youtubeProbe.run();
+  const { state, name, nameSource } = await youtubeProbe.run();
   // Signed out, reconnected or renamed while the page loaded: this probe
   // describes a session that is no longer the saved one, in either direction
   // (a stale 'live' would re-add a signed-out account, a stale 'signed-out'
@@ -2134,8 +2235,14 @@ async function runYouTubeSessionHealthCheck() {
     // The page is the only place the real account name is available, so take it
     // while we're here if all we have is the "YouTube User" placeholder, or if
     // it names another account: a background re-sync from the extension can
-    // swap the session, and never loads a page itself.
-    if (name && (isPlaceholderName(snap.name) || !sameAccountName(name, snap.name))) {
+    // swap the session, and never loads a page itself. The name is a page
+    // heuristic, so a real one changes only on a trustworthy, repeated answer
+    // (see youtubeRenameDecision); it used to flip between a handle, a display
+    // name and "Account menu" from one check to the next.
+    const pending = youtubePendingName && youtubePendingName.stored === snap.name ? youtubePendingName.name : null;
+    const decision = youtubeRenameDecision({ stored: snap.name, name, source: nameSource, pending });
+    youtubePendingName = decision.pending ? { stored: snap.name, name: decision.pending } : null;
+    if (decision.rename) {
       config.accounts.youtube = name;
       saveConfig();
       addLog(isPlaceholderName(snap.name)
@@ -2146,6 +2253,7 @@ async function runYouTubeSessionHealthCheck() {
     return;
   }
   if (state === 'unknown') return; // never act on an inconclusive probe
+  youtubePendingName = null;
 
   youtubeSignedOutStreak++;
   if (youtubeSignedOutStreak < 2) {
@@ -2243,14 +2351,18 @@ async function validateSavedSessions() {
         isValid = hasKickSessionToken(await readKickSessionCookies(ses));
       } else if (platform === 'youtube') {
         // Google no longer guarantees the legacy SID/SSID pair is present — modern
-        // sessions can live entirely on the __Secure-*PSID family, and those
-        // cookies rotate. Checking only SID/SSID meant a rotation could look like
-        // a logout and wipe the saved account. Accept any known auth cookie, and
-        // look at google.com too since the session spans both hosts.
+        // sessions can live entirely on the __Secure-*PSID family. Checking only
+        // SID/SSID meant such a session looked like a logout and wiped the saved
+        // account. Any stable sign-in identifier counts, on google.com too since
+        // the session spans both hosts. Not the rotating LOGIN_INFO and
+        // __Secure-*PSIDTS/*PSIDCC alone: they are no session, they have no
+        // fingerprint, so an expiry could leave no marker and every launch
+        // re-added the account only for it to expire, and notify, again.
         const cookies = await readYouTubeAuthCookies(ses);
-        isValid = cookies.some(c => YOUTUBE_AUTH_COOKIE.test(c.name));
+        const fingerprint = youtubeAuthFingerprint(cookies);
+        isValid = fingerprint !== null;
         if (isValid && !config.accounts.youtube && config.youtubeExpiredFingerprint) {
-          if (youtubeAuthFingerprint(cookies) === config.youtubeExpiredFingerprint) {
+          if (fingerprint === config.youtubeExpiredFingerprint) {
             knownExpired = true;
           } else {
             // Different cookies arrived since (a re-sync, a paste, a sign-in
@@ -2302,8 +2414,18 @@ async function validateSavedSessions() {
   }
 }
 
+// The extension folders the dashboard's copy of the config holds: what it last
+// fetched, or what it last saved. A folder main added since (a catalog
+// install) is not in that copy, so a save sent from it must not drop the
+// folder (see rendererExtensions in config-boundary.js).
+let dashboardExtensionsSeen = new Set();
+function noteDashboardExtensions(list) {
+  dashboardExtensionsSeen = new Set(Array.isArray(list) ? list.filter(p => typeof p === 'string' && p) : []);
+}
+
 // IPC Handler Registrations
 ipcMain.handle('get-config', () => {
+  noteDashboardExtensions(config.extensions);
   return config;
 });
 
@@ -2331,9 +2453,18 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
 
     addLog(`[Auth] Opening login modal for ${platform.toUpperCase()}...`);
 
+    // The Google session already in the jar when the window opened. Its SID
+    // is not a sign-in made here; a dead one (the expiry marker's) used to be
+    // "detected" on the first poll, which saved a placeholder, cleared the
+    // marker and turned off the extension's re-sync. Read before the page
+    // loads; undefined if the read fails (then only the marker is excluded).
+    const youtubeAtOpen = p === 'youtube'
+      ? readYouTubeAuthCookies().then(youtubeAuthFingerprint).catch(() => undefined)
+      : null;
+
     // Create the login modal window. Sandboxed: the sandbox changes no web API a
-    // CAPTCHA can see, and twitch-preload.js only needs require('electron')
-    // (it already runs sandboxed in the Twitch GQL window).
+    // CAPTCHA can see, and twitch-preload.js requires nothing from Electron or
+    // Node (it only injects a <script> into the page), so it cannot notice.
     const loginWin = new BrowserWindow({
       width: 650,
       height: 800,
@@ -2414,7 +2545,11 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
           if (cookies.some(c => c.domain && c.domain.includes('twitch.tv'))) return {};
         } else if (p === 'youtube') {
           const googleCookies = await ses.cookies.get({ url: 'https://youtube.com' });
-          if (googleCookies.some(c => c.name === 'SID' || c.name === 'SSID')) return {};
+          if (googleCookies.some(c => c.name === 'SID' || c.name === 'SSID')
+            && isNewYouTubeSignIn(youtubeAuthFingerprint(await readYouTubeAuthCookies(ses)), {
+              atOpen: await youtubeAtOpen,
+              expired: config.youtubeExpiredFingerprint,
+            })) return {};
         } else if (p === 'rumble') {
           const cookies = await ses.cookies.get({ url: 'https://rumble.com' });
           if (cookies.some(c => c.name.includes('session') || c.name === 'u_s')) return {};
@@ -2618,7 +2753,9 @@ ipcMain.handle('open-login-modal', async (event, { platform }) => {
       accountEpochs.bump(p);
       if (p === 'youtube') delete config.youtubeExpiredFingerprint;
       saveConfig();
-      setSignedOut(p, false);
+      // The extension's re-sync would replace this session with the
+      // browser's, whichever account that is (F53).
+      setSignedOut(p, true, 'app-login');
       notifyLoginSuccess(p, username);
     }
 
@@ -2660,52 +2797,11 @@ ipcMain.handle('logout-platform', async (event, { platform }) => {
     saveConfig();
   }
   // Or the extension's next background re-sync would sign it straight back in.
+  // Also ends a re-sync already running (see createSyncTickets).
   setSignedOut(p, true);
 
   try {
-    const ses = session.fromPartition('persist:default');
-    
-    // Find all cookies for the platform's domain and delete them programmatically
-    let domainFilter = '';
-    if (p === 'twitch') domainFilter = 'twitch.tv';
-    else if (p === 'kick') domainFilter = 'kick.com';
-    else if (p === 'youtube') domainFilter = 'google.com';
-    else if (p === 'rumble') domainFilter = 'rumble.com';
-
-    if (domainFilter) {
-      const cookies = await ses.cookies.get({ domain: domainFilter });
-      addLog(`[Auth] Found ${cookies.length} session cookies for ${domainFilter}. Deleting...`);
-      for (const cookie of cookies) {
-        const scheme = cookie.secure ? 'https' : 'http';
-        const domain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
-        const url = `${scheme}://${domain}${cookie.path}`;
-        try {
-          await ses.cookies.remove(url, cookie.name);
-        } catch (cookieErr) {
-          // Ignore
-        }
-      }
-
-      if (p === 'youtube') {
-        // Clear cookies from all Google-related domains for thorough logout
-        const googleDomains = ['youtube.com', 'accounts.google.com', 'myaccount.google.com'];
-        for (const gDomain of googleDomains) {
-          const gCookies = await ses.cookies.get({ domain: gDomain });
-          addLog(`[Auth] Found ${gCookies.length} session cookies for ${gDomain}. Deleting...`);
-          for (const cookie of gCookies) {
-            const scheme = cookie.secure ? 'https' : 'http';
-            const domain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
-            const url = `${scheme}://${domain}${cookie.path}`;
-            try {
-              await ses.cookies.remove(url, cookie.name);
-            } catch (cookieErr) {
-              // Ignore
-            }
-          }
-        }
-      }
-    }
-
+    await purgePlatformCookies(p);
     addLog(`[Auth] Successfully signed out of ${platform.toUpperCase()} and purged cookie jar.`);
     return { success: true };
   } catch (err) {
@@ -2713,6 +2809,40 @@ ipcMain.handle('logout-platform', async (event, { platform }) => {
     return { success: false, error: err.message };
   }
 });
+
+// Deletes every cookie a platform's sign-in lives on. Used by Sign Out, and
+// again when an extension re-sync that was already writing when the user
+// signed out finishes after the first purge.
+async function purgePlatformCookies(p, { quiet = false } = {}) {
+  const ses = session.fromPartition('persist:default');
+
+  // Find all cookies for the platform's domain and delete them programmatically
+  let domainFilter = '';
+  if (p === 'twitch') domainFilter = 'twitch.tv';
+  else if (p === 'kick') domainFilter = 'kick.com';
+  else if (p === 'youtube') domainFilter = 'google.com';
+  else if (p === 'rumble') domainFilter = 'rumble.com';
+  if (!domainFilter) return;
+
+  // Clear cookies from all Google-related domains for thorough logout
+  const domains = p === 'youtube'
+    ? [domainFilter, 'youtube.com', 'accounts.google.com', 'myaccount.google.com']
+    : [domainFilter];
+  for (const d of domains) {
+    const cookies = await ses.cookies.get({ domain: d });
+    if (!quiet) addLog(`[Auth] Found ${cookies.length} session cookies for ${d}. Deleting...`);
+    for (const cookie of cookies) {
+      const scheme = cookie.secure ? 'https' : 'http';
+      const domain = cookie.domain.startsWith('.') ? cookie.domain.substring(1) : cookie.domain;
+      const url = `${scheme}://${domain}${cookie.path}`;
+      try {
+        await ses.cookies.remove(url, cookie.name);
+      } catch (cookieErr) {
+        // Ignore
+      }
+    }
+  }
+}
 
 
 ipcMain.handle('get-twitch-follows', async () => {
@@ -2801,10 +2931,16 @@ ipcMain.handle('save-config', (event, newConfig) => {
   // itself, so a same-length change never reloaded.
   const oldExtensions = JSON.stringify(Array.isArray(config.extensions) ? config.extensions : []);
 
-  const { patch, refused, approvedUsed } = rendererConfigPatch(newConfig, config, { approvedExtensions: approvedExtensionPaths });
+  const { patch, refused, approvedUsed, keptExtensions } = rendererConfigPatch(newConfig, config, {
+    approvedExtensions: approvedExtensionPaths,
+    dashboardExtensions: dashboardExtensionsSeen,
+  });
   for (const r of refused) addLog(`[Config] Ignored ${r.key} from the dashboard: ${r.reason}.`);
+  for (const p of keptExtensions) addLog(`[Config] Kept extension ${p}: it was added after the dashboard last loaded its settings.`);
   // One use each: a folder the user picked is added once.
   for (const p of approvedUsed) approvedExtensionPaths.delete(p);
+  // The dashboard now holds the list it just sent (it does not refetch).
+  if (patch.extensions) noteDashboardExtensions(newConfig.extensions);
   const next = { ...config, ...patch };
   // Before it replaces config or reaches disk (see sanitizeIncomingConfig).
   sanitizeIncomingConfig(next, 'settings');
@@ -2836,6 +2972,10 @@ ipcMain.handle('add-streamer', (event, { platform, username }) => {
   const cleanUsername = String(username ?? '').trim();
   if (!cleanUsername) return { success: false, error: 'Username cannot be empty' };
   platform = String(platform ?? '');
+  // The name goes into scan URLs and the dashboard's cells; a quote, slash or
+  // pasted link used to be stored as is (see config-boundary.js).
+  const nameProblem = channelNameProblem(platform, cleanUsername);
+  if (nameProblem) return { success: false, error: nameProblem };
 
   const exists = config.streamers.some(
     s => streamerPlatform(s) === platform.toLowerCase() && streamerName(s).toLowerCase() === cleanUsername.toLowerCase()
@@ -2960,7 +3100,7 @@ function patchSevenTVManifestForKick(manifestRoot) {
   try {
     const manifestPath = path.join(manifestRoot, 'manifest.json');
     if (!fs.existsSync(manifestPath)) return;
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const manifest = readStagedManifest(manifestRoot);
 
     if (!manifest.host_permissions) manifest.host_permissions = [];
     if (!manifest.host_permissions.includes('*://*.kick.com/*')) {
@@ -2992,23 +3132,6 @@ function getManagedExtensionsRoot() {
 
 function getCatalogEntryInstallPath(id) {
   return path.join(getManagedExtensionsRoot(), id);
-}
-
-// Walk the extracted directory to find the dir that contains manifest.json.
-// Some zips put files at root; uBlock puts them under uBlock0.chromium/.
-function findManifestRoot(dir) {
-  if (fs.existsSync(path.join(dir, 'manifest.json'))) return dir;
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory());
-  for (const e of entries) {
-    const sub = path.join(dir, e.name);
-    if (fs.existsSync(path.join(sub, 'manifest.json'))) return sub;
-  }
-  // One more level for safety
-  for (const e of entries) {
-    const found = findManifestRoot(path.join(dir, e.name));
-    if (found) return found;
-  }
-  return null;
 }
 
 function rmrf(p) {
@@ -3069,24 +3192,8 @@ function downloadBuffer(url) {
   return netGet(url, 'application/octet-stream', { timeoutMs: 120000, maxBytes: 100 * 1024 * 1024 });
 }
 
-// Replace `live` with `staging` so that no failure leaves neither. Renaming the
-// live dir first is what fails on Windows while its files are locked, and that
-// failure happens before anything was changed.
-function swapDirectory(staging, live) {
-  const old = `${live}.old`;
-  rmrf(old);
-  const hadLive = fs.existsSync(live);
-  if (hadLive) fs.renameSync(live, old);
-  try {
-    fs.renameSync(staging, live);
-  } catch (e) {
-    if (hadLive) fs.renameSync(old, live);
-    throw e;
-  }
-  try { rmrf(old); } catch (e) { /* cleared by the next install */ }
-}
-
-const catalogInstallsInFlight = new Set();
+// One install or uninstall per catalog id at a time (see extension-sync.js).
+const catalogInstallLocks = createInstallLocks();
 
 function getInstalledManifestForCatalogEntry(entry) {
   const root = getCatalogEntryInstallPath(entry.id);
@@ -3094,7 +3201,9 @@ function getInstalledManifestForCatalogEntry(entry) {
   const manifestRoot = findManifestRoot(root);
   if (!manifestRoot) return null;
   try {
-    const m = JSON.parse(fs.readFileSync(path.join(manifestRoot, 'manifest.json'), 'utf8'));
+    // Read as the install checked it (a BOM is fine), so an installed copy
+    // is never listed as missing.
+    const m = readStagedManifest(manifestRoot);
     return { path: manifestRoot, version: m.version, name: m.name };
   } catch {
     return null;
@@ -3118,10 +3227,16 @@ ipcMain.handle('list-catalog-extensions', async () => {
 ipcMain.handle('install-catalog-extension', async (event, { id }) => {
   const entry = EXTENSION_CATALOG.find(e => e.id === id);
   if (!entry) return { ok: false, error: `Unknown catalog id: ${id}` };
-  if (catalogInstallsInFlight.has(entry.id)) return { ok: false, error: `${entry.name} is already being installed.` };
-  catalogInstallsInFlight.add(entry.id);
+  const result = await catalogInstallLocks.run(entry.id, () => installCatalogEntry(entry));
+  return result.refused ? { ok: false, error: `${entry.name} is already being installed.` } : result;
+});
 
+async function installCatalogEntry(entry) {
   addLog(`[Catalog] Installing ${entry.name}…`);
+  const installRoot = getCatalogEntryInstallPath(entry.id);
+  // What every failure before the swap leaves behind, said in its error.
+  const keptNote = fs.existsSync(installRoot) ? 'The previously installed version is still installed.' : 'Nothing was installed.';
+  let swapped = false;
   try {
     // Some extensions (7TV) ship the build we need on a specific tag (nightly-release)
     // rather than the stable `latest` release.
@@ -3142,33 +3257,35 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
     // it is unpacked: a truncated or altered download is refused, and the
     // installed version stays as it is.
     const integrity = checkReleaseAsset(zip, asset);
-    if (!integrity.ok) throw new Error(`the download of ${asset.name} failed its integrity check (${integrity.reason}). The installed version was kept`);
+    if (!integrity.ok) throw new Error(`the download of ${asset.name} failed its integrity check (${integrity.reason})`);
     addLog(integrity.verified
       ? `[Catalog] Verified ${asset.name} against the release's sha256 digest.`
       : `[Catalog] ${asset.name} matches the release's size; not hash-verified (${integrity.reason}).`);
 
-    // Build the new copy beside the live one and swap only when it is complete,
-    // so a failed download, a bad archive or a locked file leaves the working
-    // version installed and config.extensions still pointing at it.
-    const installRoot = getCatalogEntryInstallPath(entry.id);
+    // Build the new copy beside the live one and swap only when it is complete
+    // and its manifest checks out, so a failed download, a bad archive, an
+    // unusable manifest or a locked file leaves the working version installed
+    // and config.extensions still pointing at it.
     const staging = `${installRoot}.staging`;
     rmrf(staging);
     let unloaded = [];
+    let manifest;
+    let manifestRoot;
     try {
       addLog(`[Catalog] Extracting ${asset.name}…`);
       const { refused } = extractZipBuffer(zip, staging);
       if (refused.length) addLog(`[Catalog] Skipped ${refused.length} unsafe path(s) in ${asset.name}.`);
-      const stagedManifest = findManifestRoot(staging);
-      if (!stagedManifest) throw new Error('Extracted archive did not contain a manifest.json');
-      // Per-extension post-install patches.
-      if (entry.id === '7tv') patchSevenTVManifestForKick(stagedManifest);
-      // The running copy goes first: a loaded copy kept the old version
-      // running after an update, and on Windows its service worker holds the
-      // folder's files, which makes the rename fail.
-      unloaded = unloadExtensionsUnder(installRoot);
-      swapDirectory(staging, installRoot);
+      ({ manifest, manifestRoot } = promoteStaged(staging, installRoot, {
+        // Per-extension post-install patches.
+        patch: entry.id === '7tv' ? patchSevenTVManifestForKick : null,
+        // The running copy goes first: a loaded copy kept the old version
+        // running after an update, and on Windows its service worker holds
+        // the folder's files, which makes the rename fail.
+        beforeSwap: () => { unloaded = unloadExtensionsUnder(installRoot); },
+      }));
+      swapped = true;
     } catch (e) {
-      rmrf(staging);
+      try { rmrf(staging); } catch (err) { /* removed by the next install */ }
       // The previous version is still on disk: put it back in the session.
       for (const p of unloaded) {
         await loadSingleExtension(p).catch((err) => addLog(`[Catalog] Could not reload the previous ${entry.name}: ${err.message}`));
@@ -3176,14 +3293,10 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
       throw e;
     }
 
-    const manifestRoot = findManifestRoot(installRoot);
-
     // Replace any prior registration of any subpath of installRoot, then add the new manifestRoot
     config.extensions = (Array.isArray(config.extensions) ? config.extensions : []).filter(p => !isInsideDir(p, installRoot));
     config.extensions.push(manifestRoot);
     saveConfig();
-
-    const manifest = JSON.parse(fs.readFileSync(path.join(manifestRoot, 'manifest.json'), 'utf8'));
 
     // Load it into the live session immediately so it works without an app restart.
     try {
@@ -3200,18 +3313,19 @@ ipcMain.handle('install-catalog-extension', async (event, { id }) => {
     addLog(`[Catalog] Installed ${entry.name} v${manifest.version}.`);
     return { ok: true, path: manifestRoot, version: manifest.version, name: manifest.name };
   } catch (err) {
-    addLog(`[Catalog] Install failed for ${entry.name}: ${err.message}`);
-    return { ok: false, error: err.message };
-  } finally {
-    catalogInstallsInFlight.delete(entry.id);
+    // A failed swap whose restore also failed says where the old copy is
+    // (swapDirectory); everything else happened before anything changed.
+    const message = swapped || err.oldCopyAt ? err.message : `${err.message}. ${keptNote}`;
+    addLog(`[Catalog] Install failed for ${entry.name}: ${message}`);
+    return { ok: false, error: message };
   }
-});
+}
 
 ipcMain.handle('uninstall-catalog-extension', async (event, { id }) => {
   const entry = EXTENSION_CATALOG.find(e => e.id === id);
   if (!entry) return { ok: false, error: `Unknown catalog id: ${id}` };
   // An uninstall must not delete the folder an install is writing.
-  if (catalogInstallsInFlight.has(entry.id)) return { ok: false, error: `${entry.name} is being installed; try again when it finishes.` };
+  if (catalogInstallLocks.has(entry.id)) return { ok: false, error: `${entry.name} is being installed; try again when it finishes.` };
   const installRoot = getCatalogEntryInstallPath(entry.id);
   config.extensions = (Array.isArray(config.extensions) ? config.extensions : []).filter(p => !isInsideDir(p, installRoot));
   saveConfig();
@@ -3279,10 +3393,6 @@ ipcMain.handle('popout-stream', (event, { platform, username, url }) => {
   // Keep the "name · PLATFORM" label: this window has no address bar, so the
   // title is the only thing telling the user what they are looking at.
   win.on('page-title-updated', (e) => e.preventDefault());
-  // Same per-host zoom map as the cells (see web-contents-created).
-  win.webContents.on('did-finish-load', () => {
-    try { win.webContents.setZoomLevel(0); } catch (e) { /* closing */ }
-  });
   win.webContents.setUserAgent(ses.getUserAgent());
   // `url` comes from the renderer (the cell's current page). Only a platform
   // page may be loaded into an always-on-top window on the logged-in session.
@@ -3341,6 +3451,11 @@ ipcMain.handle('update-active-tabs', (event, tabsList) => {
 // Lets the user move a setup between machines and keep a copy of their watch
 // history somewhere other than the app's own data directory.
 ipcMain.handle('export-config', async () => {
+  // Running on defaults: the "backup" would be empty, and could replace that
+  // day's real one in Documents.
+  if (configWriteLocked) {
+    return { success: false, error: 'Your settings file could not be read at startup, so Stream Lurker is running without it and there is nothing to export until it can be read. Choose Retry, or restart Stream Lurker.' };
+  }
   try {
     const stamp = new Date().toISOString().slice(0, 10);
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
@@ -3592,15 +3707,6 @@ const scheduleSync = createScheduleSync({
   log: addLog,
 });
 
-// twitch-preload.js still asks for a Twitch device id at document start, and
-// sendSync blocks the page until it is answered. Nothing records one any
-// more: only the removed hidden Drops window ever set it, so the answer was
-// always null. Answered until the preload stops asking.
-ipcMain.on('get-twitch-unique-id-sync', (event) => {
-  event.returnValue = null;
-});
-
-
 // Open a URL in the user's default browser. The renderer can't use Electron's
 // shell directly under context isolation, so it routes through here.
 ipcMain.handle('open-external', async (event, url) => {
@@ -3660,6 +3766,10 @@ ipcMain.handle('set-twitch-token', async (event, rawInput) => {
     if (!username) {
       return { success: false, error: twitchUserFailureMessage(check, 'token') };
     }
+    // Kept from the extension's re-sync, which would put the browser's
+    // Twitch session back over this one (F53). Before the writes below, so a
+    // re-sync already running stops instead of finishing on top of them.
+    setSignedOut('twitch', true, 'app-login');
 
     // Ensure a `login` cookie is present so the web client knows the username.
     if (!pairs.some(p => p.name.toLowerCase() === 'login')) {
@@ -3699,7 +3809,6 @@ ipcMain.handle('set-twitch-token', async (event, rawInput) => {
     config.accounts.twitch = username;
     accountEpochs.bump('twitch');
     saveConfig();
-    setSignedOut('twitch', false);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('login-success', { platform: 'twitch', username });
     }
@@ -3721,8 +3830,9 @@ ipcMain.handle('set-google-cookies', async (event, blob) => {
   try {
     const parsed = assignPastedYouTubeDomains(parseCookieBlob(blob));
     const result = await importGoogleSession(parsed, { paste: true });
-    // Connected again by hand: the extension may re-sync YouTube again.
-    if (result && result.success) setSignedOut('youtube', false);
+    // Connected by hand in the app: the extension's re-sync would replace
+    // these cookies with the browser's (F53).
+    if (result && result.success) setSignedOut('youtube', true, 'app-login');
     return result;
   } catch (err) {
     addLog(`[Auth] Google cookie import failed: ${err.message}`);
@@ -3765,6 +3875,60 @@ async function writeCookieList(cookieList, defaultDomain) {
   return count;
 }
 
+// Every cookie on the hosts a YouTube import writes to (see youtubeJarCookies).
+async function readYouTubeJar(ses = session.fromPartition('persist:default')) {
+  return youtubeJarCookies([
+    ...await ses.cookies.get({ domain: 'youtube.com' }),
+    ...await ses.cookies.get({ domain: 'google.com' }),
+  ]);
+}
+
+// Undoes a paste YouTube reported signed out: the YouTube/Google cookies go
+// back to `jarBefore` (readYouTubeJar before the paste), cookies the probe
+// page set since included, and the expiry marker to what it was. When that
+// cannot be done completely, YouTube is disconnected instead, so the card
+// never shows it connected over a jar that is signed out. Returns
+// { message, userMessage } saying which happened.
+async function restorePastedOver(jarBefore, markerBefore) {
+  if (jarBefore) {
+    try {
+      const ses = session.fromPartition('persist:default');
+      for (const c of await readYouTubeJar(ses)) {
+        await ses.cookies.remove(removalUrl(c), c.name);
+      }
+      const back = jarBefore.length ? await writeCookieList(jarBefore, '.youtube.com') : 0;
+      if (back === jarBefore.length) {
+        if (markerBefore) config.youtubeExpiredFingerprint = markerBefore;
+        else delete config.youtubeExpiredFingerprint;
+        saveConfig();
+        return jarBefore.length
+          ? { message: `put back the ${back} cookies that were there before`, userMessage: 'Nothing from the paste was kept: your previous YouTube session was put back as it was.' }
+          : { message: 'removed them again', userMessage: 'Nothing from the paste was kept.' };
+      }
+      addLog(`[Auth] Put back only ${back} of the ${jarBefore.length} YouTube cookies the paste had replaced.`);
+    } catch (e) {
+      addLog(`[Auth] Could not put back the YouTube cookies the paste replaced: ${e.message}`);
+    }
+  }
+  // The jar may still hold the pasted, dead session: mark it like an expiry
+  // (validateSavedSessions) and show YouTube disconnected.
+  try {
+    const fingerprint = youtubeAuthFingerprint(await readYouTubeAuthCookies());
+    if (fingerprint) config.youtubeExpiredFingerprint = fingerprint;
+  } catch (e) { /* no marker */ }
+  const hadAccount = !!(config.accounts && config.accounts.youtube);
+  if (hadAccount) delete config.accounts.youtube;
+  accountEpochs.bump('youtube');
+  saveConfig();
+  if (hadAccount && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('session-expired', { platform: 'youtube' });
+  }
+  return {
+    message: 'the previous session could not be put back, so YouTube is now disconnected',
+    userMessage: 'Your previous YouTube session could not be put back, so YouTube now shows as disconnected.',
+  };
+}
+
 function notifyLoginSuccess(platform, username) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('login-success', { platform, username });
@@ -3780,6 +3944,7 @@ function resolveTwitchUser(token) {
 // Import functions used by the extension receiver. Each takes an array of cookie
 // objects (as returned by chrome.cookies.getAll) for that platform.
 async function importTwitchSession(cookieList, opts = {}) {
+  const ticket = autoImportTicket('twitch', opts);
   const list = (cookieList || [])
     .filter(c => c && c.name && /(^|\.)twitch\.tv$/.test((c.domain || '').replace(/^\./, '')))
     .map(c => ({ ...c, httpOnly: c.name.toLowerCase() === 'auth-token' ? false : !!c.httpOnly }));
@@ -3790,14 +3955,17 @@ async function importTwitchSession(cookieList, opts = {}) {
   const check = await resolveTwitchUser(token);
   const username = check.login;
   if (!username) {
-    addLog(`[Ext] Twitch ${opts.auto ? 're-sync' : 'import'} not applied: ${describeTwitchUserResult(check)}.`);
+    // A failed re-sync is logged by the receiver, at most once in a while.
+    if (!opts.auto) addLog(`[Ext] Twitch import not applied: ${describeTwitchUserResult(check)}.`);
     return { success: false, error: twitchUserFailureMessage(check, 'session') };
   }
+  if (!ticket.valid()) return ticket.refuse();
   accountEpochs.bump('twitch');
   if (!list.some(c => c.name.toLowerCase() === 'login')) {
     list.push({ name: 'login', value: username, domain: '.twitch.tv', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' });
   }
   const setCount = await writeCookieList(list, '.twitch.tv');
+  if (!ticket.valid()) return ticket.undo();
   config.accounts = config.accounts || {};
   const previous = config.accounts.twitch;
   config.accounts.twitch = username;
@@ -3815,6 +3983,7 @@ async function importTwitchSession(cookieList, opts = {}) {
 // opts.auto: the extension's background re-sync. opts.paste: the Import &
 // Verify modal, which must not report success for cookies YouTube rejects.
 async function importGoogleSession(cookieList, opts = {}) {
+  const ticket = autoImportTicket('youtube', opts);
   // C1: youtube.com (any subdomain), and exactly google.com / accounts.google.com.
   const relevant = (cookieList || []).filter(c => c && c.name && isYouTubeCookieDomain(c.domain));
   if (!relevant.length) {
@@ -3829,10 +3998,22 @@ async function importGoogleSession(cookieList, opts = {}) {
       ? 'Those cookies are missing Google\'s httpOnly sign-in cookies (__Secure-1PSID, or SID with HSID and SSID). A copy of document.cookie cannot include them: use a cookie-export extension (Cookie-Editor, or Get cookies.txt LOCALLY) while signed in to youtube.com, and paste its whole export.'
       : 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).' };
   }
+  if (!ticket.valid()) return ticket.refuse();
+  // A paste YouTube then rejects must not leave the user worse off: the jar
+  // it is about to change is kept here and put back (restorePastedOver).
+  // null when it could not be read.
+  let jarBefore = null;
+  if (opts.paste) {
+    try { jarBefore = await readYouTubeJar(); } catch (e) { addLog(`[Auth] Could not keep a copy of the current YouTube cookies: ${e.message}`); }
+  }
+  const markerBefore = config.youtubeExpiredFingerprint;
   accountEpochs.bump('youtube');
   const setCount = await writeCookieList(relevant, '.youtube.com');
+  if (!ticket.valid()) return ticket.undo();
   if (!setCount) {
-    return { success: false, error: 'None of those cookies could be saved (see the activity log). Export them again and paste the whole export.' };
+    // The same-named cookies were cleared before the writes failed.
+    const restored = opts.paste ? await restorePastedOver(jarBefore, markerBefore) : null;
+    return { success: false, error: `None of those cookies could be saved (see the activity log).${restored ? ` ${restored.userMessage}` : ''} Export them again and paste the whole export.` };
   }
 
   // No net.fetch check here on purpose: fetching youtube.com with the cookie jar
@@ -3849,11 +4030,21 @@ async function importGoogleSession(cookieList, opts = {}) {
   let probe = null;
   if (opts.paste || !opts.auto || isPlaceholderName(config.accounts.youtube)) {
     probe = await youtubeProbe.fresh();
+    if (!ticket.valid()) return ticket.undo();
   }
   // A real page says these cookies are signed out. A paste must not report
   // success, and a background re-sync must not bring back an account the
   // health check already expired (it would expire, and notify, all over again).
-  if (probe && probe.state === 'signed-out' && (opts.paste || (opts.auto && !config.accounts.youtube))) {
+  if (probe && probe.state === 'signed-out' && opts.paste) {
+    // The dead cookies came from the paste, so the user's previous session
+    // (possibly a working one) goes back in their place. If that fails, the
+    // account is disconnected instead, so the card never shows YouTube
+    // connected over a jar that is signed out. Either way the error says which.
+    const restored = await restorePastedOver(jarBefore, markerBefore);
+    addLog(`[Auth] Wrote ${setCount} pasted Google/YouTube cookies, but YouTube shows them signed out; ${restored.message}.`);
+    return { success: false, error: `YouTube still shows you as signed out with those cookies. ${restored.userMessage} Sign in on youtube.com in your browser, export the cookies again, and paste the whole export.` };
+  }
+  if (probe && probe.state === 'signed-out' && opts.auto && !config.accounts.youtube) {
     // Remembered like a health-check expiry, so the next launch does not
     // rebuild the account from them either (validateSavedSessions).
     try {
@@ -3861,10 +4052,8 @@ async function importGoogleSession(cookieList, opts = {}) {
       if (fingerprint) config.youtubeExpiredFingerprint = fingerprint;
     } catch (e) { /* no marker */ }
     saveConfig();
-    addLog(`[${opts.paste ? 'Auth' : 'Ext'}] Wrote ${setCount} Google/YouTube cookies, but YouTube shows them signed out; not connecting the account.`);
-    return { success: false, error: opts.paste
-      ? 'YouTube still shows you as signed out with those cookies. Sign in on youtube.com in your browser, export the cookies again, and paste the whole export.'
-      : 'YouTube shows this session as signed out in Stream Lurker, so YouTube stays disconnected. Sign in again on youtube.com, then click Connect YouTube.' };
+    addLog(`[Ext] Wrote ${setCount} Google/YouTube cookies, but YouTube shows them signed out; not connecting the account.`);
+    return { success: false, error: 'YouTube shows this session as signed out in Stream Lurker, so YouTube stays disconnected. Sign in again on youtube.com, then click Connect YouTube.' };
   }
   const previous = config.accounts.youtube;
   if (probe) config.accounts.youtube = probe.name || config.accounts.youtube || placeholderName('youtube');
@@ -3888,20 +4077,23 @@ const KICK_NAME_RECHECK_MS = 12 * 60 * 60 * 1000;
 let kickNameCheckedAt = 0;
 
 async function importKickSession(cookieList, opts = {}) {
+  const ticket = autoImportTicket('kick', opts);
   const relevant = (cookieList || []).filter(c => /(^|\.)kick\.com$/.test((c.domain || '').replace(/^\./, '').toLowerCase()));
   if (!relevant.length) return { success: false, error: 'No kick.com cookies found. Open kick.com (logged in) first.' };
   // Checked before anything is written. Without session_token the browser is
   // signed out of Kick (kick_session is a visitor cookie), and writing its
   // anonymous cookies would replace a session the app may still hold. A
-  // background re-sync then changes nothing, including the saved account.
+  // background re-sync then changes nothing, including the saved account;
+  // the receiver logs that, at most once in a while, instead of every 30 min.
   if (!hasKickSessionToken(relevant)) {
-    if (opts.auto) addLog('[Ext] Kick re-sync skipped: the browser is not signed in to kick.com; kept the app\'s current Kick session.');
     return { success: false, error: opts.auto
       ? 'Not signed in to kick.com in this browser; Stream Lurker kept its current Kick session.'
       : 'You are not signed in to kick.com in this browser. Sign in there, then click Connect Kick again.' };
   }
+  if (!ticket.valid()) return ticket.refuse();
   accountEpochs.bump('kick');
   const setCount = await writeCookieList(relevant, '.kick.com');
+  if (!ticket.valid()) return ticket.undo();
   config.accounts = config.accounts || {};
   const previous = config.accounts.kick;
 
@@ -3911,8 +4103,12 @@ async function importKickSession(cookieList, opts = {}) {
   // (Comparing cookie values cannot tell: Kick rotates them on every request.)
   const recheck = opts.auto && Date.now() - kickNameCheckedAt >= KICK_NAME_RECHECK_MS;
   if (!opts.auto || isPlaceholderName(config.accounts.kick) || recheck) {
-    const resolved = await kickNameProbe.fresh();
+    const found = await kickNameProbe.fresh();
     kickNameCheckedAt = Date.now();
+    if (!ticket.valid()) return ticket.undo();
+    // A name read off the page (not Kick's API) never replaces a real one:
+    // with a stale session it is a featured streamer's.
+    const resolved = kickNameToStore(config.accounts.kick, found);
     if (resolved) config.accounts.kick = resolved;
     else if (!config.accounts.kick) config.accounts.kick = placeholderName('kick');
   }
@@ -3943,19 +4139,95 @@ function getPairingCode() {
   return config.extensionPairingCode;
 }
 
-// C1: a platform the user signed out of in the app. The extension's automatic
-// re-sync is refused for it (409 SIGNED_OUT) until the user connects it again
-// by hand, whichever way they do that. Persisted: a restart must not undo a
-// sign-out.
+// C1: a platform whose extension auto re-sync is refused (409 SIGNED_OUT)
+// until the user clicks Connect in the extension: one they signed out of in
+// the app (reason 'signed-out'), and one they connected inside the app
+// ('app-login'), since a re-sync would replace that session with whatever
+// account the browser holds (F53). Persisted: a restart must not undo either.
 const SIGN_OUT_PLATFORMS = ['twitch', 'kick', 'youtube', 'rumble'];
-function setSignedOut(platform, signedOut) {
+const PLATFORM_LABEL = { twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', rumble: 'Rumble' };
+function setSignedOut(platform, signedOut, reason = 'signed-out') {
   const p = String(platform || '').toLowerCase();
-  if (!SIGN_OUT_PLATFORMS.includes(p) || isSignedOutIn(config.signedOutPlatforms, p) === signedOut) return;
-  config.signedOutPlatforms = withSignedOut(config.signedOutPlatforms, p, signedOut);
+  if (!SIGN_OUT_PLATFORMS.includes(p)) return;
+  // Also ends any automatic import already running for it.
+  if (signedOut) syncTickets.bump(p);
+  const current = signedOutReasonIn(config.signedOutPlatforms, p);
+  if (signedOut ? current === reason : current === null) return;
+  config.signedOutPlatforms = withSignedOut(config.signedOutPlatforms, p, signedOut, Date.now(), reason);
   saveConfig();
+  // Only worth saying to someone whose extension re-syncs this platform.
+  if (signedOut && reason === 'app-login' && extensionAutoSync[p]) {
+    addLog(`[Ext] The browser extension will no longer re-sync ${PLATFORM_LABEL[p]}, so it cannot replace the session you just connected here. Click Connect ${PLATFORM_LABEL[p]} in the extension to turn it back on.`);
+  }
 }
 
-const RECEIVER_PORTS = [47100, 47101, 47102, 47103, 47104];
+// See createSyncTickets (account-state.js).
+const syncTickets = createSyncTickets();
+
+// For one import: valid() while it may still write, refuse() before anything
+// was written, undo() after. A Sign Out's own purge may have run before this
+// import's writes landed, so undo() purges again; a login made in the app
+// meanwhile keeps its cookies.
+function autoImportTicket(platform, opts) {
+  const ticket = syncTickets.take(platform, {
+    auto: !!(opts && opts.auto),
+    isBlocked: (p) => isSignedOutIn(config.signedOutPlatforms, p),
+  });
+  // SIGNED_OUT only while re-sync is still off: had the user already clicked
+  // Connect in the extension again, it would make the extension drop the
+  // platform they just reconnected.
+  const refuse = () => {
+    const reason = signedOutReasonIn(config.signedOutPlatforms, platform);
+    return reason
+      ? { success: false, code: 'SIGNED_OUT', error: autoSyncRefusalFor(reason) }
+      : { success: false, error: `Your ${PLATFORM_LABEL[platform]} sign-in in Stream Lurker changed while this re-sync ran, so it was not applied.` };
+  };
+  return {
+    valid: ticket.valid,
+    refuse,
+    async undo() {
+      if (signedOutReasonIn(config.signedOutPlatforms, platform) === 'signed-out') {
+        try {
+          await purgePlatformCookies(platform, { quiet: true });
+        } catch (err) {
+          addLog(`[Ext] Could not remove the cookies of a ${PLATFORM_LABEL[platform]} re-sync that finished after Sign Out: ${err.message}`);
+        }
+      }
+      addLog(`[Ext] Dropped a ${PLATFORM_LABEL[platform]} re-sync from the browser extension that was still running when its automatic re-sync was turned off.`);
+      return refuse();
+    },
+  };
+}
+
+// F96: what the extension's automatic re-sync last did, for Platform Logins.
+// In memory: it describes this run. The platform comes from the receiver's
+// allowlist and the error is the app's own text, never the request's.
+const extensionAutoSync = {};
+let extensionLastAutoSync = null;
+let extensionCodeRejectedAt = 0;
+// One line per platform per reason every few hours: the extension retries
+// every 30 minutes, for as long as the problem lasts.
+const AUTO_SYNC_LOG_INTERVAL_MS = 3 * 60 * 60 * 1000;
+const autoSyncLogThrottle = createLogThrottle({ intervalMs: AUTO_SYNC_LOG_INTERVAL_MS, maxKeys: 50 });
+function recordAutoSync({ platform, ok, error, status }) {
+  const entry = { at: Date.now(), ok: !!ok, error: ok ? '' : String(error || '') };
+  if (!ok && autoSyncLogThrottle.shouldLog(`${platform}|${entry.error}`)) {
+    addLog(`[Ext] Auto re-sync of ${PLATFORM_LABEL[platform] || platform} rejected: ${entry.error}`);
+  }
+  // A 409 is the user's own Sign Out (or in-app login) taking effect, and the
+  // extension stops re-syncing that platform: nothing to warn them about.
+  if (status === 409) return;
+  extensionAutoSync[platform] = entry;
+  extensionLastAutoSync = { platform, ...entry };
+}
+
+// 47100-47104 first, in this order: an extension installed before the
+// fallbacks existed only ever looks there. The rest are the extension's own
+// fallbacks (extension/connector.js PORTS), thousands apart, because Hyper-V,
+// WSL and Docker reserve ports in blocks that can cover all five first ones
+// (G2.4). Every port here must be in the extension's list.
+const RECEIVER_PORTS = [47100, 47101, 47102, 47103, 47104, 43100, 39100, 35100, 31100];
+const LEGACY_RECEIVER_PORTS = RECEIVER_PORTS.slice(0, 5);
 // Reservations (Hyper-V, WSL, Docker) change across reboots and service
 // restarts, and the app runs for weeks: try again rather than once.
 const RECEIVER_RETRY_MS = 10 * 60 * 1000;
@@ -3972,8 +4244,10 @@ const handleReceiverRequest = createReceiverHandler({
   getPairingCode,
   guard: pairingGuard,
   importers: { twitch: importTwitchSession, youtube: importGoogleSession, kick: importKickSession },
-  isSignedOut: (platform) => isSignedOutIn(config.signedOutPlatforms, platform),
+  isSignedOut: (platform) => autoSyncRefusalFor(signedOutReasonIn(config.signedOutPlatforms, platform)),
   onManualImport: (platform) => setSignedOut(platform, false),
+  onAutoAttempt: recordAutoSync,
+  onCodeRejected: () => { extensionCodeRejectedAt = Date.now(); },
   log: addLog,
 });
 
@@ -3987,16 +4261,19 @@ function startCookieReceiver() {
     onRuntimeError: (err) => addLog(`[Ext] Cookie receiver error: ${err && err.message}`),
   }).then(({ server, port, errors }) => {
     cookieReceiverStarting = false;
+    const detail = (errors || []).map(e => `${e.port} ${e.code}`).join(', ');
     if (server) {
       cookieReceiver = server;
       cookieReceiverPort = port;
       cookieReceiverError = '';
       addLog(`[Ext] 1-click login receiver on 127.0.0.1:${port}.`);
+      if (!LEGACY_RECEIVER_PORTS.includes(port)) {
+        addLog(`[Ext] Ports ${LEGACY_RECEIVER_PORTS[0]}-${LEGACY_RECEIVER_PORTS[LEGACY_RECEIVER_PORTS.length - 1]} were not available (${detail}). A browser extension loaded before this update only looks there: reload it on its extensions page so it finds port ${port}.`);
+      }
       return;
     }
-    const detail = errors.map(e => `${e.port} ${e.code}`).join(', ');
     cookieReceiverError = `No port could be opened (${detail}).`;
-    addLog(`[Ext] Could not open the 1-click login receiver on any of ports ${RECEIVER_PORTS[0]}-${RECEIVER_PORTS[RECEIVER_PORTS.length - 1]} (${detail}). The browser extension cannot connect; trying again in ${RECEIVER_RETRY_MS / 60000} minutes.`);
+    addLog(`[Ext] Could not open the 1-click login receiver on any of its ${RECEIVER_PORTS.length} ports (${detail}). The browser extension cannot connect; trying again in ${RECEIVER_RETRY_MS / 60000} minutes.`);
     setTimeout(startCookieReceiver, RECEIVER_RETRY_MS);
   }).catch((err) => {
     cookieReceiverStarting = false;
@@ -4018,7 +4295,14 @@ ipcMain.handle('get-extension-info', () => ({
   // Set when no port could be bound, so Platform Logins can say why the
   // extension finds nothing.
   receiverError: cookieReceiverError,
-  extensionPath: getExtensionPath()
+  extensionPath: getExtensionPath(),
+  // F96, for "Extension last synced X ago" and a warning when it failed:
+  // the latest automatic re-sync { at, platform, ok, error } (null before
+  // the first this run), the latest per platform { at, ok, error }, and when
+  // an import last came with a wrong pairing code (0 if never).
+  lastAutoSync: extensionLastAutoSync,
+  autoSync: { ...extensionAutoSync },
+  codeRejectedAt: extensionCodeRejectedAt,
 }));
 
 // A fresh 128-bit code, for a code that was shared or leaked. The paired
@@ -4101,10 +4385,24 @@ ipcMain.handle('open-clip-window', async (event, url) => {
 });
 
 
-// Always settles: every request has a deadline (see schedule-sync.js).
-ipcMain.handle('sync-platform-schedules', async () => scheduleSync.syncSchedules({
-  twitch: monitoredUsernames('twitch'),
-  youtube: monitoredUsernames('youtube'),
-  kick: monitoredUsernames('kick'),
-}));
+// Always settles: every request has a deadline (see schedule-sync.js). Main
+// stores the merged list itself: the dashboard used to save it by sending
+// back its whole config snapshot from page load, which on a timer would
+// revert everything main changed since. Resolves { events, failed, ok, saved }.
+ipcMain.handle('sync-platform-schedules', async () => {
+  const result = await scheduleSync.syncSchedules({
+    twitch: monitoredUsernames('twitch'),
+    youtube: monitoredUsernames('youtube'),
+    kick: monitoredUsernames('kick'),
+    previous: config.syncedCalendarEvents,
+  });
+  const saved = shouldStoreSchedule(result);
+  if (saved) {
+    config.syncedCalendarEvents = result.events;
+    saveConfig();
+  }
+  return { ...result, saved };
+});
 
+// Last statement: see the uncaughtException listener at the top.
+mainScript.loaded();

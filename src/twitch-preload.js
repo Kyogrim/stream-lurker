@@ -1,11 +1,13 @@
-// Preload script for Twitch background GQL helper window
+// Preload for the platform login window (open-login-modal in main.js). The
+// dashboard sends Kick there, and Rumble while it is disabled; Twitch and
+// YouTube use cookie import instead. It injects the stealth patches below into
+// the page's main world at document start, so the login page sees a
+// fingerprint consistent with the spoofed UA. It needs nothing from Electron:
+// a synchronous IPC here would block every page load in the window until main
+// answers.
 try {
-  const { ipcRenderer, webFrame } = require('electron');
-  const uniqueIdVal = ipcRenderer.sendSync('get-twitch-unique-id-sync') || '';
-
   const code = `
     (() => {
-      const PRELOAD_UNIQUE_ID = ${JSON.stringify(uniqueIdVal)};
       // -------------------------------------------------------------
       // Stealth: Native-looking NavigatorUAData & toString() bypass
       // -------------------------------------------------------------
@@ -454,33 +456,6 @@ try {
           }
         } catch (keyboardErr) {
           console.error('[Stealth] Failed to mock keyboard layout:', keyboardErr);
-        }
-
-        // Lock localStorage device IDs to the unique_id cookie
-        try {
-          const originalGetItem = Storage.prototype.getItem;
-          defineNativeMethod(Storage.prototype, 'getItem', 'Storage', function (key) {
-            if (key === 'local_storage_device_id' || key === 'k-device-id' || key === 'local_copy_unique_id') {
-              const uid = PRELOAD_UNIQUE_ID;
-              if (uid) return JSON.stringify(uid);
-            }
-            return originalGetItem.call(this, key);
-          });
-
-          const originalSetItem = Storage.prototype.setItem;
-          defineNativeMethod(Storage.prototype, 'setItem', 'Storage', function (key, value) {
-            if (key === 'local_storage_device_id' || key === 'k-device-id' || key === 'local_copy_unique_id') {
-              const uid = PRELOAD_UNIQUE_ID;
-              if (uid) {
-                return originalSetItem.call(this, key, JSON.stringify(uid));
-              }
-            }
-            return originalSetItem.call(this, key, value);
-          });
-          
-          console.warn('[Stealth] Locked localStorage device IDs to unique_id cookie successfully. ID: "' + PRELOAD_UNIQUE_ID + '"');
-        } catch (storageErr) {
-          console.error('[Stealth] Failed to lock localStorage device IDs:', storageErr);
         }
 
         // -------------------------------------------------------------

@@ -66,7 +66,7 @@
         </button>
         <button class="nav-btn" data-tab="extensions">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-          Adblock & Extensions
+          Extensions
         </button>
         <button class="nav-btn" data-tab="clips">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -212,9 +212,14 @@
           <p class="ext-desc">Twitch, YouTube and Kick block signing in from inside apps. The free <b>Stream Lurker Connector</b> browser extension imports your already-logged-in session in one click — no copy-pasting cookies.</p>
           <ol class="ext-steps">
             <li>Click <b>Open Extension Folder</b>, then in your browser go to <b>Extensions → Developer mode → Load unpacked</b> and select that folder.</li>
-            <li>Open the extension and enter this pairing code: <code id="ext-pairing-code">…</code> <span class="ext-conn" id="ext-conn-status"></span></li>
+            <li>Open the extension and enter this pairing code: <code id="ext-pairing-code">…</code>
+              <button id="ext-copy-code" class="btn btn-sm ext-code-btn" type="button" title="Copy the pairing code">Copy</button>
+              <button id="ext-new-code" class="btn btn-sm ext-code-btn" type="button" title="Replace the pairing code, for example if someone else has seen it. The extension then needs the new code.">New code</button>
+              <span class="ext-conn" id="ext-conn-status"></span></li>
             <li>Log in to Twitch / YouTube / Kick in your browser, then click <b>Connect</b> in the extension.</li>
           </ol>
+          <p class="ext-note hidden" id="ext-panel-note" role="status" aria-live="polite"></p>
+          <p class="ext-sync hidden" id="ext-sync-status" aria-live="polite"></p>
           <p class="ext-fallback">Prefer to do it manually? The <b>Connect Account</b> buttons below still work (paste cookies).</p>
         </div>
 
@@ -613,8 +618,8 @@
       <!-- Extensions Tab -->
       <section id="tab-extensions" class="tab-content">
         <div class="tab-header">
-          <h2>Adblock & Extensions Manager</h2>
-          <p>Manage unpacked Chrome extensions (like uBlock Origin) to load inside stream containers automatically.</p>
+          <h2>Extensions Manager</h2>
+          <p>Manage unpacked Chrome extensions that load inside every stream container automatically.</p>
         </div>
 
         <!-- Recommended Extensions Catalog -->
@@ -633,15 +638,18 @@
           <div class="glass-panel ext-controller-card">
             <h3>Load Chrome Extensions</h3>
             <p class="description">
-              Stream Lurker containers are secure, isolated browser environments. To block ads (like Twitch pre-rolls/mid-rolls) or customize layouts, you can load unpacked Chrome extensions.
+              Stream Lurker containers are isolated browser environments. You can load unpacked Chrome extensions into them, for example to add chat emotes or change how a page looks.
+            </p>
+            <p class="description">
+              Ad blockers do not block ads here. uBlock Origin and similar extensions load, but the embedded browser does not let them block network requests, and Twitch and Kick put their stream ads inside the video itself.
             </p>
             
             <div class="quick-guide">
-              <h4>Quick Guide to Install uBlock Origin (Adblock):</h4>
+              <h4>Quick Guide to Load an Unpacked Extension:</h4>
               <ol>
-                <li>Download the unpacked uBlock Origin source zip from <a href="#" data-external-url="https://github.com/gorhill/uBlock/releases">uBlock Origin Releases</a> (e.g., <code>uBlock0_x.x.x.chromium.zip</code>).</li>
+                <li>Download the extension's Chromium build as a ZIP, usually from the project's releases page.</li>
                 <li>Extract the ZIP file into a permanent folder on your computer.</li>
-                <li>Click the <strong>Add Unpacked Extension</strong> button below and select that extracted folder!</li>
+                <li>Click the <strong>Add Unpacked Extension Folder</strong> button below and select the folder that contains <code>manifest.json</code>. Open streams reload to pick it up.</li>
               </ol>
             </div>
 

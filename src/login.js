@@ -3,6 +3,7 @@
 
 import { PLATFORMS, state, appendLogMessage } from './state.js';
 import { renderFollowsList } from './follows.js';
+import { receiverStatus, extensionSyncNotice, folderOpenFailure } from './extension-status.js';
 
 function setConnectionUI(platform, connected, username) {
   const disconnectedCard = document.getElementById(`${platform}-disconnected-state`);
@@ -199,24 +200,118 @@ function setupTwitchImportModal() {
 }
 
 // ── 1-click login extension panel ────────────────────────────────────────────
+const RECEIVER_TONE_COLORS = {
+  ok: 'var(--lime-color, #84cc16)',
+  error: '#ef4444',
+  muted: 'var(--text-muted, #a1a1aa)',
+};
+
+// A one-line note under the steps (copy, new code, folder errors).
+function setExtensionNote(text, tone = 'ok') {
+  const el = document.getElementById('ext-panel-note');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = `ext-note ${tone}`;
+  el.classList.toggle('hidden', !text);
+}
+
+// Bumped by each new code, so an info read that started before it cannot put
+// the old code back on screen.
+let pairingCodeGen = 0;
+
+function showPairingCode(code) {
+  const codeEl = document.getElementById('ext-pairing-code');
+  if (!codeEl) return;
+  codeEl.textContent = code || '—';
+  // What Copy puts on the clipboard; never the placeholder dash.
+  codeEl.dataset.code = code || '';
+}
+
+// Runs at setup and every time Platform Logins is opened: the receiver can
+// come up late (it retries), and the last automatic sync changes over time.
+async function refreshExtensionInfo() {
+  const connEl = document.getElementById('ext-conn-status');
+  const syncEl = document.getElementById('ext-sync-status');
+  const gen = pairingCodeGen;
+  let info;
+  try {
+    info = await window.api.getExtensionInfo();
+  } catch (e) {
+    return;
+  }
+  if (gen === pairingCodeGen) showPairingCode(info?.pairingCode);
+  if (connEl) {
+    const r = receiverStatus(info);
+    connEl.textContent = r.text;
+    connEl.style.color = RECEIVER_TONE_COLORS[r.tone];
+  }
+  if (syncEl) {
+    // Per platform, not just the latest attempt: see extensionSyncNotice.
+    const notice = extensionSyncNotice(info);
+    syncEl.textContent = notice ? notice.text : '';
+    syncEl.classList.toggle('warn', !!notice?.warn);
+    syncEl.classList.toggle('hidden', !notice);
+  }
+}
+
 async function setupExtensionPanel() {
   const codeEl = document.getElementById('ext-pairing-code');
-  const connEl = document.getElementById('ext-conn-status');
   const folderBtn = document.getElementById('ext-open-folder');
+  const copyBtn = document.getElementById('ext-copy-code');
+  const newCodeBtn = document.getElementById('ext-new-code');
   if (!codeEl) return;
+  codeEl.dataset.code = '';
 
-  folderBtn?.addEventListener('click', () => window.api.openExtensionFolder());
-
-  try {
-    const info = await window.api.getExtensionInfo();
-    codeEl.textContent = info?.pairingCode || '—';
-    if (connEl) {
-      connEl.textContent = info?.port ? `· receiver active (port ${info.port})` : '· receiver not started';
-      connEl.style.color = info?.port ? 'var(--lime-color, #84cc16)' : 'var(--text-muted, #a1a1aa)';
+  // main reports a folder it could not open (missing after a bad update, no
+  // file manager association) instead of pretending it opened.
+  folderBtn?.addEventListener('click', async () => {
+    folderBtn.disabled = true;
+    try {
+      const res = await window.api.openExtensionFolder();
+      const failure = folderOpenFailure(res);
+      if (failure) setExtensionNote(failure, 'error');
+      else setExtensionNote('');
+    } catch (err) {
+      setExtensionNote(`Could not open the extension folder (${err?.message || err}).`, 'error');
+    } finally {
+      folderBtn.disabled = false;
     }
-  } catch (e) {
-    codeEl.textContent = '—';
-  }
+  });
+
+  copyBtn?.addEventListener('click', async () => {
+    const code = codeEl.dataset.code;
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setExtensionNote('Pairing code copied. Paste it into the extension.');
+    } catch (err) {
+      setExtensionNote('Could not copy the code. Select it and copy it by hand.', 'error');
+    }
+  });
+
+  // A shared or leaked code can be replaced. The paired extension then stops
+  // syncing until it is given the new one, so this asks first.
+  newCodeBtn?.addEventListener('click', async () => {
+    const ok = window.confirm('Create a new pairing code?\n\nThe browser extension stops syncing your logins until you paste the new code into it.');
+    if (!ok) return;
+    newCodeBtn.disabled = true;
+    try {
+      const res = await window.api.rotatePairingCode();
+      if (!res?.pairingCode) throw new Error('the app returned no code');
+      pairingCodeGen++;
+      showPairingCode(res.pairingCode);
+      setExtensionNote('New pairing code created. Paste it into the extension to reconnect it.', 'warn');
+    } catch (err) {
+      setExtensionNote(`Could not create a new pairing code (${err?.message || err}).`, 'error');
+    } finally {
+      newCodeBtn.disabled = false;
+    }
+  });
+
+  document.querySelector('.nav-btn[data-tab="logins"]')?.addEventListener('click', () => { refreshExtensionInfo(); });
+
+  await refreshExtensionInfo();
+  if (!codeEl.dataset.code) showPairingCode('');
 }
 
 // ── Browser-assisted YouTube login modal ─────────────────────────────────────

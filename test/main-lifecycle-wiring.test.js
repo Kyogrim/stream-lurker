@@ -38,15 +38,57 @@ test('G2.1: both process error sinks are registered before any startup work', ()
     assert.ok(at > 0 && at < ready, ev);
     assert.ok(at < mainJs.indexOf('migrateProfileCookies(app.getPath'), `${ev} before the cookie migration`);
   }
-  // Never the blocking boxes the handler exists to avoid.
-  assert.doesNotMatch(mainJs, /showErrorBox|showMessageBoxSync/);
+  // Never the blocking boxes the handler exists to avoid, once the app runs:
+  // the one error box is for main.js failing to load (next test).
+  assert.doesNotMatch(mainJs, /showMessageBoxSync/);
+  assert.equal((mainJs.match(/showErrorBox\(/g) || []).length, 1);
+});
+
+test('issue-11: a throw while main.js itself loads is fatal and visible, and releases the instance lock', () => {
+  // The behaviour is createLoadGuard's (main-app-log, in real processes);
+  // this checks main.js wires it: before anything can throw, and loaded()
+  // as the file's very last statement.
+  const guard = mainJs.slice(mainJs.indexOf('const mainScript = createLoadGuard({'), mainJs.indexOf("process.on('unhandledRejection'"));
+  assert.match(guard, /report: reportFatal,/);
+  const failure = guard.slice(guard.indexOf('onLoadFailure:'));
+  assert.ok(failure.indexOf('dialog.showErrorBox(') > 0 && failure.indexOf('dialog.showErrorBox(') < failure.indexOf('app.exit(1);'), 'says so, then exits');
+  assert.match(guard, /process\.on\('uncaughtException', \(err, origin\) => mainScript\.uncaught\(err, origin\)\);/);
+  assert.ok(mainJs.indexOf('const mainScript = createLoadGuard(') < mainJs.indexOf('migrateProfileCookies(app.getPath'));
+  const code = mainJs.trimEnd().split('\n').filter(l => l.trim() && !l.trim().startsWith('//'));
+  assert.equal(code[code.length - 1].trim(), 'mainScript.loaded();', 'the very last statement');
+  assert.equal((mainJs.match(/mainScript\.loaded\(\)/g) || []).length, 1);
+});
+
+test('issue-10: nothing can start the runtime before the config is loaded or writes are locked', () => {
+  const body = mainJs.slice(mainJs.indexOf('app.whenReady().then(async () => {'));
+  const code = body.split('\n').slice(1).map(l => l.trim()).filter(l => l && !l.startsWith('//'));
+  // protocol.handle (item 3) cannot throw into a half-set config; loadConfig
+  // is next, before the menu, the migration log loop and everything else.
+  assert.deepEqual(code.slice(0, 3), [
+    'protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));',
+    'loadConfig();',
+    'installApplicationMenu();',
+  ]);
+  assert.equal((body.slice(0, body.indexOf('}).catch(')).match(/loadConfig\(\);/g) || []).length, 1, 'loaded once on ready');
+  const failure = body.slice(body.indexOf('}).catch((err) => {'), body.indexOf('\n});'));
+  assert.ok(failure.indexOf('if (!configLoadAttempted) loadConfig();') > 0, 'the failure path loads it if the ready handler never got there');
+  assert.ok(failure.indexOf('if (!configLoadAttempted) loadConfig();') < failure.indexOf('startRuntime();'));
+  assert.ok(failure.indexOf('installApplicationMenu()') < failure.indexOf('startRuntime();'));
+  const load = block('function loadConfig(');
+  assert.match(load, /^function loadConfig\(\) \{\s*configLoadAttempted = true;\s*try \{\s*const configPath = getConfigPath\(\);/, 'flagged first; nothing outside the try can throw');
+  // And saveConfig writes nothing before a load was attempted.
+  const save = block('function saveConfig(');
+  assert.ok(save.indexOf('if (!configLoadAttempted) return;') > 0);
+  assert.ok(save.indexOf('if (!configLoadAttempted) return;') < save.indexOf('writeFileSync'));
 });
 
 test('G2.1/G2.3: a startup failure cannot leave a process with no window or tray', () => {
   const ready = mainJs.indexOf('app.whenReady().then(');
   const chain = mainJs.slice(ready, mainJs.indexOf('\nlet runtimeStarted', ready));
   assert.match(chain, /try \{\s*await loadExtensions\(\);\s*\} catch \(err\) \{\s*reportFatal\('loadExtensions', err\);/);
-  assert.match(chain, /\}\)\.catch\(\(err\) => \{\s*[\s\S]*reportFatal\('startup', err\);\s*startRuntime\(\);/);
+  // Logged first; the prerequisites the ready handler may not have reached
+  // are covered in issue-10.
+  assert.match(chain, /\}\)\.catch\(\(err\) => \{\s*[\s\S]*reportFatal\('startup', err\);[\s\S]*?startRuntime\(\);/);
   const runtime = block('function startRuntime(');
   assert.match(runtime, /if \(runtimeStarted\) return;\s*runtimeStarted = true;/);
   for (const step of ['createMainWindow();', 'createTray();', 'startCookieReceiver();', 'resetPoller();', 'startWatchTimeTracking();']) {
@@ -70,17 +112,21 @@ test('G2.3/G4.10: loadExtensions reads a snapshot and never edits or saves the l
   assert.match(preloadJs, /getExtensionStatus: \(\) => ipcRenderer\.invoke\('get-extension-status'\)/);
 });
 
-test('C7/G4.1-G4.3: the application menu is set first; no view menu; zoom levels reset', () => {
+test('C7/G4.1-G4.3: the application menu is set before any window; no view menu; zoom levels reset', () => {
   const body = mainJs.slice(mainJs.indexOf('app.whenReady().then('));
-  assert.ok(before(body, 'Menu.setApplicationMenu(', "addLog('Initializing"), 'the very first thing on ready');
-  assert.match(body, /Menu\.setApplicationMenu\(process\.platform === 'darwin'\s*\? Menu\.buildFromTemplate\(\[\{ role: 'appMenu' \}, \{ role: 'editMenu' \}\]\)\s*: null\);/);
+  assert.ok(before(body, 'installApplicationMenu();', "addLog('Initializing"), 'among the first things on ready');
+  assert.ok(before(body, 'installApplicationMenu();', 'startRuntime();'), 'before any window');
+  assert.match(block('function installApplicationMenu('), /Menu\.setApplicationMenu\(process\.platform === 'darwin'\s*\? Menu\.buildFromTemplate\(\[\{ role: 'appMenu' \}, \{ role: 'editMenu' \}\]\)\s*: null\);/);
   assert.doesNotMatch(mainJs, /role:\s*'(viewMenu|reload|forceReload|toggleDevTools|zoomIn|zoomOut|resetZoom)'/);
-  // Dashboard, every webview guest, and pop-outs clear saved zoom levels.
-  assert.match(block('function createMainWindow('), /on\('did-finish-load', \(\) => \{\s*dashboardHealth\.loaded\(\);[\s\S]*?setZoomLevel\(0\)/);
+  // Every surface clears a saved zoom level: the reset sits above the
+  // webview-only return, so the dashboard, clip and login windows, OAuth
+  // popups and pop-outs get it as well as the cells (G4.3).
   const wcc = mainJs.slice(mainJs.indexOf("app.on('web-contents-created'"));
-  const guestPart = wcc.slice(wcc.indexOf("contents.getType() !== 'webview'"), wcc.indexOf('\n});'));
-  assert.match(guestPart, /contents\.on\('did-finish-load', \(\) => \{\s*try \{ contents\.setZoomLevel\(0\);/);
-  assert.match(block("ipcMain.handle('popout-stream'"), /win\.webContents\.setZoomLevel\(0\)/);
+  const wccBody = wcc.slice(0, wcc.indexOf('\n});'));
+  const reset = wccBody.search(/contents\.on\('did-finish-load', \(\) => \{\s*try \{ contents\.setZoomLevel\(0\);/);
+  assert.ok(reset > 0, 'zoom reset registered in web-contents-created');
+  assert.ok(reset < wccBody.indexOf("if (contents.getType() !== 'webview') return;"), 'before the webview-only return');
+  assert.equal((mainJs.match(/setZoomLevel\(0\)/g) || []).length, 1, 'one reset for everything, no per-window copies left to drift');
 });
 
 test('G4.2: DevTools cannot open in a packaged build on the dashboard or a stream guest', () => {
@@ -114,6 +160,10 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   assert.match(load, /catch \(err\) \{[\s\S]*lockConfigWrites\(/, 'an unexpected throw also locks');
   assert.match(block('function startRuntime('), /if \(configWriteLocked\) promptConfigUnreadable\(\);/);
   assert.match(block("ipcMain.handle('import-config'"), /if \(configWriteLocked\) \{\s*return \{ success: false/);
+  // Issue 12: exporting in-memory defaults would be an empty "backup".
+  const exp = block("ipcMain.handle('export-config'");
+  assert.match(exp, /^ipcMain\.handle\('export-config', async \(\) => \{\s*(\/\/[^\n]*\n\s*)*if \(configWriteLocked\) \{\s*return \{ success: false, error: '[^']*nothing to export[^']*' \};/);
+  assert.ok(exp.indexOf('if (configWriteLocked)') < exp.indexOf('showSaveDialog'), 'refused before the dialog');
   // Defaults must not overwrite user state outside config.json either.
   assert.match(block('function applyStartupSettings('), /if \(configWriteLocked\) return;/);
   assert.match(block('async function loadDashboard('), /if \(!config\.dashboardStorageMigrated && !configWriteLocked\)/);
@@ -146,6 +196,20 @@ test('F31: nothing is credited or opened while the dashboard renderer is dead', 
     assert.ok(giveUp.includes(call), call);
   }
   assert.doesNotMatch(mainJs, /not reloading again/, 'no permanent give-up');
+});
+
+test('issue-13: bringing a dead dashboard forward reloads it at once (no menu, no Ctrl+R)', () => {
+  const reload = block('function reloadDeadDashboardOnShow(');
+  assert.match(reload, /!dashboardHealth\.reloadOnShow\) return;/);
+  assert.match(reload, /clearTimeout\(dashboardReloadTimer\);\s*dashboardReloadTimer = null;/, 'the scheduled retry is dropped, not doubled');
+  assert.match(reload, /mainWindow\.reload\(\);/);
+  // Every way the user brings the window forward.
+  const tray = block('function createTray(');
+  assert.match(tray.slice(tray.indexOf("tray.on('click'")), /reloadDeadDashboardOnShow\(\);/);
+  const menu = block('function buildTrayMenu(');
+  assert.match(menu.slice(menu.indexOf("label: 'Show Dashboard'"), menu.indexOf("label: 'Force Scan Now'")), /reloadDeadDashboardOnShow\(\);/);
+  const second = mainJs.slice(mainJs.indexOf("app.on('second-instance'"), mainJs.indexOf('app.whenReady()'));
+  assert.ok(second.indexOf('reloadDeadDashboardOnShow();') > second.indexOf("argv.includes('--hidden')"), 'not for an autostart relaunch');
 });
 
 test('F32: no debugger is attached to the dashboard', () => {

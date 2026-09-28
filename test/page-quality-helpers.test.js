@@ -208,6 +208,31 @@ test('theaterStep stops after 5 clicks that change nothing', () => {
   assert.equal(m.theaterStep(null, { found: false, on: false, sig: '' }).action, 'idle');
 });
 
+test('altTStep: one synthetic press once a video exists, then asks that slow down but never stop (F42)', () => {
+  let st = null;
+  const tick = (video, now) => {
+    const prev = st;
+    const r = m.altTStep(st, { video, now });
+    if (prev) assert.notEqual(r.st, prev, 'state is copied, not mutated');
+    st = r.st;
+    return (r.synthetic ? 'press' : '') + (r.request ? 'ask' : '') || '-';
+  };
+  assert.equal(tick(false, 0), '-', 'no video: nothing to press yet');
+  assert.equal(tick(true, 3000), 'press');
+  const fast = [6000, 9000, 12000, 15000, 18000].map(t => tick(true, t));
+  assert.deepEqual(fast, ['ask', 'ask', 'ask', 'ask', 'ask']);
+  assert.equal(tick(true, 21000), '-');
+  assert.equal(tick(true, 47999), '-');
+  assert.equal(tick(true, 48000), 'ask');
+  assert.equal(tick(false, 78000), '-', 'the player lost its video');
+  assert.equal(tick(true, 81000), 'ask');
+  // A day later it still asks, twice a minute, and never presses again.
+  const day = [];
+  for (let t = 84000; t <= 84000 + 24 * 3600000; t += 3000) day.push(tick(true, t));
+  assert.equal(day.includes('press'), false);
+  assert.equal(day.filter(a => a === 'ask').length, 2 * 24 * 60);
+});
+
 // ------------------------------------------------------------ directClick
 
 function clickHarness(extra = {}) {
@@ -268,7 +293,7 @@ test('directClick falls back to one el.click() when synthetic events are unavail
 
 test('every helper survives toString() serialization into the page script', async () => {
   const page = makePage({ host: 'example.com' });
-  for (const name of ['parseRendition', 'pickRendition', 'isQualityLabel', 'qualityStep', 'qualityRecord', 'theaterStep', 'directClick']) {
+  for (const name of ['parseRendition', 'pickRendition', 'isQualityLabel', 'qualityStep', 'qualityRecord', 'theaterStep', 'altTStep', 'directClick']) {
     const fn = page.run(`(${m[name].toString()})`);
     assert.equal(typeof fn, 'function', name);
   }

@@ -101,6 +101,22 @@ function normalizeExtensions(value) {
   };
 }
 
+// The two calendar lists: event objects only. A hand-edited `{}` or a null
+// entry used to reach the dashboard as is, where the calendar render threw on
+// it (F93); the dashboard now tolerates both, and main no longer hands them
+// out. Returns null when already clean.
+const EVENT_LISTS = ['calendarEvents', 'syncedCalendarEvents'];
+function normalizeEventList(key, value) {
+  if (value === undefined) return null;
+  const isEvent = (ev) => !!ev && typeof ev === 'object' && !Array.isArray(ev);
+  const list = Array.isArray(value) ? value.filter(isEvent) : [];
+  if (Array.isArray(value) && list.length === value.length) return null;
+  // Described, never echoed: a damaged value can be arbitrarily large.
+  const from = Array.isArray(value) ? `${value.length} entries`
+    : value === null ? null : typeof value === 'object' ? 'an object' : `a ${typeof value}`;
+  return { list, change: { key, from, to: `${list.length} event${list.length === 1 ? '' : 's'}` } };
+}
+
 // All normalizers over one config object, in place.
 function sanitizeConfig(cfg) {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return { clamped: [], dropped: [] };
@@ -111,6 +127,13 @@ function sanitizeConfig(cfg) {
   if (ext) {
     cfg.extensions = ext.extensions;
     clamped.push(ext.change);
+  }
+  for (const key of EVENT_LISTS) {
+    const events = normalizeEventList(key, cfg[key]);
+    if (events) {
+      cfg[key] = events.list;
+      clamped.push(events.change);
+    }
   }
   return { clamped, dropped };
 }
@@ -133,6 +156,7 @@ module.exports = {
   normalizeConfigNumbers,
   normalizeStreamers,
   normalizeExtensions,
+  normalizeEventList,
   sanitizeConfig,
   streamerPlatform,
   streamerName,

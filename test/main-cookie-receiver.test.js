@@ -11,7 +11,7 @@ const { EventEmitter } = require('events');
 const {
   pingProof, isAllowedHost, isAllowedOrigin, isJsonContentType, codesMatch, maskCode,
   createPairingGuard, createReceiverHandler, createReceiverServer, listenOnFirstPort,
-  MAX_IMPORT_BODY_BYTES, PING_PROOF_PREFIX,
+  MAX_IMPORT_BODY_BYTES, PING_PROOF_PREFIX, SIGNED_OUT_ERROR, APP_LOGIN_ERROR, autoSyncRefusalFor,
 } = require('../main/cookie-receiver');
 const connector = require('../extension/connector.js');
 
@@ -24,9 +24,12 @@ async function startReceiver(overrides = {}) {
   const manual = [];
   let port = 0;
   const signedOut = new Set(overrides.signedOut || []);
+  const autoAttempts = [];
+  let codeRejections = 0;
   const importer = (platform) => async (cookies, opts) => {
     calls.push({ platform, cookies, opts });
     if (overrides.importerThrows) throw new Error('boom');
+    if (overrides.importerResult) return overrides.importerResult(platform, opts);
     return { success: true, username: `${platform}-user`, cookiesSet: cookies.length };
   };
   const handler = createReceiverHandler({
@@ -34,15 +37,21 @@ async function startReceiver(overrides = {}) {
     getPairingCode: () => overrides.code || CODE,
     guard: overrides.guard || createPairingGuard(),
     importers: { twitch: importer('twitch'), youtube: importer('youtube'), kick: importer('kick') },
-    isSignedOut: (p) => signedOut.has(p),
+    isSignedOut: overrides.isSignedOut || ((p) => signedOut.has(p)),
     onManualImport: (p) => { manual.push(p); signedOut.delete(p); },
+    onAutoAttempt: (a) => autoAttempts.push(a),
+    onCodeRejected: () => { codeRejections++; },
     log: (t) => logs.push(t),
     maxBodyBytes: overrides.maxBodyBytes,
   });
   const server = createReceiverServer(handler);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = server.address().port;
-  return { server, port, calls, logs, manual, signedOut, close: () => new Promise(r => server.close(r)) };
+  return {
+    server, port, calls, logs, manual, signedOut, autoAttempts,
+    codeRejections: () => codeRejections,
+    close: () => new Promise(r => server.close(r)),
+  };
 }
 
 // A raw request, so Host, Origin and the body can be anything.
@@ -282,6 +291,83 @@ test('C1 SIGNED_OUT: an automatic re-sync of a signed-out platform gets 409; a m
   assert.equal((await post({ auto: true })).status, 200);
 });
 
+test('F53: the 409 carries why re-sync is off; an import that sees a sign-out mid-flight answers 409 too', async (t) => {
+  const refusals = { youtube: APP_LOGIN_ERROR };
+  const r = await startReceiver({
+    isSignedOut: (p) => refusals[p] || null,
+    importerResult: (platform, opts) => (platform === 'kick' && opts.auto
+      ? { success: false, code: 'SIGNED_OUT', error: SIGNED_OUT_ERROR }
+      : { success: true, username: `${platform}-user`, cookiesSet: 1 }),
+  });
+  t.after(r.close);
+  const post = (platform, extra = {}) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ platform, ...extra }) });
+  const appLogin = await post('youtube', { auto: true });
+  assert.equal(appLogin.status, 409);
+  assert.deepEqual(appLogin.json, { success: false, code: 'SIGNED_OUT', error: APP_LOGIN_ERROR });
+  assert.equal(r.calls.length, 0, 'refused before the importer ran');
+  // Signed out while the import was running: the extension must drop the
+  // platform exactly as if the refusal had come first.
+  const midFlight = await post('kick', { auto: true });
+  assert.equal(midFlight.status, 409);
+  assert.equal(midFlight.json.code, 'SIGNED_OUT');
+  assert.equal(midFlight.json.username, undefined);
+  const viaClient = await connector.postImport({ fetch: globalThis.fetch, port: r.port, code: CODE, platform: 'kick', cookies: [], auto: true });
+  assert.equal(viaClient.code, 'SIGNED_OUT');
+  // The truthy-but-not-a-string form still sends the sign-out text.
+  assert.equal(autoSyncRefusalFor('signed-out'), SIGNED_OUT_ERROR);
+  assert.equal(autoSyncRefusalFor('app-login'), APP_LOGIN_ERROR);
+  assert.equal(autoSyncRefusalFor(null), null);
+});
+
+test('F96: every automatic re-sync is reported with its outcome; clicks and unknown platforms are not', async (t) => {
+  const r = await startReceiver({
+    signedOut: ['kick'],
+    importerResult: (platform) => (platform === 'youtube'
+      ? { success: false, error: 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).' }
+      : { success: true, username: 'someone', cookiesSet: 3 }),
+  });
+  t.after(r.close);
+  const post = (body, code = CODE) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': code }), body });
+  await post(importBody({ platform: 'twitch', auto: true }));
+  await post(importBody({ platform: 'youtube', auto: true }));
+  await post(importBody({ platform: 'kick', auto: true }));
+  await post(importBody({ platform: 'myspace', auto: true }));
+  await post(importBody({ platform: 'twitch' }));
+  assert.deepEqual(r.autoAttempts, [
+    { platform: 'twitch', ok: true, error: '', status: 200 },
+    { platform: 'youtube', ok: false, error: 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).', status: 200 },
+    { platform: 'kick', ok: false, error: SIGNED_OUT_ERROR, status: 409 },
+  ]);
+  // A wrong code is counted, and nothing from the request is echoed anywhere.
+  const secret = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
+  assert.equal((await post(importBody({ auto: true }), secret)).status, 403);
+  assert.equal(r.codeRejections(), 1);
+  assert.equal(r.autoAttempts.length, 3);
+  assert.ok(!JSON.stringify(r.autoAttempts).includes(secret) && !r.logs.join('\n').includes(secret));
+});
+
+test('F96: a throwing importer on a re-sync is reported, and a throwing recorder changes no answer', async (t) => {
+  const r = await startReceiver({ importerThrows: true });
+  t.after(r.close);
+  const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ auto: true }) });
+  assert.equal(res.status, 500);
+  assert.deepEqual(r.autoAttempts, [{ platform: 'twitch', ok: false, error: 'boom', status: 500 }]);
+
+  let port = 0;
+  const handler = createReceiverHandler({
+    getPort: () => port, getPairingCode: () => CODE, guard: createPairingGuard(),
+    importers: { twitch: async () => ({ success: true, cookiesSet: 1 }) },
+    onAutoAttempt: () => { throw new Error('recorder broke'); },
+  });
+  const server = createReceiverServer(handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  port = server.address().port;
+  t.after(() => new Promise(done => server.close(done)));
+  const ok = await request(port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ auto: true }) });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.success, true);
+});
+
 test('F52: auto responses never carry the username; a failed manual import does not reconnect', async (t) => {
   const r = await startReceiver({ importerThrows: true, signedOut: ['kick'] });
   t.after(r.close);
@@ -332,6 +418,8 @@ test('G2.4: any bind error moves on to the next port (EADDRINUSE and EACCES alik
   const codes = ['EACCES', 'EADDRINUSE', 'EPERM', null];
   const walked = await listenOnFirstPort({ ports: [1, 2, 3, 4], createServer: () => fakeServer(codes.shift()) });
   assert.equal(walked.port, 4);
+  // What it skipped on the way, so main can say why it is on a fallback port.
+  assert.deepEqual(walked.errors.map(e => e.port), [1, 2, 3]);
   const none = await listenOnFirstPort({ ports: [1, 2], createServer: () => fakeServer('EACCES') });
   assert.equal(none.server, null);
   assert.deepEqual(none.errors, [{ port: 1, code: 'EACCES' }, { port: 2, code: 'EACCES' }]);

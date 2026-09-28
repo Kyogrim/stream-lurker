@@ -131,9 +131,11 @@ export function qualityRecord(st, outcome, now) {
 
 // The theater button (Kick, and Twitch's button path). Click only while
 // theater is off (Kick's selector also matches "Exit theater mode"), latch
-// once a later tick shows the click changed something (label, icon, player
-// width), and stop after a few clicks, so a renamed label or an unrecognised
-// locale cannot keep the page toggling every tick. obs is { found, on, sig }.
+// once a later tick shows the click changed something on the button (label,
+// pressed state, icon), and stop after a few clicks, so a renamed label or an
+// unrecognised locale cannot keep the page toggling every tick. sig must not
+// carry layout: a relayout alone would read as a click that worked.
+// obs is { found, on, sig }.
 export function theaterStep(st, obs) {
   const MAX_CLICKS = 5;
   st = st ? Object.assign({}, st) : { clicks: 0, sig: null, done: false };
@@ -149,6 +151,32 @@ export function theaterStep(st, obs) {
   st.clicks += 1;
   st.sig = obs.sig;
   return { st: st, action: 'click' };
+}
+
+// Twitch with no theatre button to click falls back to the Alt+T hotkey. One
+// synthetic press per document: on a page whose theatre detection is broken, a
+// second one would only switch theatre back off. After that, ask the renderer
+// for a native press (src/theater-key.js). It presses at most once per page,
+// and only while the cell is on screen and the user is not typing, so a cell
+// nobody is looking at has to keep asking or it never gets its press. Hence a
+// slower cadence after the first few asks instead of a cutoff. A native Alt+T
+// reaching the page ends all of this (the page script latches on it).
+// obs is { video, now }. Returns { st, synthetic, request }.
+export function altTStep(st, obs) {
+  const FAST_ASKS = 5;
+  const SLOW_ASK_MS = 30000;
+  st = st ? Object.assign({}, st) : { pressed: false, asks: 0, nextAt: 0 };
+  // Hotkeys bind with the player: a press before it has a video is wasted.
+  if (!obs.video) return { st: st, synthetic: false, request: false };
+  if (!st.pressed) {
+    st.pressed = true;
+    // No ask on this tick: the next one first checks whether the press worked.
+    return { st: st, synthetic: true, request: false };
+  }
+  if (obs.now < st.nextAt) return { st: st, synthetic: false, request: false };
+  st.asks += 1;
+  st.nextAt = st.asks < FAST_ASKS ? 0 : obs.now + SLOW_ASK_MS;
+  return { st: st, synthetic: false, request: true };
 }
 
 // A synthetic click that behaves like one real click: pointer and mouse
@@ -192,6 +220,7 @@ export function qualityAndTheaterScript(quality) {
       const qualityStep = ${qualityStep.toString()};
       const qualityRecord = ${qualityRecord.toString()};
       const theaterStep = ${theaterStep.toString()};
+      const altTStep = ${altTStep.toString()};
       const directClick = ${directClick.toString()};
 
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -214,29 +243,42 @@ export function qualityAndTheaterScript(quality) {
         return r.width > 0 && r.height > 0;
       };
 
+      // Menu-role elements on screen. Snapshotted before the cog click, the
+      // ones that show up after it are concrete nodes that click opened.
+      const shownMenus = () =>
+        Array.from(document.querySelectorAll('[role="menu"], [role="dialog"], [role="listbox"]')).filter(isShown);
+
       // Close a settings menu this script opened, and only while it is still
       // open: a blind toggle on the cog reopens a menu the page already shut.
       // node is a concrete element seen inside the menu, never a re-run of a
-      // loose text heuristic, which can match ordinary text near the cog.
-      // With neither node nor aria-expanded there is no way to tell, so only
-      // Escape is sent: it can close the menu but never reopen it.
+      // loose text heuristic, which can match ordinary text near the cog; the
+      // element the cog names in aria-controls stands in when there is none.
+      // With neither that nor aria-expanded there is no telling whether a
+      // menu is open, so nothing is sent. Escape, for a toggle that did not
+      // take, goes only into that concrete menu element: at the document with
+      // no menu open to take it, it reaches the page's own hotkeys (on Twitch
+      // it may leave theatre mode, which is latched and never put back). A
+      // close with nothing to aim at fails; the attempt budget bounds it.
       const closeMenu = async (cog, node, click) => {
-        const exp = cog && cog.getAttribute ? cog.getAttribute('aria-expanded') : null;
-        const known = exp === 'true' || exp === 'false' || !!node;
+        const attr = (name) => (cog && cog.getAttribute ? cog.getAttribute(name) : null);
+        if (!node || !node.isConnected) {
+          const id = (attr('aria-controls') || '').trim().split(/\\s+/)[0];
+          const named = id ? document.getElementById(id) : null;
+          if (named && named.isConnected) node = named;
+        }
+        const exp = attr('aria-expanded');
+        if (exp !== 'true' && exp !== 'false' && !node) return;
         const open = () => {
-          const e = cog && cog.getAttribute ? cog.getAttribute('aria-expanded') : null;
+          const e = attr('aria-expanded');
           if (e === 'true') return true;
           if (e === 'false') return false;
           return isShown(node);
         };
-        if (known) {
-          if (!open()) return;
-          click(cog);
-          await sleep(300);
-          if (!open()) return;
-        }
-        const target = (node && node.isConnected) ? node : document;
-        ['keydown', 'keyup'].forEach(type => target.dispatchEvent(new KeyboardEvent(type, {
+        if (!open()) return;
+        click(cog);
+        await sleep(300);
+        if (!open() || !node || !node.isConnected) return;
+        ['keydown', 'keyup'].forEach(type => node.dispatchEvent(new KeyboardEvent(type, {
           key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true
         })));
       };
@@ -258,7 +300,6 @@ export function qualityAndTheaterScript(quality) {
         });
         window.__qualityState = step.st;
         if (step.log) console.log('[' + tag + '] ' + step.log);
-        if (step.action === 'resolved') window.__qualitySet = quality;
         if (step.action !== 'attempt') return;
         window.__qualityBusy = true;
         let outcome;
@@ -275,7 +316,6 @@ export function qualityAndTheaterScript(quality) {
         const rec = qualityRecord(window.__qualityState, outcome, Date.now());
         window.__qualityState = rec.st;
         if (rec.log) console.log('[' + tag + '] ' + rec.log);
-        if (rec.st.resolved) window.__qualitySet = quality;
       };
 
       const isChatElement = (el) => {
@@ -347,6 +387,7 @@ export function qualityAndTheaterScript(quality) {
         const twitchQualityWalk = async () => {
           const cog = document.querySelector('[data-a-target="player-settings-button"]');
           if (!cog) return { fail: 'settings button not found' };
+          const before = shownMenus();
           cog.click();
           let seen = null;
           try {
@@ -371,9 +412,22 @@ export function qualityAndTheaterScript(quality) {
           } finally {
             await sleep(150);
             const menuNode = twitchMenuNode(cog);
-            await closeMenu(cog, [seen, menuNode].find(isShown) || menuNode || seen, el => el.click());
+            // Neither hook matched: a menu-role element the cog click brought
+            // up is the only concrete node left to close.
+            const fresh = shownMenus().filter(n => before.indexOf(n) < 0);
+            await closeMenu(cog, [seen, menuNode].find(isShown) || menuNode || seen || fresh[fresh.length - 1] || null, el => el.click());
           }
         };
+
+        // A native Alt+T, the renderer's answer to "Need Alt+T" or the user's
+        // own press, leaves theatre mode where the hotkey put it: stop here, as
+        // the renderer does after its one press. Synthetic events, this
+        // script's included, are never trusted and do not count.
+        window.addEventListener('keydown', (e) => {
+          if (e.isTrusted && e.altKey && (e.keyCode === 84 || e.code === 'KeyT' || String(e.key).toLowerCase() === 't')) {
+            window.__twitchTheaterLatched = true;
+          }
+        }, true);
 
         setInterval(() => {
           try {
@@ -412,11 +466,14 @@ export function qualityAndTheaterScript(quality) {
                 // confirm the click took and cap the tries: in a locale whose
                 // "exit" label is not listed above, isTheater stays false and
                 // an unchecked click would flip theatre every 3s for days.
-                const pc = playerContainer ? playerContainer.getBoundingClientRect() : null;
+                // The button's own state only: the player's width also moves
+                // whenever the grid relays out (another cell opening), which
+                // confirmed clicks that did nothing.
+                const ticon = btn.querySelector('path');
                 const tstep = theaterStep(window.__twitchTheaterState, {
                   found: true,
                   on: false,
-                  sig: [btn.getAttribute('aria-label'), btn.getAttribute('aria-checked'), pc ? Math.round(pc.width / 10) : 0].join('|')
+                  sig: [btn.getAttribute('aria-label'), btn.getAttribute('aria-checked'), ticon ? ticon.getAttribute('d') : ''].join('|')
                 });
                 window.__twitchTheaterState = tstep.st;
                 if (tstep.action === 'click') directClick(btn);
@@ -428,18 +485,19 @@ export function qualityAndTheaterScript(quality) {
                   playerContainer.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
                 }
 
-                const kbEv = new KeyboardEvent('keydown', {
-                  key: 't', code: 'KeyT', keyCode: 84, which: 84,
-                  altKey: true, bubbles: true, cancelable: true
-                });
-                const target = document.querySelector('video') || playerContainer || document;
-                target.dispatchEvent(kbEv);
-                document.dispatchEvent(kbEv);
-                window.dispatchEvent(kbEv);
-
-                if (document.querySelector('video')) {
-                  console.log("[Twitch Theater] Need Alt+T");
+                const video = document.querySelector('video');
+                const astep = altTStep(window.__twitchAltTState, { video: !!video, now: Date.now() });
+                window.__twitchAltTState = astep.st;
+                if (astep.synthetic) {
+                  // Dispatched once. It bubbles through the player, document
+                  // and window; dispatching the same object to all three as
+                  // well made one press toggle theatre up to three times.
+                  video.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 't', code: 'KeyT', keyCode: 84, which: 84,
+                    altKey: true, bubbles: true, cancelable: true
+                  }));
                 }
+                if (astep.request) console.log("[Twitch Theater] Need Alt+T");
               }
             }
 
@@ -454,13 +512,14 @@ export function qualityAndTheaterScript(quality) {
               const tbtn = document.querySelector('button[aria-label*="theater" i], button[title*="theater" i], button[aria-label*="theatre" i], button[title*="theatre" i]');
               const tlabel = tbtn ? ((tbtn.getAttribute('aria-label') || '') + ' ' + (tbtn.getAttribute('title') || '')).toLowerCase() : '';
               const ticon = tbtn ? tbtn.querySelector('path') : null;
-              const tvideo = document.querySelector('video');
               const tstep = theaterStep(tstate, {
                 found: !!tbtn,
                 on: !!tbtn && (tbtn.getAttribute('aria-pressed') === 'true' || /exit|leave|normal|default|close|quit|disable/.test(tlabel)),
-                // Whatever a real toggle changes: label, pressed state, icon, player width.
-                sig: tbtn ? [tlabel, tbtn.getAttribute('aria-pressed'), ticon ? ticon.getAttribute('d') : '',
-                  tvideo ? Math.round(tvideo.getBoundingClientRect().width / 10) : 0].join('|') : ''
+                // What a real toggle changes on the button: label, pressed
+                // state, icon. Not the video's width: the grid relays out
+                // whenever another cell opens, and that confirmed clicks that
+                // did nothing.
+                sig: tbtn ? [tlabel, tbtn.getAttribute('aria-pressed'), ticon ? ticon.getAttribute('d') : ''].join('|') : ''
               });
               window.__kickTheaterState = tstep.st;
               if (tstep.action === 'click') directClick(tbtn);
@@ -710,6 +769,7 @@ export function qualityAndTheaterScript(quality) {
             // page furniture (a control bar with "Auto" in it), visible either
             // way, so it can never prove the menu is open.
             const furniture = findActiveMenu(cog).node;
+            const before = shownMenus();
             directClick(cog);
             await new Promise(r => setTimeout(r, 400));
 
@@ -749,7 +809,11 @@ export function qualityAndTheaterScript(quality) {
             } finally {
               await new Promise(r => setTimeout(r, 250));
               const real = opened.filter(n => n && n !== furniture);
-              await closeMenu(cog, real.slice().reverse().find(isShown) || real[real.length - 1] || null, directClick);
+              // The loose match can come back with nothing but furniture; a
+              // menu-role element the cog click brought up is then the
+              // concrete node to close.
+              const fresh = shownMenus().filter(n => before.indexOf(n) < 0);
+              await closeMenu(cog, real.slice().reverse().find(isShown) || real[real.length - 1] || fresh[fresh.length - 1] || null, directClick);
             }
             return picked ? { picked: picked } : { fail: 'no quality option fits ' + targetQuality };
           });
@@ -907,41 +971,3 @@ export function autoClaimPointsScript() {
     })();
   `;
 }
-
-export const kickLiveFollowsScript = `
-  (async () => {
-    try {
-      const response = await fetch('/api/v2/channels/followed?limit=100');
-      if (response.ok) {
-        const data = await response.json();
-        const liveFollows = data.filter(item => item.livestream !== null).map(item => item.slug || item.username);
-        if (liveFollows.length > 0) return liveFollows;
-      }
-    } catch(e) {}
-
-    try {
-      const usernamesSet = new Set();
-      const ignoreList = ['categories', 'search', 'auth', 'dashboard', 'about', 'help', 'terms', 'privacy', 'contact', 'jobs'];
-      const sidebars = Array.from(document.querySelectorAll('nav, aside, #sidebar, .sidebar-inner, [data-v-sidebar]'));
-      for (const sidebar of sidebars) {
-        const links = Array.from(sidebar.querySelectorAll('a[href]'));
-        for (const link of links) {
-          const href = link.getAttribute('href');
-          if (!href || !href.startsWith('/') || href.length <= 2) continue;
-          const innerText = link.innerText || '';
-          const innerHtml = link.innerHTML || '';
-          const isLive = innerText.includes('LIVE') || innerHtml.includes('bg-red-500') || innerHtml.includes('live-badge');
-          if (!isLive) continue;
-          const parts = href.split('/');
-          if (parts.length === 2) {
-            const possibleName = parts[1];
-            if (!ignoreList.includes(possibleName.toLowerCase())) usernamesSet.add(possibleName);
-          }
-        }
-      }
-      return Array.from(usernamesSet);
-    } catch(e) {
-      return [];
-    }
-  })()
-`;

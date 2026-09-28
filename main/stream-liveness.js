@@ -13,6 +13,15 @@
 // open) would otherwise close the cell and reopen it a scan later, counting a
 // new session.
 const OFFLINE_CONFIRMATIONS = 2;
+// ...and they must span at least this share of the scan interval. Scan Now,
+// the tray scan and an add-streamer follow-up run seconds after a scheduled
+// scan, and a false offline that lasts a minute is seen by both: counting
+// scans alone closed the cell anyway.
+const OFFLINE_MIN_SPAN_SHARE = 0.5;
+
+function offlineMinSpanMs(intervalMs) {
+  return Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs * OFFLINE_MIN_SPAN_SHARE : 0;
+}
 
 // Credit stops once no scan has confirmed the stream live for two intervals
 // plus a minute: one errored scan is tolerated, the second is not.
@@ -21,13 +30,13 @@ function staleAfterMs(intervalMs) {
 }
 
 function createStreamLiveness() {
-  // key -> { lastLiveAt, offlineStreak, paused }
+  // key -> { lastLiveAt, offlineStreak, firstOfflineAt, paused }
   const entries = new Map();
 
   function entryFor(key) {
     let e = entries.get(key);
     if (!e) {
-      e = { lastLiveAt: undefined, offlineStreak: 0, paused: false };
+      e = { lastLiveAt: undefined, offlineStreak: 0, firstOfflineAt: undefined, paused: false };
       entries.set(key, e);
     }
     return e;
@@ -45,20 +54,25 @@ function createStreamLiveness() {
       const e = entryFor(key);
       e.lastLiveAt = now;
       e.offlineStreak = 0;
+      e.firstOfflineAt = undefined;
     },
 
     // One scan result. Live resets everything; a clean offline adds to the
-    // streak; an error proves nothing either way, so it breaks the streak
-    // (the offline results were not consecutive) without confirming anything.
-    // Returns the offline streak after this result.
+    // streak (the first one starts its clock); an error proves nothing either
+    // way, so it breaks the streak (the offline results were not consecutive)
+    // without confirming anything. Returns the offline streak after this
+    // result.
     observe(key, result, now) {
       const e = entryFor(key);
       if (result.isLive) {
         e.lastLiveAt = now;
         e.offlineStreak = 0;
+        e.firstOfflineAt = undefined;
       } else if (result.error) {
         e.offlineStreak = 0;
+        e.firstOfflineAt = undefined;
       } else {
+        if (e.offlineStreak === 0) e.firstOfflineAt = now;
         e.offlineStreak += 1;
       }
       return e.offlineStreak;
@@ -67,6 +81,20 @@ function createStreamLiveness() {
     offlineStreak(key) {
       const e = entries.get(key);
       return e ? e.offlineStreak : 0;
+    },
+
+    // When the current run of clean offline results began, or undefined.
+    offlineSince(key) {
+      const e = entries.get(key);
+      return e ? e.firstOfflineAt : undefined;
+    },
+
+    // Whether an open cell's stream is confirmed offline for auto-close: enough
+    // consecutive clean offline results, spread over enough time.
+    offlineConfirmed(key, now, intervalMs) {
+      const e = entries.get(key);
+      if (!e || e.offlineStreak < OFFLINE_CONFIRMATIONS || e.firstOfflineAt === undefined) return false;
+      return now - e.firstOfflineAt >= offlineMinSpanMs(intervalMs);
     },
 
     // Whether this minute of an open cell counts as watch time. A key the
@@ -112,4 +140,4 @@ function createStreamLiveness() {
   };
 }
 
-module.exports = { OFFLINE_CONFIRMATIONS, staleAfterMs, createStreamLiveness };
+module.exports = { OFFLINE_CONFIRMATIONS, OFFLINE_MIN_SPAN_SHARE, offlineMinSpanMs, staleAfterMs, createStreamLiveness };

@@ -56,6 +56,15 @@ test('G3.4: the dashboard is served from app://bundle, never file://', () => {
   const handle = mainJs.indexOf('protocol.handle(DASHBOARD_SCHEME');
   const firstWindow = mainJs.indexOf('createMainWindow();', ready);
   assert.ok(handle > ready && handle < firstWindow, 'handler installed before the dashboard window exists');
+  // The first statement on ready, before anything that can throw: the
+  // startup-failure path opens the window on app:// whatever broke.
+  const body = mainJs.slice(mainJs.indexOf('app.whenReady().then(async () => {'));
+  const firstStatement = body.split('\n').slice(1).map(l => l.trim()).find(l => l && !l.startsWith('//'));
+  assert.equal(firstStatement, 'protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));');
+  assert.ok(body.indexOf('protocol.handle(DASHBOARD_SCHEME') < body.indexOf('loadConfig();'), 'before loadConfig');
+  const failure = body.slice(body.indexOf('}).catch((err) => {'), body.indexOf('\n});'));
+  assert.match(failure, /if \(!protocol\.isProtocolHandled\(DASHBOARD_SCHEME\)\) protocol\.handle\(DASHBOARD_SCHEME, createDashboardHandler\(__dirname\)\);/);
+  assert.ok(failure.indexOf('isProtocolHandled') < failure.indexOf('startRuntime();'), 'registered before the runtime opens the window');
   const pkg = JSON.parse(read('package.json'));
   assert.equal(pkg.build.electronFuses.grantFileProtocolExtraPrivileges, false);
   assert.equal(pkg.build.electronFuses.enableCookieEncryption, undefined, 'one-way; must be a deliberate separate change');
@@ -78,10 +87,45 @@ test('G1.1-G1.3: both sessions are locked down before extensions or any window l
 test('F10/F19/G1.4: the web-contents-created choke point installs every guard', () => {
   const start = mainJs.indexOf("app.on('web-contents-created'");
   const body = mainJs.slice(start, mainJs.indexOf('\n});', start));
-  for (const hook of ['setWindowOpenHandler', "'will-attach-webview'", "'will-navigate'", "'will-redirect'", "'will-frame-navigate'", "'input-event'", "'before-mouse-event'", "'before-input-event'"]) {
+  for (const hook of ['setWindowOpenHandler', "'will-attach-webview'", "'will-navigate'", "'will-redirect'", "'will-frame-navigate'", "'did-start-navigation'", "'input-event'", "'before-mouse-event'", "'before-input-event'"]) {
     assert.ok(body.includes(hook), hook);
   }
   // The webview-only early return must come after the guards, or they would
   // never be installed on windows (will-attach-webview fires on the embedder).
-  assert.ok(body.indexOf("contents.getType() !== 'webview'") > body.indexOf("'will-frame-navigate'"));
+  const early = body.indexOf("contents.getType() !== 'webview'");
+  assert.ok(early > body.indexOf("'will-frame-navigate'"));
+  assert.ok(early > body.indexOf("'did-start-navigation'"), 'pop-outs are stream surfaces too');
+  // Issue 6: a load the embedder starts after attach is stopped when it
+  // leaves the platforms (the rule is isBlockedStreamLoad, in web-security).
+  const start2 = body.slice(body.indexOf("contents.on('did-start-navigation'"));
+  assert.match(start2, /if \(!isBlockedStreamLoad\(contentsRole\(contents\), \{/);
+  assert.match(start2, /contents\.stop\(\)/);
+  assert.match(start2, /logSecurityOnce\(/);
+  // Issue 1: the attach verdict comes from sanitizeWebviewAttach, which pins
+  // the guest's partition, and nothing but the dashboard may embed.
+  assert.match(body, /const verdict = sanitizeWebviewAttach\(webPreferences, params\);\s*if \(contentsRole\(contents\) !== 'dashboard'\)/);
+});
+
+test('F19 regression: every privileged IPC handler goes through the dashboard sender check', () => {
+  // The wrapper replaces ipcMain.handle itself, so it must exist before the
+  // first registration: one registered above it would skip the check.
+  const wrapper = mainJs.indexOf('ipcMain.handle = (channel, listener) =>');
+  assert.ok(wrapper > 0, 'wrapper present');
+  const firstHandle = mainJs.indexOf("ipcMain.handle('");
+  assert.ok(firstHandle > 0, 'handlers registered');
+  assert.ok(wrapper < firstHandle, 'wrapper installed before the first ipcMain.handle(\'...\')');
+  const wrapped = mainJs.slice(wrapper, mainJs.indexOf('\n});', wrapper));
+  assert.match(wrapped, /registerIpcHandler\(channel, \(event, \.\.\.args\) => \{/);
+  assert.match(wrapped, /if \(!isTrustedDashboardSender\(event, dashboard\)\) \{[\s\S]*?throw new Error\(/);
+  assert.match(wrapped, /return listener\(event, \.\.\.args\);/);
+  assert.match(mainJs, /const registerIpcHandler = ipcMain\.handle\.bind\(ipcMain\);/);
+  // Every channel is registered through that one function.
+  const registrations = mainJs.match(/ipcMain\.handle\(\s*['"`]/g) || [];
+  assert.ok(registrations.length > 20, `found ${registrations.length}`);
+  // No route around it, in main.js or any main-process module.
+  const bypass = /\bipcMain\.(on|once|addListener|prependListener|prependOnceListener|handleOnce)\s*\(|\.ipc\.(handle|handleOnce|on|once|addListener)\s*\(|\bipcMain\s*\[|=\s*ipcMain\.handle\b(?!\.bind\(ipcMain\))|\{[^}]*\bhandle\b[^}]*\}\s*=\s*ipcMain\b/;
+  const sources = [{ file: 'main.js', text: mainJs }, ...fs.readdirSync(path.join(REPO, 'main')).filter(f => f.endsWith('.js')).map(f => ({ file: `main/${f}`, text: read(`main/${f}`) }))];
+  for (const { file, text } of sources) {
+    assert.doesNotMatch(text, bypass, `${file} registers IPC around the sender check`);
+  }
 });

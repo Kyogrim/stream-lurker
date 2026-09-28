@@ -26,19 +26,21 @@ function runPreload({ rootAtStart = false } = {}) {
     return el;
   };
   const errors = [];
+  const ipc = [];
   const ctx = {
     document: doc,
     MutationObserver: class { constructor(cb) { return new FakeMutationObserver(doc, cb); } },
     require: (name) => {
       assert.equal(name, 'electron');
-      return { ipcRenderer: { sendSync: () => 'uid-1234' }, webFrame: {} };
+      const record = (kind) => (...a) => { ipc.push([kind, ...a]); return null; };
+      return { ipcRenderer: { sendSync: record('sendSync'), send: record('send'), invoke: record('invoke') }, webFrame: {} };
     },
     console: { error: (...a) => errors.push(a.join(' ')), warn() {}, log() {} },
   };
   vm.createContext(ctx);
   vm.runInContext(PRELOAD, ctx);
   const readyState = (s) => { doc.readyState = s; doc.dispatchEvent(new FakeEvent('readystatechange')); };
-  return { doc, injected, errors, readyState };
+  return { doc, injected, errors, ipc, readyState };
 }
 
 test('no root at document-start: injected once when <html> appears, never again (F46)', async () => {
@@ -85,8 +87,18 @@ test('if readystatechange wins the race, the observer still stands down', async 
 
 test('the injected script is the stealth payload, and leaves no marker on the page', () => {
   const p = runPreload({ rootAtStart: true });
-  assert.match(p.injected[0], /const PRELOAD_UNIQUE_ID = "uid-1234";/);
   assert.match(p.injected[0], /defineNativeGetter\(Navigator\.prototype, 'plugins'/);
+  assert.doesNotThrow(() => new vm.Script(p.injected[0]), 'the payload still parses');
   // A global "already installed" flag would be visible to fingerprinting.
   assert.doesNotMatch(p.injected[0], /window\.__|Symbol\.for\(/);
+});
+
+test('F83: no blocking IPC at document start, and no dead device-ID lock', () => {
+  const p = runPreload({ rootAtStart: true });
+  // The sendSync blocked every login page load for an id main never had.
+  assert.deepEqual(p.ipc, []);
+  assert.doesNotMatch(PRELOAD, /get-twitch-unique-id-sync|sendSync/);
+  // The lock never engaged (the id was always empty) yet logged that it had.
+  assert.doesNotMatch(p.injected[0], /PRELOAD_UNIQUE_ID|Storage\.prototype|Locked localStorage device IDs/);
+  assert.deepEqual(p.errors, []);
 });

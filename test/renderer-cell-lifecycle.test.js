@@ -246,14 +246,32 @@ test('F15: a recovered page that never fires load still clears on dom-ready', as
   await wv.dispatch('did-start-loading');
   await wv.dispatch('dom-ready');
   assert.equal(cell.dataset.crashed, undefined);
-  // Off the platform (a login bounce, say) is not "recovered".
+  // Off the platform (a consent or login bounce) is a working page too: the
+  // overlay goes so the user can click through it. It fires no further
+  // failure, so the overlay would otherwise stay over it for good. Not
+  // logged as "recovered", since it is not the stream.
   await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
   t.mock.timers.tick(30000);
+  assert.equal(count(wv, 'reload'), 2);
   wv.url = 'https://accounts.google.com/ServiceLogin';
+  const linesBefore = logs().length;
   await wv.dispatch('did-start-loading');
   await wv.dispatch('dom-ready');
   await wv.dispatch('did-finish-load');
-  assert.equal(cell.dataset.crashed, 'true');
+  assert.equal(cell.dataset.crashed, undefined, 'the overlay no longer covers the page');
+  assert.ok(!logs().slice(linesBefore).some(l => /recovered/.test(l)), logs().slice(linesBefore).join('\n'));
+  // A failed load off the platform still keeps it (and reloads).
+  wv.url = 'https://consent.google.com/ml?continue=x';
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-fail-load', { isMainFrame: true, errorCode: -105, errorDescription: 'ERR_NAME_NOT_RESOLVED', validatedURL: wv.url });
+  await wv.dispatch('dom-ready');
+  await wv.dispatch('did-finish-load');
+  assert.equal(cell.dataset.crashed, 'true', "Chromium's error page is never healthy");
+  t.mock.timers.tick(120000);
+  assert.equal(count(wv, 'reload'), 3);
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-finish-load');
+  assert.equal(cell.dataset.crashed, undefined);
 });
 
 test('F15: routine failures are ignored', async (t) => {

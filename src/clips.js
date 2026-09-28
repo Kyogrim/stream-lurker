@@ -1,5 +1,5 @@
 import {
-  state, appendLogMessage, escapeHtml, safeHttpsUrl, TWITCH_PAGE_HOSTS, TWITCH_MEDIA_HOSTS,
+  appendLogMessage, escapeHtml, safeHttpsUrl, TWITCH_PAGE_HOSTS, TWITCH_MEDIA_HOSTS, monitoredStreamers,
 } from './state.js';
 
 const TWITCH_GQL_URL = 'https://gql.twitch.tv/gql';
@@ -133,9 +133,7 @@ export function initClipsManager() {
 }
 
 function getMonitoredTwitchStreamers() {
-  const cfg = state.currentConfig;
-  if (!cfg || !cfg.streamers) return [];
-  return cfg.streamers.filter(s => s.platform.toLowerCase() === 'twitch').map(s => s.username);
+  return monitoredStreamers().filter(s => s.platform.toLowerCase() === 'twitch').map(s => s.username);
 }
 
 async function fetchTrendingClips() {
@@ -316,16 +314,30 @@ function fillClipIdentity(el, clip, view) {
   el.querySelector('.clip-author').textContent = view.author;
 }
 
-function openClip(clip) {
+// Clips open and download through main only. A window.open fallback went to
+// main's popup handler instead, which opens a link in the system browser only
+// right after a click and denies it otherwise, so whether it worked depended
+// on timing. The bridge is always there (preload.js).
+async function openClip(clip) {
   const pageUrl = clipPageUrl(clip);
   if (!pageUrl) {
     appendLogMessage('[Clips] Not opening a clip whose link is not a twitch.tv https URL.');
     return;
   }
-  if (window.api && window.api.openClipWindow) {
-    window.api.openClipWindow(pageUrl);
-  } else {
-    window.open(pageUrl, '_blank');
+  try {
+    const res = await window.api.openClipWindow(pageUrl);
+    if (res && res.success === false) appendLogMessage(`[Clips] Could not open the clip: ${res.error || 'unknown error'}`);
+  } catch (err) {
+    appendLogMessage(`[Clips] Could not open the clip: ${err?.message || err}`);
+  }
+}
+
+async function downloadClipFile(mp4Url, fileName, title) {
+  try {
+    const res = await window.api.downloadClip(mp4Url, fileName);
+    if (res && res.success === false) appendLogMessage(`[Clips] Could not download ${title}: ${res.error || 'unknown error'}`);
+  } catch (err) {
+    appendLogMessage(`[Clips] Could not download ${title}: ${err?.message || err}`);
   }
 }
 
@@ -401,10 +413,8 @@ function createClipCard(clip) {
       mp4Url = legacyClipMp4Url(clip);
     }
     
-    if (mp4Url && window.api && window.api.downloadClip) {
-      window.api.downloadClip(mp4Url, view.fileName);
-    } else if (mp4Url) {
-      window.open(mp4Url, '_blank');
+    if (mp4Url) {
+      await downloadClipFile(mp4Url, view.fileName, view.title);
     } else {
       appendLogMessage(`[Clips] Could not resolve download URL for ${view.title}`);
     }

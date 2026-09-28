@@ -40,9 +40,16 @@ test('F93: a throwing render still leaves listeners registered and open streams 
   // A config as a damaged import leaves it: reading these throws, the way
   // renderExtensionsList and renderCalendar used to on a null list or an
   // event without a time.
-  // The second streamer entry makes restoring kick:bar throw (its lookup
-  // reaches the entry with no platform); twitch:foo must be restored anyway.
-  const config = { streamers: [{ platform: 'twitch', username: 'Foo' }, { platform: null, username: 'broken' }], watchTime: { streamers: {} }, accounts: {} };
+  // The entry with no platform sits before kick:bar's: the display-casing
+  // lookup skips it (monitoredStreamers) instead of throwing, so kick:bar is
+  // restored. youtube:@baz's auto-quality flag throws when read, so that one
+  // stream fails to rebuild; twitch:foo, after it, must be restored anyway.
+  const config = {
+    streamers: [{ platform: 'twitch', username: 'Foo' }, { platform: null, username: 'broken' }, { platform: 'kick', username: 'Bar' }],
+    watchTime: { streamers: {} },
+    accounts: {},
+    disabledAutoQuality: { get 'youtube:@baz'() { throw new Error('damaged quality entry'); } },
+  };
   Object.defineProperty(config, 'extensions', { enumerable: true, get() { throw new Error('extensions is not iterable'); } });
   Object.defineProperty(config, 'calendarEvents', { enumerable: true, get() { throw new Error("reading 'localeCompare'"); } });
 
@@ -50,7 +57,7 @@ test('F93: a throwing render still leaves listeners registered and open streams 
   const invoked = [];
   const answers = {
     getConfig: config,
-    getActiveContainers: ['kick:bar', 'twitch:foo'],
+    getActiveContainers: ['kick:bar', 'youtube:@baz', 'twitch:foo'],
     getRecentLogs: ['[Scan] earlier line'],
     syncPlatformSchedules: [],
   };
@@ -85,11 +92,18 @@ test('F93: a throwing render still leaves listeners registered and open streams 
   for (const name of ['onLogMessage', 'onStatusUpdate', 'onActiveContainersUpdate', 'onOpenStreamTab', 'onCloseStreamTab', 'onWatchTimeUpdate']) {
     assert.ok(registered.has(name), `${name} was never registered`);
   }
-  assert.ok(logs.some(l => /^\[ERROR\] Restoring kick:bar failed during startup/.test(l)), logs.join('\n'));
-  assert.ok(doc.getElementById('grid-cell-twitch-foo'), 'the stream main still tracks was restored');
+  // A malformed streamer entry costs no stream its cell...
+  assert.ok(!logs.some(l => /Restoring kick:bar failed/.test(l)), logs.join('\n'));
+  assert.ok(doc.getElementById('grid-cell-kick-bar'), 'kick:bar restored past the entry with no platform');
+  assert.equal(doc.getElementById('grid-cell-kick-bar').dataset.username, 'Bar', 'with its display casing');
+  // ...and one stream that cannot be rebuilt costs only its own.
+  assert.ok(logs.some(l => /^\[ERROR\] Restoring youtube:@baz failed during startup: damaged quality entry/.test(l)), logs.join('\n'));
+  assert.equal(doc.getElementById('grid-cell-youtube-@baz'), null);
+  assert.ok(doc.getElementById('grid-cell-twitch-foo'), 'the stream after the failed one was restored');
   assert.equal(doc.getElementById('grid-cell-twitch-foo').dataset.username, 'Foo', 'with its display casing');
   assert.ok(logs.includes('[Scan] earlier line'), 'recent logs were replayed');
-  assert.ok(invoked.some(c => c[0] === 'updateActiveTabs'), 'the grid reported itself to main');
+  assert.deepEqual(invoked.filter(c => c[0] === 'updateActiveTabs').map(c => c[1]), [['kick:bar', 'twitch:foo']],
+    'main hears once, without the stream that failed');
 
   // The calendar keeps syncing on its own timer.
   t.mock.timers.tick(5000);

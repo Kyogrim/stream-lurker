@@ -86,12 +86,18 @@ function eventFormEls() {
   };
 }
 
+// Set by a 'change' on the day <select>: only a weekday the user chose is
+// kept across the midnight rebuild. The untouched default is the first
+// option, Today; kept, yesterday's value would sit six days out, and an event
+// added without looking would land a week late.
+let dayPickedByUser = false;
+
 export function populateCalendarFormDays() {
   const daySelect = document.getElementById('event-day');
   if (!daySelect) return;
   // Rebuilt at midnight to move the Today/Tomorrow labels; keep the weekday
   // the user had picked in a half-filled form.
-  const picked = daySelect.value;
+  const picked = dayPickedByUser ? daySelect.value : '';
   daySelect.innerHTML = '';
   const today = new Date().getDay();
   for (let i = 0; i < 7; i++) {
@@ -329,11 +335,18 @@ function setSyncStatus(text) {
   if (el) el.textContent = text;
 }
 
+// Resolves to { ok, learned }. ok: every streamer answered. learned: the
+// stored schedule was updated, which includes a sync where some streamers
+// failed, since main merged and saved the rest. learned is false only when
+// the sync told us nothing (offline skip, every fetch failed, an empty
+// answer from an older main, an unreadable one); only that is worth retrying
+// early. A partial failure retried every 30 minutes just re-fetches the same
+// broken streamer (a deleted handle 404s forever) and floods the log.
 async function runScheduleSync(manual) {
   const previous = Array.isArray(state.platformSchedules) ? state.platformSchedules : [];
   if (!manual && navigator.onLine === false) {
     appendLogMessage('[Calendar] Offline; skipped the background schedule sync until the network is back.');
-    return { ok: false };
+    return { ok: false, learned: false };
   }
   if (!manual) appendLogMessage('[Calendar] Running background scheduled calendar sync...');
 
@@ -345,7 +358,7 @@ async function runScheduleSync(manual) {
       : update.reason === 'empty' ? 'came back empty (network trouble?)' : 'gave an unreadable answer';
     appendLogMessage(`[Calendar] Schedule sync ${why}; kept the previous schedule.`);
     if (manual) setSyncStatus('Sync failed; kept the previous schedule.');
-    return { ok: false };
+    return { ok: false, learned: false };
   }
 
   state.platformSchedules = update.events;
@@ -363,7 +376,7 @@ async function runScheduleSync(manual) {
   if (manual) {
     setSyncStatus(update.failed.length ? `${update.failed.length} streamer(s) could not be synced.` : '');
   }
-  return { ok: update.failed.length === 0 };
+  return { ok: update.failed.length === 0, learned: true };
 }
 
 // One sync at a time: a click while the timer's sync runs joins that run.
@@ -374,32 +387,59 @@ export function syncPlatformSchedules({ manual = false } = {}) {
   return syncInFlight;
 }
 
+// The wait before the next background sync, given how many in a row learned
+// nothing. A sync that learned something waits the full interval; one that
+// did not retries sooner, doubling from SCHEDULE_SYNC_RETRY_MS with each
+// consecutive miss up to the full interval, so a lasting failure (a network
+// that blocks the platforms) settles at the normal cadence.
+export function nextScheduleSyncDelay(consecutiveFailures) {
+  const n = Math.floor(Number(consecutiveFailures)) || 0;
+  if (n <= 0) return SCHEDULE_SYNC_INTERVAL_MS;
+  return Math.min(SCHEDULE_SYNC_RETRY_MS * 2 ** (n - 1), SCHEDULE_SYNC_INTERVAL_MS);
+}
+
+let syncFailures = 0;
+let backgroundRun = null;
+
+async function backgroundSyncOnce() {
+  let learned = false;
+  try {
+    learned = (await syncPlatformSchedules()).learned === true;
+  } catch (err) {
+    console.error('Background calendar sync failed:', err);
+  }
+  syncFailures = learned ? 0 : syncFailures + 1;
+  if (!learned) armOnlineRetry();
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runBackgroundSync, nextScheduleSyncDelay(syncFailures));
+}
+
+// One loop iteration at a time, whether the timer or a reconnect started it.
+function runBackgroundSync() {
+  if (!backgroundRun) backgroundRun = backgroundSyncOnce().finally(() => { backgroundRun = null; });
+  return backgroundRun;
+}
+
 function armOnlineRetry() {
   if (onlineRetryArmed) return;
   onlineRetryArmed = true;
   window.addEventListener('online', () => {
     onlineRetryArmed = false;
-    syncPlatformSchedules().catch(err => console.error('Calendar sync after reconnect failed:', err));
+    // A reconnect is news: sync now, in place of the pending retry, and
+    // restart the backoff.
+    syncFailures = 0;
+    runBackgroundSync();
   }, { once: true });
 }
 
 // Started once the dashboard is up: the first sync after `firstSyncDelayMs`,
-// then every SCHEDULE_SYNC_INTERVAL_MS, or sooner after a failure. Also arms
-// the midnight rollover.
+// then every SCHEDULE_SYNC_INTERVAL_MS, or sooner after a sync that learned
+// nothing (see nextScheduleSyncDelay). Also arms the midnight rollover.
 export function startCalendarAutoRefresh({ firstSyncDelayMs = 5000 } = {}) {
   scheduleMidnightRefresh();
-  const run = async () => {
-    let ok = false;
-    try {
-      ok = (await syncPlatformSchedules()).ok;
-    } catch (err) {
-      console.error('Background calendar sync failed:', err);
-    }
-    if (!ok) armOnlineRetry();
-    syncTimer = setTimeout(run, ok ? SCHEDULE_SYNC_INTERVAL_MS : SCHEDULE_SYNC_RETRY_MS);
-  };
+  syncFailures = 0;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(run, firstSyncDelayMs);
+  syncTimer = setTimeout(runBackgroundSync, firstSyncDelayMs);
 }
 
 export function setupCalendarHandlers() {
@@ -409,6 +449,8 @@ export function setupCalendarHandlers() {
     if (document.visibilityState === 'visible') refreshCalendarIfDayChanged();
   });
   window.addEventListener('focus', refreshCalendarIfDayChanged);
+  // Only a real pick fires 'change'; the rebuild setting .value does not.
+  document.getElementById('event-day')?.addEventListener('change', () => { dayPickedByUser = true; });
 
   const syncBtn = document.getElementById('sync-calendar-btn');
   if (syncBtn) {

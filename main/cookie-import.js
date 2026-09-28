@@ -204,6 +204,23 @@ function isYouTubeCookieDomain(domain) {
   return d === 'youtube.com' || d.endsWith('.youtube.com') || d === 'google.com' || d === 'accounts.google.com';
 }
 
+// The cookies of a YouTube session as the jar holds them (ses.cookies.get
+// results for youtube.com and google.com), reduced to the hosts an import
+// writes to, each cookie once. A paste YouTube rejects is undone by writing
+// these back, so a working session the paste replaced is not lost.
+function youtubeJarCookies(cookies) {
+  const seen = new Set();
+  const out = [];
+  for (const c of cookies || []) {
+    if (!c || !c.name || !isYouTubeCookieDomain(c.domain)) continue;
+    const key = `${String(c.domain).toLowerCase()}|${c.path || '/'}|${c.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
 // A pasted header string has no domains. Those cookies were copied from a
 // youtube.com page, so they belong on .youtube.com: the apex host-only cookie
 // they used to become is never sent to www.youtube.com. A __Host- cookie can
@@ -236,6 +253,7 @@ module.exports = {
   shouldClearExisting,
   removalUrl,
   isYouTubeCookieDomain,
+  youtubeJarCookies,
   assignPastedYouTubeDomains,
   hasGoogleSessionCookies,
 };

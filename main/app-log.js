@@ -110,6 +110,26 @@ function createFatalReporter({
   };
 }
 
+// The 'uncaughtException' listener for a process whose main script may still
+// be loading. Every error is reported. One thrown before loaded() is the main
+// script failing to load, not a stray runtime error: nothing after the throw
+// ran (no ready handler, window or tray), yet a listener keeps the process
+// alive, still holding the single-instance lock, so every relaunch would exit
+// silently. onLoadFailure must make that visible and end the process. After
+// loaded(), errors are only reported and the app keeps running.
+function createLoadGuard({ report, onLoadFailure }) {
+  let loaded = false;
+  return {
+    loaded() { loaded = true; },
+    get isLoaded() { return loaded; },
+    uncaught(err, origin) {
+      report(origin || 'uncaughtException', err);
+      if (loaded) return;
+      onLoadFailure(err);
+    },
+  };
+}
+
 // One console line from a page. Electron 35+ puts the details on the event
 // (level is now 'info' | 'warning' | 'error' | 'debug'); the old positional
 // arguments are deprecated and trigger a warning when the listener declares
@@ -127,5 +147,6 @@ module.exports = {
   describeError,
   appendCapped,
   createFatalReporter,
+  createLoadGuard,
   formatConsoleMessage,
 };

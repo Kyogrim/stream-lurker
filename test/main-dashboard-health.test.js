@@ -42,6 +42,21 @@ test('regression F31: after the quick reloads it gives up for a while, not forev
   assert.equal(h.gone('crashed', T0 + 4 * MIN + SLOW_RELOAD_DELAY_MS + 1000).action, 'reload');
 });
 
+test('a dead dashboard reloads as soon as the user asks to see it; a live or loading one does not', () => {
+  const h = createDashboardHealth();
+  assert.equal(h.reloadOnShow, false, 'still loading: a reload would only restart it');
+  h.loaded();
+  assert.equal(h.reloadOnShow, false);
+  for (let i = 1; i <= MAX_QUICK_RELOADS; i++) h.gone('crashed', T0 + i * MIN);
+  assert.equal(h.gone('crashed', T0 + 4 * MIN).action, 'give-up');
+  // Thirty minutes of blank window, and no menu for Ctrl+R: show means reload.
+  assert.equal(h.reloadOnShow, true);
+  h.loaded();
+  assert.equal(h.reloadOnShow, false);
+  h.gone('clean-exit', T0 + 5 * MIN);
+  assert.equal(h.reloadOnShow, true, 'nothing scheduled a reload after a clean exit either');
+});
+
 test('crashes spread out beyond the window never exhaust the quick reloads', () => {
   const h = createDashboardHealth();
   for (let i = 0; i < 10; i++) {

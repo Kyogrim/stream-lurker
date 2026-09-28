@@ -88,7 +88,9 @@ test('F94/F07: index.html has no inline script, inline handler or javascript: UR
 test('F94: help links carry an allowlisted data-external-url', async () => {
   const { externalLinkUrl } = await load('src/external-links.js');
   const urls = [...HTML.matchAll(/data-external-url="([^"]*)"/g)].map(m => m[1]);
-  assert.deepEqual(urls.sort(), ['https://dev.twitch.tv/console', 'https://github.com/gorhill/uBlock/releases']);
+  // F57 removed the uBlock Origin download link: ad blockers cannot block
+  // network requests in the app, so the page no longer recommends one.
+  assert.deepEqual(urls.sort(), ['https://dev.twitch.tv/console']);
   for (const url of urls) assert.equal(externalLinkUrl({ dataset: { externalUrl: url } }), url);
 });
 
@@ -132,7 +134,7 @@ test('G4.7: nothing render- or script-blocking is fetched from the network', () 
     }
   }
   // Outside the CSP (which has to allow them), the page itself never names the
-  // font hosts: src/fonts.js attaches the stylesheet after parsing.
+  // font hosts: src/fonts.js attaches the stylesheet once the window has loaded.
   const withoutCsp = HTML.replace(/<meta\s+http-equiv="Content-Security-Policy"[^>]*>/i, '');
   assert.doesNotMatch(withoutCsp, /fonts\.googleapis\.com|fonts\.gstatic\.com/, 'Google Fonts must be attached from script');
   // The CSS falls back to system fonts while (or if) the web fonts never load.
@@ -141,11 +143,46 @@ test('G4.7: nothing render- or script-blocking is fetched from the network', () 
   assert.match(css, /--font-mono:\s*'JetBrains Mono',\s*monospace;/);
 });
 
-test('G4.7: renderer.js attaches the fonts at module load, before init awaits anything', () => {
+// A script-inserted stylesheet still holds the window's load event until its
+// request settles, and main credits watch time only from did-finish-load
+// (that event). Checked in Chrome 152: a stalled stylesheet inserted from a
+// module script kept readyState at 'interactive' for as long as it stalled.
+test('G4.7: renderer.js defers the fonts to the load event, never attaching them itself', () => {
   const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
-  const call = src.search(/^loadWebFonts\(\);$/m);
-  assert.ok(call > 0, 'top-level loadWebFonts() call');
-  assert.ok(call < src.indexOf('async function init('), 'called before init');
+  assert.match(src, /^loadWebFontsAfterLoad\(\);$/m, 'top-level, never awaited');
+  assert.doesNotMatch(src, /\bloadWebFonts\(/, 'no direct loadWebFonts() call, which would hold the load event');
+});
+
+test('G4.7: loadWebFontsAfterLoad waits for the load event while the document is still loading', async () => {
+  const { loadWebFontsAfterLoad, WEB_FONTS_HREF } = await load('src/fonts.js');
+  const makeDoc = readyState => {
+    const head = { children: [], appendChild(el) { this.children.push(el); return el; } };
+    return {
+      readyState,
+      head,
+      createElement: tag => ({ tagName: tag.toUpperCase() }),
+      getElementById: id => head.children.find(el => el.id === id) || null,
+    };
+  };
+  for (const readyState of ['loading', 'interactive']) {
+    const doc = makeDoc(readyState);
+    const listeners = [];
+    const win = { addEventListener: (type, fn, opts) => listeners.push({ type, fn, opts }) };
+    assert.equal(loadWebFontsAfterLoad(win, doc), null);
+    assert.equal(doc.head.children.length, 0, `${readyState}: nothing attached before load`);
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0].type, 'load', 'not DOMContentLoaded, which comes before load');
+    assert.deepEqual(listeners[0].opts, { once: true });
+    doc.readyState = 'complete';
+    listeners[0].fn();
+    assert.equal(doc.head.children.length, 1);
+    assert.equal(doc.head.children[0].href, WEB_FONTS_HREF);
+  }
+  // Already loaded (a late import): attached at once, no listener left behind.
+  const done = makeDoc('complete');
+  const win = { addEventListener: () => assert.fail('no listener once loaded') };
+  assert.equal(loadWebFontsAfterLoad(win, done).href, WEB_FONTS_HREF);
+  assert.equal(done.head.children.length, 1);
 });
 
 test('G4.7: loadWebFonts appends one non-blocking stylesheet link, once', async () => {

@@ -20,6 +20,7 @@ let verified = false;
 let busy = false;
 let checkSeq = 0;
 let checkTimer = null;
+let codeSaved = Promise.resolve(); // the worker reads the code from storage
 
 function setResult(msg, kind) {
   result.textContent = msg || '';
@@ -50,17 +51,31 @@ chrome.storage.local.get('pairingCode', (d) => {
   refreshConnection();
 });
 codeInput.addEventListener('input', () => {
-  chrome.storage.local.set({ pairingCode: currentCode() });
+  codeSaved = Promise.resolve(chrome.storage.local.set({ pairingCode: currentCode() })).catch(() => {});
   clearTimeout(checkTimer);
   checkTimer = setTimeout(refreshConnection, 350);
 });
 
 async function refreshConnection() {
   const seq = ++checkSeq;
+  const code = currentCode();
   let app;
-  try { app = await SL.findApp({ ...deps, code: currentCode() }); } catch (e) { app = { status: 'not-found' }; }
+  try { app = await SL.findApp({ ...deps, code }); } catch (e) { app = { status: 'not-found' }; }
   if (seq !== checkSeq) return; // a newer check (the code changed) owns the status line
   applyConnection(app);
+  if (app.status === 'verified') resyncIfFixed(code).catch(() => {});
+}
+
+// A stored auto-sync failure that this check shows is fixed (the right code
+// pasted, the app updated) would otherwise stay in red until the next alarm,
+// up to 30 min, telling the user to do what they just did. Run the pass now,
+// once the worker can read the code that was just verified.
+const FIXABLE_STATUSES = ['code-mismatch', 'code-too-short', 'not-paired', 'app-outdated'];
+async function resyncIfFixed(code) {
+  await codeSaved;
+  const s = await chrome.storage.local.get({ pairingCode: '', lastResyncStatus: '' });
+  if (!FIXABLE_STATUSES.includes(s.lastResyncStatus) || SL.normalizeCode(s.pairingCode) !== code) return;
+  syncNow();
 }
 
 async function connect(platform) {
@@ -98,7 +113,7 @@ async function connect(platform) {
       setResult(r.error || `Import failed (HTTP ${r.httpStatus}).`, 'err');
     }
   } catch (e) {
-    setResult('Could not reach Stream Lurker: ' + e.message, 'err');
+    setResult(SL.importFailureText(e), 'err');
   } finally {
     busy = false;
     updateButtons();
@@ -142,7 +157,8 @@ async function renderSync() {
   syncRows.replaceChildren(...rows);
 }
 
-syncNowBtn.addEventListener('click', async () => {
+async function syncNow() {
+  if (syncNowBtn.dataset.running) return;
   syncNowBtn.dataset.running = '1';
   syncNowBtn.disabled = true;
   syncSummary.textContent = 'Syncing…';
@@ -157,7 +173,8 @@ syncNowBtn.addEventListener('click', async () => {
     syncNowBtn.disabled = false;
     renderSync();
   }
-});
+}
+syncNowBtn.addEventListener('click', syncNow);
 
 chrome.storage.onChanged.addListener((_changes, area) => { if (area === 'local') renderSync(); });
 setInterval(renderSync, 30000); // keeps "12 min ago" honest while the popup stays open

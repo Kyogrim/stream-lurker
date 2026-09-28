@@ -138,13 +138,15 @@
       background: rgba(0, 0, 0, 0.35);
       color: var(--cyan-color);
       font-family: var(--font-mono);
-      font-size: 13px;
+      /* Sized so a whole 32-character code stays visible (new installs get
+         one): at 13px with 2px spacing the last four or five were cut off. */
+      font-size: 12px;
       font-weight: 500;
-      letter-spacing: 2px;
+      letter-spacing: 0.5px;
       text-transform: uppercase;
       transition: var(--transition);
     }
-    input::placeholder { color: var(--text-muted); letter-spacing: 2px; }
+    input::placeholder { color: var(--text-muted); letter-spacing: 0; text-transform: none; font-family: var(--font-sans); }
     input:focus {
       outline: none;
       border-color: var(--cyan-color);
@@ -275,7 +277,7 @@
   <div class="status-line"><span class="dot" id="dot"></span><span id="conn">Looking for Stream Lurker…</span></div>
 
   <label for="code">Pairing code (from the app)</label>
-  <input id="code" placeholder="XXXXXXXX" maxlength="64" autocomplete="off" spellcheck="false">
+  <input id="code" placeholder="Paste the code from Platform Logins" maxlength="64" autocomplete="off" spellcheck="false">
 
   <div class="btns">
     <button class="tw" data-platform="twitch">

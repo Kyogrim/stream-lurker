@@ -35,6 +35,20 @@ test('other statuses are neither the user\'s fault nor a network error', () => {
   assert.equal(classifyTwitchUserResponse(400, '{"error":"bad request"}').reason, 'unexpected');
 });
 
+test('a GraphQL error with no user is Twitch failing, not the token being refused', () => {
+  const failing = classifyTwitchUserResponse(200, JSON.stringify([{ errors: [{ message: 'service timeout' }], data: { currentUser: null } }]));
+  assert.equal(failing.reason, 'unexpected');
+  assert.equal(failing.detail, 'service timeout');
+  assert.doesNotMatch(twitchUserFailureMessage(failing, 'session'), /did not accept/);
+  assert.match(twitchUserFailureMessage(failing, 'token'), /Nothing was changed/);
+  // Without data at all, or with several errors.
+  assert.equal(classifyTwitchUserResponse(200, JSON.stringify([{ errors: [{ message: 'a' }, { message: 'b' }] }])).reason, 'unexpected');
+  // An error that is about the token is still a rejection.
+  assert.equal(classifyTwitchUserResponse(200, JSON.stringify([{ errors: [{ message: 'Unauthorized' }], data: { currentUser: null } }])).reason, 'rejected');
+  // An empty errors list says nothing: no user is a rejection, as before.
+  assert.equal(classifyTwitchUserResponse(200, JSON.stringify([{ errors: [], data: { currentUser: null } }])).reason, 'rejected');
+});
+
 test('a fetch that throws (offline, DNS, proxy) is a network failure', async () => {
   const r = await resolveTwitchUser('t'.repeat(30), {
     fetch: async () => { throw new Error('net::ERR_INTERNET_DISCONNECTED'); },

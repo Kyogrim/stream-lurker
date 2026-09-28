@@ -3,8 +3,8 @@
 // effects (notify, spawn, close); the decisions live here so they run under
 // plain Node, scan after scan, in test/main-scan-planner.test.js.
 
-const { SETTING_RANGES, clampSetting, streamerPlatform, streamerName } = require('./config-sanitize');
-const { OFFLINE_CONFIRMATIONS } = require('./stream-liveness');
+const { SETTING_RANGES, clampSetting, scanIntervalMs, streamerPlatform, streamerName } = require('./config-sanitize');
+const { OFFLINE_CONFIRMATIONS, offlineMinSpanMs } = require('./stream-liveness');
 
 // Alert and open-dedupe entries not seen for this long are dropped. Every
 // sighting refreshes an entry, so this is time since last seen: a 24/7 stream
@@ -91,7 +91,8 @@ function activeKeysOn(activeWindows, platform) {
 // Applies one scan's results.
 //
 // ctx:
-//   now, config, activeWindows (Map, key -> true), openedSessions and
+//   now, config, intervalMs (the scan interval; scanIntervalMs(config) when
+//   absent), activeWindows (Map, key -> true), openedSessions and
 //   notifiedSessions (Map, sessionKey -> last seen ms), liveness
 //   (createStreamLiveness), modeOf(platform, username) -> 'auto'|'notify'|'ignore',
 //   notify(stream), spawn(platform, username) (adds to activeWindows),
@@ -125,7 +126,10 @@ function applyScanResults(results, ctx) {
   });
 
   // Auto-close. An errored check never closes anything: a timeout or a 403
-  // says nothing about the stream.
+  // says nothing about the stream. Two offline scans seconds apart (Scan Now
+  // right after a scheduled scan) are one observation, so the confirmations
+  // must also span part of an interval (see stream-liveness.js).
+  const intervalMs = Number.isFinite(ctx.intervalMs) ? ctx.intervalMs : scanIntervalMs(config);
   for (const stream of ordered) {
     if (stream.isLive || stream.error) continue;
     const key = streamKey(stream.platform, stream.username);
@@ -133,6 +137,12 @@ function applyScanResults(results, ctx) {
     const streak = liveness.offlineStreak(key);
     if (streak < OFFLINE_CONFIRMATIONS) {
       log(`[Lurk] ${stream.username} on ${stream.platform.toUpperCase()} reported offline (${streak}/${OFFLINE_CONFIRMATIONS}). Closing it if the next scan agrees.`);
+      continue;
+    }
+    if (!liveness.offlineConfirmed(key, now, intervalMs)) {
+      const since = Math.round((now - liveness.offlineSince(key)) / 1000);
+      const wait = Math.ceil(offlineMinSpanMs(intervalMs) / 1000);
+      log(`[Lurk] ${stream.username} on ${stream.platform.toUpperCase()} reported offline again, ${since} s after the first. Closing it if a scan at least ${wait} s after that one agrees.`);
       continue;
     }
     log(`[Lurk] Streamer ${stream.username} on ${stream.platform.toUpperCase()} went offline. Auto-closing container.`);

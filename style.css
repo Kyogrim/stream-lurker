@@ -1219,6 +1219,13 @@ input:checked + .slider:before {
   border-radius: var(--radius-sm);
 }
 
+/* A configured folder main could not reach (see extensions.js). */
+.ext-item-ver.unavailable {
+  color: #f59e0b;
+  background-color: rgba(245, 158, 11, 0.12);
+  cursor: help;
+}
+
 .ext-item-path {
   font-family: var(--font-mono);
   font-size: 0.7rem;
@@ -3121,6 +3128,30 @@ webview:-webkit-full-screen {
   font-family: monospace;
 }
 .ext-conn { font-size: 0.75rem; margin-left: 4px; }
+/* New codes are 32 characters: the global user-select: none would leave
+   typing it by hand as the only way to move it into the extension. */
+#ext-pairing-code {
+  user-select: text;
+  cursor: text;
+  word-break: break-all;
+}
+.ext-code-btn {
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.ext-note,
+.ext-sync {
+  font-size: 0.78rem;
+  margin: 6px 0 0;
+  color: var(--text-muted, #a1a1aa);
+  user-select: text;
+}
+.ext-note.ok { color: #22c55e; }
+.ext-note.warn,
+.ext-sync.warn { color: #f59e0b; }
+.ext-note.error { color: #ef4444; }
 .ext-fallback {
   font-size: 0.76rem;
   color: var(--text-muted, #a1a1aa);

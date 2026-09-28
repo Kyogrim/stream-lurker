@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { createFatalReporter, describeError, formatConsoleMessage } = require('../main/app-log');
+const { createFatalReporter, createLoadGuard, describeError, formatConsoleMessage } = require('../main/app-log');
 
 function tempFile() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sl-app-log-')), 'logs', 'main-errors.log');
@@ -95,6 +95,56 @@ test('F71: console lines come from the event fields (Electron 35+)', () => {
 // from a timer arrives as 'uncaughtException', a rejected fire-and-forget
 // async call as 'unhandledRejection', and with listeners installed the
 // process keeps running (the timer after them still fires).
+test('issue-11: the load guard reports every error, and fails only while the script is loading', () => {
+  const reported = [];
+  const failures = [];
+  const guard = createLoadGuard({ report: (o, e) => reported.push(`${o}: ${e.message}`), onLoadFailure: (e) => failures.push(e.message) });
+  assert.equal(guard.isLoaded, false);
+  guard.uncaught(new Error('top-level bug'), 'uncaughtException');
+  assert.deepEqual(failures, ['top-level bug']);
+  guard.loaded();
+  guard.uncaught(new Error('later bug'));
+  assert.deepEqual(reported, ['uncaughtException: top-level bug', 'uncaughtException: later bug']);
+  assert.deepEqual(failures, ['top-level bug'], 'a runtime error only reports');
+});
+
+// What main.js amounts to under Electron: the listener is registered first,
+// something keeps the event loop alive (Electron's own loop), then the rest of
+// the script runs, and its last line marks it loaded.
+function runMainLike(body) {
+  const script = `
+    const { createFatalReporter, createLoadGuard } = require(${JSON.stringify(path.join(__dirname, '..', 'main', 'app-log.js'))});
+    const report = createFatalReporter({ log: () => {}, consoleError: (t) => console.log(t.split('\\n').join(' | ')) });
+    const guard = createLoadGuard({ report, onLoadFailure: () => { console.log('shown and exiting'); process.exit(1); } });
+    process.on('uncaughtException', (err, origin) => guard.uncaught(err, origin));
+    const keepAlive = setInterval(() => {}, 1000);
+    ${body}
+    guard.loaded();
+  `;
+  return spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 5000 });
+}
+
+test('issue-11 regression: a top-level throw ends the process with an error instead of leaving it alive', () => {
+  const r = runMainLike(`throw new Error('environment-dependent top-level bug');`);
+  // Before the guard: logged, then the process sat there until the timeout.
+  assert.notEqual(r.signal, 'SIGTERM', 'did not hang');
+  assert.equal(r.status, 1);
+  // Node prefixes a top-level throw's stack with its source line.
+  assert.match(r.stdout, /\[Main error\] uncaughtException: .*Error: environment-dependent top-level bug/);
+  assert.match(r.stdout, /shown and exiting/);
+});
+
+test('issue-11: once loaded, a stray error is logged and the app keeps running', () => {
+  const r = runMainLike(`
+    setTimeout(() => { throw new Error('runtime bug'); }, 1);
+    setTimeout(() => { console.log('still running'); clearInterval(keepAlive); }, 50);
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\[Main error\] uncaughtException: Error: runtime bug/);
+  assert.match(r.stdout, /still running/);
+  assert.doesNotMatch(r.stdout, /shown and exiting/);
+});
+
 test('G2.1: timer throws and stray rejections reach the sink and the process survives', () => {
   const script = `
     const { createFatalReporter } = require(${JSON.stringify(path.join(__dirname, '..', 'main', 'app-log.js'))});

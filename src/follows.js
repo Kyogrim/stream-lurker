@@ -1,7 +1,7 @@
 // Sync live followed channels from Twitch (via main-process GQL). Kick scan
 // was removed — Cloudflare/Kasada protection made the scrape unreliable.
 
-import { state, appendLogMessage, escapeHtml } from './state.js';
+import { state, appendLogMessage, escapeHtml, monitoredStreamers } from './state.js';
 import { renderMonitoredList } from './streamers.js';
 import { updateStats } from './dashboard.js';
 
@@ -21,7 +21,7 @@ export function renderFollowsList() {
   }
 
   list.forEach(username => {
-    const isMonitored = state.currentConfig.streamers.some(
+    const isMonitored = monitoredStreamers().some(
       s => s.platform.toLowerCase() === state.activeFollowsTab && s.username.toLowerCase() === username.toLowerCase()
     );
 

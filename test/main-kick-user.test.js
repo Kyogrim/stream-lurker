@@ -5,7 +5,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('vm');
-const { KICK_USER_SCRIPT, kickNameFrom } = require('../main/kick-user');
+const { KICK_USER_SCRIPT, kickNameFrom, kickNameToStore } = require('../main/kick-user');
 const { hasKickSessionToken } = require('../main/account-state');
 
 // cookie: the page's document.cookie. api: path -> { status, body } or
@@ -67,17 +67,50 @@ test('F36: session plus an API answer is a sign-in, with the real name', async (
   assert.equal(requests[0].init.headers['X-XSRF-TOKEN'], 'abc=');
 });
 
-test('F36: a stale session whose API answers {} is not a sign-in, even if the page has a slug', async () => {
+test('F36 regression: a stale session whose API answers {} names nobody, even if the page has a slug', async () => {
   const { res } = await runOnPage({
     cookie: 'session_token=stale',
     api: { '/api/v1/user': { status: 200, body: '{}' }, '/api/v2/user': { status: 200, body: '{}' } },
     nextData: FEATURED,
+    userLink: '/bigstreamer',
   });
-  // The page fallback may name it (useful for naming a known account)...
-  assert.equal(res.source, 'next-data');
-  // ...but the login modal requires the API.
+  // A 2xx without a user is Kick saying the session is stale: the home
+  // page's featured streamer must not become the account.
+  assert.equal(res.source, null);
+  assert.equal(kickNameFrom(res), null);
   assert.equal(kickNameFrom(res, { requireApi: true }), null);
-  assert.equal(kickNameFrom(res), 'bigstreamer');
+  assert.ok(res.tried.includes('API answered without a user: the session is stale'));
+  // One 2xx is enough, whatever the other endpoint did.
+  const mixed = (await runOnPage({
+    cookie: 'session_token=stale',
+    api: { '/api/v1/user': { status: 503, body: '' }, '/api/v2/user': { status: 200, body: '{}' } },
+    nextData: FEATURED,
+  })).res;
+  assert.equal(kickNameFrom(mixed), null);
+});
+
+test('the page fallbacks still run when the API could not be asked at all', async () => {
+  const { res } = await runOnPage({
+    cookie: 'session_token=t',
+    api: { '/api/v1/user': { status: 403, body: '<html>challenge</html>' }, '/api/v2/user': 'hang' },
+    nextData: { props: { pageProps: { user: { username: 'erin' } } } },
+  });
+  assert.equal(res.source, 'next-data');
+  assert.equal(kickNameFrom(res), 'erin');
+  assert.equal(kickNameFrom(res, { requireApi: true }), null, 'never proof of a sign-in');
+});
+
+test('F15: a page-read name fills a placeholder but never renames a known Kick account', () => {
+  const page = { name: 'bigstreamer', source: 'next-data' };
+  const dom = { name: 'bigstreamer', source: 'dom' };
+  const api = { name: 'alice2', source: 'api' };
+  assert.equal(kickNameToStore('alice', page), null, 'a real name is kept');
+  assert.equal(kickNameToStore('alice', dom), null);
+  assert.equal(kickNameToStore('alice', api), 'alice2', 'Kick\'s API may rename it (a re-sync swapped accounts)');
+  assert.equal(kickNameToStore('Kick User', page), 'bigstreamer', 'a placeholder carries no information to lose');
+  assert.equal(kickNameToStore(undefined, page), 'bigstreamer');
+  assert.equal(kickNameToStore('alice', null), null);
+  assert.equal(kickNameToStore('alice', { name: '  ', source: 'api' }), null);
 });
 
 test('an error response is never read as a user', async () => {

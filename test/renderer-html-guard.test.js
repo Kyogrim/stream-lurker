@@ -785,7 +785,9 @@ test('renderer code: every HTML and URL sink is escaped or validated', () => {
   // Not vacuous: the scan really walked the renderer's sinks.
   assert.ok(totals.html >= 50, `expected >= 50 innerHTML sinks, saw ${totals.html}`);
   assert.ok(totals.templates >= 40, `expected >= 40 markup templates, saw ${totals.templates}`);
-  assert.ok(totals.url >= 4, `expected >= 4 URL sinks, saw ${totals.url}`);
+  // Three: clips.js lost its two window.open fallbacks (F10), and clips now
+  // open and download through main only.
+  assert.ok(totals.url >= 3, `expected >= 3 URL sinks, saw ${totals.url}`);
 });
 
 test('allowlist entries point at files that exist in the scan', () => {

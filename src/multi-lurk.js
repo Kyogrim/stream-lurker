@@ -10,6 +10,7 @@ import { switchTab } from './tabs.js';
 import { createStreamWebview } from './stream-webview.js';
 import { describeCellFailure, planCellRecovery, MAX_RELOADS, RELOAD_WINDOW_MS } from './cell-recovery.js';
 import { theaterKeyDecision } from './theater-key.js';
+import { guestLogLine, createLineDeduper } from './guest-console.js';
 import {
   qualityAndTheaterScript,
   ghostSuspendScript,
@@ -44,6 +45,7 @@ function lifeOf(cell) {
       givingUp: false,
       ghostTimers: [],
       altTSent: 0,         // native Alt+T presses sent to the current page
+      guestLog: createLineDeduper(), // forwarded page lines (guest-console.js)
     };
     cellLife.set(cell, life);
   }
@@ -410,10 +412,15 @@ function bindCellActions(cell, platform, username) {
   };
 
   webview.addEventListener('console-message', (e) => {
-    if (e.message.includes('[Kick Quality]')) {
-      appendLogMessage(`[Quality - ${username}] ${e.message.replace('[Kick Quality] ', '')}`);
+    const message = typeof e.message === 'string' ? e.message : '';
+    const line = guestLogLine(message, username);
+    if (line) {
+      // Only the quality script prints these, and it only runs on the
+      // platform hosts; the same line within a minute is dropped.
+      if (safeHttpsUrl(currentUrl(), INJECT_HOSTS) && life.guestLog(line, Date.now())) appendLogMessage(line);
+      return;
     }
-    if (e.message.includes('[Twitch Theater] Need Alt+T')) {
+    if (message.includes('[Twitch Theater] Need Alt+T')) {
       const decision = theaterKeyDecision(life.altTSent, {
         url: currentUrl(),
         windowFocused: document.hasFocus(),
@@ -500,16 +507,18 @@ function bindCellActions(cell, platform, username) {
   webview.addEventListener('did-fail-load', onPageFailure('did-fail-load'));
   webview.addEventListener('did-start-loading', () => { life.loadFailed = false; });
 
-  // Healthy again once a platform page comes up from a load that did not fail.
+  // Healthy again once any page comes up from a load that did not fail.
   // Chromium's error page also fires dom-ready and did-finish-load, but
   // did-fail-load reaches us first and sets loadFailed until the next load
   // starts. Either event clears it, so a page that never fires `load` can't
-  // leave the overlay over a working stream.
+  // leave the overlay over a working stream. Off the platform counts too: a
+  // YouTube cell's reload can land on Google's consent or sign-in page, which
+  // fires no further failure, so the overlay would sit over it for good and
+  // block the very click that gets back to the stream.
   const markHealthy = () => {
     if (life.loadFailed || cell.dataset.crashed !== 'true') return;
-    if (!safeHttpsUrl(currentUrl(), STREAM_HOSTS)) return;
     delete cell.dataset.crashed;
-    appendLogMessage(`[Lurk] ${username} (${PLAT}) recovered.`);
+    if (safeHttpsUrl(currentUrl(), STREAM_HOSTS)) appendLogMessage(`[Lurk] ${username} (${PLAT}) recovered.`);
   };
   webview.addEventListener('did-finish-load', markHealthy);
 
@@ -687,7 +696,11 @@ function buildSidebarTabButton(platform, username, tabId, cellId) {
   return tabBtn;
 }
 
-export function createStreamTab(platform, username) {
+// sync: false leaves telling main to the caller. A dashboard reload restores
+// every open stream in one pass and syncs once after it: a sync per stream
+// sent main [A], [A,B], [A,B,C], and main ended and restarted the sessions of
+// B and C each time one was missing from the list.
+export function createStreamTab(platform, username, { sync = true } = {}) {
   const p = platform.toLowerCase();
   const u = username.toLowerCase();
   const tabId = streamTabId(p, u);
@@ -738,7 +751,7 @@ export function createStreamTab(platform, username) {
   // new tab/cell is created in the background and the user navigates to it when
   // they choose.
 
-  syncActiveTabs();
+  if (sync) syncActiveTabs();
 }
 
 // Reflect pop-out window state on the cell's pop-out button. Called when the
@@ -811,15 +824,16 @@ export function removeStreamTab(platform, username) {
   syncActiveTabs();
 }
 
-// Reload every open stream webview — used after a newly installed extension is
-// loaded into the session so its content scripts inject into live streams.
+// Reload every open stream webview. Main asks for it whenever the loaded
+// extensions change: a new one only injects its content scripts on a load, and
+// what a removed one injected stays in a page until it reloads.
 export function reloadAllStreamContainers() {
   const webviews = document.querySelectorAll('#multi-lurk-grid .stream-grid-cell webview');
   webviews.forEach(wv => {
     try { wv.reload(); } catch (e) { /* ignore */ }
   });
   if (webviews.length) {
-    appendLogMessage(`[Extensions] Reloaded ${webviews.length} open stream container(s) to apply the new extension.`);
+    appendLogMessage(`[Extensions] Reloaded ${webviews.length} open stream container(s) to apply the extension change.`);
   }
 }
 

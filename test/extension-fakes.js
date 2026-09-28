@@ -45,9 +45,10 @@ function makeCookieJar(list, { throwFor } = {}) {
       queries.push(domain);
       if (domain === throwFor) throw new Error('boom');
       // Chrome: "cookies whose domains match or are subdomains of this one".
+      // Like Chrome, a host-only cookie's domain has no leading dot.
       return list
         .filter(c => { const d = c.domain.replace(/^\./, ''); return d === domain || d.endsWith('.' + domain); })
-        .map(c => ({ path: '/', secure: true, httpOnly: true, sameSite: 'lax', expirationDate: 2e9, value: 'v', hostOnly: false, session: false, storeId: '0', ...c }));
+        .map(c => ({ path: '/', secure: true, httpOnly: true, sameSite: 'lax', expirationDate: 2e9, value: 'v', hostOnly: !c.domain.startsWith('.'), session: false, storeId: '0', ...c }));
     },
   };
 }
@@ -59,6 +60,7 @@ const YT_COOKIES = [
   { name: 'SAPISID', domain: '.google.com' },
   { name: 'SAPISID', domain: '.google.com' }, // same name/domain/path: sent once
   { name: 'LSID', domain: 'accounts.google.com' },
+  { name: '__Host-GAPS', domain: 'accounts.google.com' },
   { name: 'ACCOUNT_CHOOSER', domain: '.accounts.google.com' },
   { name: 'GMAIL_AT', domain: 'mail.google.com' },
   { name: 'OSID', domain: '.mail.google.com' },
@@ -69,8 +71,21 @@ const YT_COOKIES = [
   { name: 'login', domain: '.twitch.tv' },
 ];
 
-function proofFor(code, nonce) {
-  return nodeCrypto.createHmac('sha256', code).update('stream-lurker-ping:' + nonce).digest('hex');
+// C1: the app signs the port it is bound to along with the nonce.
+function proofFor(code, port, nonce) {
+  return nodeCrypto.createHmac('sha256', code).update(`stream-lurker-ping:${port}:${nonce}`).digest('hex');
+}
+
+// The app's two 409 SIGNED_OUT texts (main/cookie-receiver.js), kept apart
+// from the app's module so these fakes never depend on it.
+const SIGNED_OUT_TEXT = 'You signed this platform out in Stream Lurker, so automatic re-sync is off for it. Connect it again from the extension to turn it back on.';
+const APP_LOGIN_TEXT = "You connected this platform inside Stream Lurker, so automatic re-sync is off for it: it would replace that session with this browser's. Connect it again from the extension to turn it back on.";
+
+// Never settles on its own; rejects like fetch once the caller aborts.
+function untilAborted(signal) {
+  return new Promise((_, reject) => {
+    signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  });
 }
 
 function reply(status, body) {
@@ -78,10 +93,13 @@ function reply(status, body) {
 }
 
 // ports: { [port]: { kind, ...options } }
-//   app       real Stream Lurker with `code`; options signedOut[], failImport{},
-//             dropImport[], beforeImportReply()
+//   app       real Stream Lurker with `code`; options signedOut[], signedOutError,
+//             failImport{}, dropImport[], stallImport[] (never answers),
+//             stallImportBody[] (headers, then no body), beforeImportReply()
 //   outdated  answers /ping with no proof (pre-1.3 app, or a lazy squatter)
 //   forged    answers /ping with a fixed `proof`
+//   relay     a squatter that forwards /ping to the app on port `to` and hands
+//             back its reply unchanged, genuine proof included
 //   other-json, hang
 function makeLoopback(ports) {
   const requests = [];
@@ -94,17 +112,14 @@ function makeLoopback(ports) {
     requests.push({ port, url, method: init.method || 'GET', headers, body });
     const l = ports[port];
     if (!l) throw new TypeError('Failed to fetch');
-    if (l.kind === 'hang') {
-      return new Promise((_, reject) => {
-        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
-      });
-    }
+    if (l.kind === 'hang') return untilAborted(init.signal);
     if (u.pathname === '/ping' && (init.method || 'GET') === 'GET') {
       const nonce = u.searchParams.get('nonce') || '';
       if (l.kind === 'other-json') return reply(200, { app: 'something-else' });
       if (l.kind === 'outdated') return reply(200, { app: 'stream-lurker', version: '0.14.0-beta' });
       if (l.kind === 'forged') return reply(200, { app: 'stream-lurker', proof: l.proof });
-      return reply(200, /^[0-9a-f]{16,64}$/i.test(nonce) ? { app: 'stream-lurker', proof: proofFor(l.code, nonce) } : { app: 'stream-lurker' });
+      if (l.kind === 'relay') return fetch(`http://127.0.0.1:${l.to}${u.pathname}${u.search}`, { method: 'GET', signal: init.signal });
+      return reply(200, /^[0-9a-f]{16,64}$/i.test(nonce) ? { app: 'stream-lurker', proof: proofFor(l.code, port, nonce) } : { app: 'stream-lurker' });
     }
     if (u.pathname === '/import' && init.method === 'POST') {
       imports.push({ port, headers, body });
@@ -112,12 +127,14 @@ function makeLoopback(ports) {
       if (headers['Content-Type'] !== 'application/json') return reply(415, { success: false, error: 'json only' });
       if (headers['X-Pairing-Code'] !== l.code) return reply(403, { success: false, error: 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.' });
       if ((l.dropImport || []).includes(body.platform)) throw new TypeError('Failed to fetch');
+      if ((l.stallImport || []).includes(body.platform)) return untilAborted(init.signal);
+      if ((l.stallImportBody || []).includes(body.platform)) return { ok: true, status: 200, json: () => untilAborted(init.signal) };
       if (l.beforeImportReply) await l.beforeImportReply(body);
       const fail = (l.failImport || {})[body.platform];
       if (fail) return reply(fail, { success: false, error: 'Too many attempts' });
       l.signedOut = l.signedOut || [];
       if (l.signedOut.includes(body.platform)) {
-        if (body.auto === true) return reply(409, { success: false, code: 'SIGNED_OUT', error: 'Signed out in Stream Lurker.' });
+        if (body.auto === true) return reply(409, { success: false, code: 'SIGNED_OUT', error: l.signedOutError || SIGNED_OUT_TEXT });
         l.signedOut = l.signedOut.filter(p => p !== body.platform); // a manual connect lifts it
       }
       return reply(200, body.auto ? { success: true, cookiesSet: body.cookies.length } : { success: true, cookiesSet: body.cookies.length, username: 'someone' });
@@ -127,4 +144,4 @@ function makeLoopback(ports) {
   return { fetch, requests, imports, ports };
 }
 
-module.exports = { makeStorage, makeCookieJar, makeLoopback, proofFor, YT_COOKIES, sleep };
+module.exports = { makeStorage, makeCookieJar, makeLoopback, proofFor, YT_COOKIES, SIGNED_OUT_TEXT, APP_LOGIN_TEXT, sleep };

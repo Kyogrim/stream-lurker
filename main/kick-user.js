@@ -6,6 +6,9 @@
 // Resolves to { name, source: 'api' | 'next-data' | 'dom' | null, tried, ... }.
 // Only 'api' proves a session: the other two read the page, and without a
 // session the page is kick.com's home page, full of featured streamers' slugs.
+
+const { isPlaceholderName } = require('./account-state');
+
 const KICK_USER_SCRIPT = `
   (async () => {
     const pick = (o) => (o && (o.username || o.slug || o.name
@@ -25,6 +28,7 @@ const KICK_USER_SCRIPT = `
     if (sess) headers['Authorization'] = 'Bearer ' + decodeURIComponent(sess);
     tried.push('xsrf=' + (xsrf ? 'present' : 'MISSING') + ' bearer=' + (sess ? 'present' : 'MISSING'));
 
+    let apiAnswered = false;
     for (const path of ['/api/v1/user', '/api/v2/user']) {
       try {
         // Bounded, so a stalled request returns what was tried instead of
@@ -33,15 +37,19 @@ const KICK_USER_SCRIPT = `
         const body = await r.text();
         let j = null;
         try { j = JSON.parse(body); } catch (e) {}
+        if (r.ok) apiAnswered = true;
         const n = r.ok ? pick(j) : null;
         tried.push(path + ' -> ' + r.status + (n ? ' name=' + n : ' len=' + body.length));
         if (n) return { name: n, source: 'api', tried };
       } catch (e) { tried.push(path + ' -> threw ' + e.message); }
     }
 
-    // The page-scraping fallbacks only mean something with a session: signed
-    // out, they would name a featured streamer as the account.
-    if (sess) {
+    // The page-scraping fallbacks only mean something with a live session.
+    // Signed out, or with a stale session_token (the API answering 2xx with
+    // no user is Kick saying so), they name a featured streamer from the home
+    // page as the account. So they run only when the API could not be asked.
+    if (sess && apiAnswered) tried.push('API answered without a user: the session is stale');
+    if (sess && !apiAnswered) {
       // Next.js page state often carries the signed-in user.
       try {
         const raw = document.getElementById('__NEXT_DATA__');
@@ -78,4 +86,15 @@ function kickNameFrom(res, { requireApi = false } = {}) {
   return name || null;
 }
 
-module.exports = { KICK_USER_SCRIPT, kickNameFrom };
+// What a background lookup may store over `stored`: a placeholder (or
+// nothing) takes any name the page gave, a real account name only one Kick's
+// API confirmed. The page fallbacks read whatever slug comes first, so they
+// must never rename a known account. `res` is { name, source } or null.
+function kickNameToStore(stored, res) {
+  const name = kickNameFrom(res);
+  if (!name) return null;
+  if (!isPlaceholderName(stored) && res.source !== 'api') return null;
+  return name;
+}
+
+module.exports = { KICK_USER_SCRIPT, kickNameFrom, kickNameToStore };

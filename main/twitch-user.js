@@ -26,6 +26,18 @@ function classifyTwitchUserResponse(status, text) {
     const login = Array.isArray(data) && data[0] && data[0].data && data[0].data.currentUser
       ? data[0].data.currentUser.login : '';
     if (typeof login === 'string' && login) return { login, reason: 'ok', status };
+    // No user because the query itself failed ("service timeout") is Twitch
+    // failing, not Twitch saying the token is signed out; unless the error
+    // is about the token.
+    const errors = Array.isArray(data) && data[0] && Array.isArray(data[0].errors) ? data[0].errors : [];
+    if (errors.length) {
+      const messages = errors.map(e => (e && typeof e.message === 'string' ? e.message : '')).filter(Boolean);
+      const detail = messages.join('; ').slice(0, 200) || 'GraphQL errors';
+      if (messages.some(m => /unauthori[sz]ed|authoriz|token|login required|not logged in/i.test(m))) {
+        return { login: '', reason: 'rejected', status, detail };
+      }
+      return { login: '', reason: 'unexpected', status, detail };
+    }
     return { login: '', reason: 'rejected', status };
   }
   return { login: '', reason: 'unexpected', status };

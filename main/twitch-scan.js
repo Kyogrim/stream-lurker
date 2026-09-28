@@ -53,6 +53,14 @@ function gqlOperation(login) {
   return { operationName: 'StreamRefetchManager', variables: { channelLogin: String(login).toLowerCase() }, query: STREAM_QUERY };
 }
 
+// A failed response body as it may appear in an error: tags stripped,
+// whitespace collapsed, 200 characters at most. A Cloudflare or 5xx page is
+// kilobytes of HTML, and the message lands in the activity log and on every
+// Twitch card of the scan.
+function bodyExcerpt(text) {
+  return String(text || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
 function describeGqlErrors(errors) {
   if (!Array.isArray(errors)) return '';
   return errors.map((e) => {
@@ -138,7 +146,10 @@ async function checkTwitchGql(logins, { request, log, clientId, userAgent }) {
         headers: { 'Client-ID': clientId, 'Content-Type': 'application/json', 'User-Agent': userAgent },
         body: JSON.stringify(batch.map(gqlOperation)),
       });
-      if (!res.ok) throw new Error(`GQL request failed: ${res.status} - ${String(res.text || '').slice(0, 200)}`);
+      if (!res.ok) {
+        const excerpt = bodyExcerpt(res.text);
+        throw new Error(`GQL request failed: ${res.status}${excerpt ? ` - ${excerpt}` : ''}`);
+      }
       results.push(...parseGqlBatch(parseJsonBody(res.text, 'Twitch GQL'), batch));
     } catch (err) {
       const which = batches.length > 1 ? ` (batch ${i + 1}/${batches.length})` : '';
@@ -231,6 +242,7 @@ module.exports = {
   TWITCH_GQL_BATCH_LIMIT,
   HELIX_LOGIN_LIMIT,
   chunk,
+  bodyExcerpt,
   parseGqlBatch,
   parseHelixStreams,
   helixStreamsUrl,

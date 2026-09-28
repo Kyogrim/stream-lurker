@@ -5,7 +5,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  TWITCH_GQL_BATCH_LIMIT, HELIX_LOGIN_LIMIT, chunk, parseGqlBatch, parseHelixStreams, helixStreamsUrl,
+  TWITCH_GQL_BATCH_LIMIT, HELIX_LOGIN_LIMIT, chunk, bodyExcerpt, parseGqlBatch, parseHelixStreams, helixStreamsUrl,
   checkTwitchGql, checkTwitchHelix, mergeFallbackResults, twitchCredentialKey, createTwitchTokenCache,
 } = require('../main/twitch-scan');
 
@@ -257,4 +257,23 @@ test('F65: the token cache is keyed to the credentials that minted it', () => {
 test('chunk', () => {
   assert.deepEqual(chunk([], 3), []);
   assert.deepEqual(chunk([1, 2, 3, 4], 3), [[1, 2, 3], [4]]);
+});
+
+test('F02 layer 2: an HTML error page never reaches the error, the log or the cards as markup', async () => {
+  const page = `<!DOCTYPE html><html><head><title>502</title><script>alert(1)</script></head>
+    <body><h1>Bad   gateway</h1><img src=x onerror=alert(2)>${'<p>filler</p>'.repeat(500)}</body></html>`;
+  const logs = [];
+  const results = await checkTwitchGql(['a', 'b'], gqlDeps(async () => reply(502, page), logs));
+  for (const r of results) {
+    assert.doesNotMatch(r.error, /[<>]/, r.error);
+    assert.match(r.error, /^GQL request failed: 502 - /);
+    assert.ok(r.error.length <= 'GQL request failed: 502 - '.length + 200, `${r.error.length} characters`);
+    assert.match(r.error, /Bad gateway/, 'the readable text survives, whitespace collapsed');
+  }
+  assert.ok(logs.length === 1 && !/[<>]/.test(logs[0]), logs[0]);
+  // An empty body leaves no dangling separator.
+  const empty = await checkTwitchGql(['a'], gqlDeps(async () => reply(503, '')));
+  assert.equal(empty[0].error, 'GQL request failed: 503');
+  assert.equal(bodyExcerpt(null), '');
+  assert.equal(bodyExcerpt('a<b>c</b>  d'), 'a c d');
 });

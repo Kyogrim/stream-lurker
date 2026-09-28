@@ -16,9 +16,26 @@ const PLATFORM_HOST = /(^|\.)(twitch\.tv|kick\.com|youtube\.com|youtube-nocookie
 // interstitial and a re-auth prompt. Not attacker-controlled, and blocking them
 // strands a cell or the probe on 'unknown'.
 const GOOGLE_AUTH_HOST = /^(accounts|consent)\.google\.com$/i;
-// A login window also passes through Google's per-country cookie hosts
-// (accounts.google.co.uk/accounts/SetSID) and Sign in with Apple.
-const LOGIN_EXTRA_HOST = /((^|\.)google\.(com|[a-z]{2}|co\.[a-z]{2}|com\.[a-z]{2})|(^|\.)apple\.com)$/i;
+// The Google hosts a login window's own pages live on: sign-in, the account
+// pages it links to, the EU consent prompt and the post-sign-in "protect your
+// account" interstitial (gds). Named one by one: other google.com hosts
+// (sites.google.com, docs.google.com) serve pages anyone can write, and this
+// is the one window where a lookalike sign-in page matters most.
+const LOGIN_GOOGLE_HOSTS = new Set(['accounts.google.com', 'www.google.com', 'myaccount.google.com', 'consent.google.com', 'gds.google.com']);
+// Google's per-country cookie hop (accounts.google.co.uk/accounts/SetSID).
+// Only that one path: a two-letter TLD is not proof Google owns the domain.
+const GOOGLE_COUNTRY_ACCOUNTS_HOST = /^accounts\.google\.(?:[a-z]{2}|co\.[a-z]{2}|com\.[a-z]{2})$/i;
+const GOOGLE_SETSID_PATH = '/accounts/setsid';
+// Sign in with Apple (appleid.apple.com, idmsa.apple.com).
+const APPLE_HOST = /(^|\.)apple\.com$/i;
+
+function isLoginHelperUrl(value) {
+  const u = parseUrl(value);
+  if (!u || u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  if (LOGIN_GOOGLE_HOSTS.has(host) || APPLE_HOST.test(host)) return true;
+  return GOOGLE_COUNTRY_ACCOUNTS_HOST.test(host) && u.pathname.toLowerCase() === GOOGLE_SETSID_PATH;
+}
 // The only window.open targets a login window may open in-app: Kick's
 // "Continue with Google / Apple" popups.
 const OAUTH_POPUP_HOST = /^(accounts\.google\.com|appleid\.apple\.com)$/i;
@@ -62,7 +79,7 @@ function isAllowedTopLevelUrl(role, url) {
     case 'dashboard': return isDashboardUrl(url);
     case 'stream':
     case 'hidden': return isPlatformUrl(url) || isHttpsHost(url, GOOGLE_AUTH_HOST);
-    case 'login': return isPlatformUrl(url) || isHttpsHost(url, LOGIN_EXTRA_HOST);
+    case 'login': return isPlatformUrl(url) || isLoginHelperUrl(url);
     case 'clip': return isPlatformUrl(url);
     default: return true;
   }
@@ -109,7 +126,22 @@ function sanitizeWebviewAttach(webPreferences, params) {
   if (!isPlatformUrl(p.src)) {
     return { allow: false, reason: `src ${String(p.src || '(empty)').slice(0, 120)} is not a platform page` };
   }
+  // The guest is created from webPreferences.partition, not params.partition,
+  // and Electron spreads the markup's `webpreferences` attribute over the
+  // value it copied from params: webpreferences="partition=" would otherwise
+  // attach on the default session, or on any other partition.
+  prefs.partition = STREAM_PARTITION;
   return { allow: true, reason: '' };
+}
+
+// A main-frame load starting in a stream surface that must be stopped:
+// the attach-time src check covers only the first page, and a load the
+// embedder starts later (webview.src, webview.loadURL) is browser-initiated,
+// so will-navigate never sees it. In-page (same-document) changes and
+// subframes are left to their own hooks.
+function isBlockedStreamLoad(role, { url, isMainFrame, isSameDocument } = {}) {
+  if (role !== 'stream' || !isMainFrame || isSameDocument) return false;
+  return !isAllowedTopLevelUrl('stream', url);
 }
 
 // Web permissions. Deny by default: the app never needs a camera, microphone,
@@ -246,6 +278,7 @@ module.exports = {
   isAllowedFrameUrl,
   mayOpenExternally,
   sanitizeWebviewAttach,
+  isBlockedStreamLoad,
   isPermissionAllowed,
   isTrustedDashboardSender,
   createExternalOpenGate,

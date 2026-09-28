@@ -5,7 +5,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
-const { extensionPathKey, planExtensionSync, isInsideDir, checkReleaseAsset } = require('../main/extension-sync');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  extensionPathKey, planExtensionSync, isInsideDir, checkReleaseAsset,
+  findManifestRoot, readStagedManifest, swapDirectory, liveManifestRoot, promoteStaged, createInstallLocks,
+} = require('../main/extension-sync');
 
 const win = { platform: 'win32' };
 
@@ -91,4 +97,154 @@ test('F37: without a digest (older API answers), only the size is checked', () =
   assert.equal(other.verified, false);
   assert.match(other.reason, /unrecognised digest format/);
   assert.equal(checkReleaseAsset(buf, {}).ok, true, 'no size either');
+});
+
+// F37: the staged install against real folders in a temp directory.
+function tempRoot(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-ext-sync-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function writeTree(root, files) {
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(root, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content);
+  }
+}
+
+// Every file under root, relative path -> contents: "byte-identical" means equal.
+function snapshotTree(root) {
+  const out = {};
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else out[path.relative(root, p).split(path.sep).join('/')] = fs.readFileSync(p).toString('base64');
+    }
+  };
+  walk(root);
+  return out;
+}
+
+const LIVE_FILES = {
+  'uBlock0.chromium/manifest.json': JSON.stringify({ name: 'uBO', version: '1.0.0', manifest_version: 3 }),
+  'uBlock0.chromium/js/background.js': 'console.log("v1")',
+};
+
+// An fs that fails the one rename named (a locked folder on Windows), and
+// passes everything else through; alsoRestore fails putting the old copy back.
+function failingRename(match, { alsoRestore = false } = {}) {
+  return {
+    ...fs,
+    renameSync(from, to) {
+      if (from === match.from && to === match.to) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+      if (alsoRestore && to === match.to && from.endsWith('.old')) throw Object.assign(new Error('EBUSY: resource busy, rename'), { code: 'EBUSY' });
+      return fs.renameSync(from, to);
+    },
+  };
+}
+
+test('F37 regression: a staged manifest Node cannot use leaves the live folder byte-identical', (t) => {
+  const root = tempRoot(t);
+  const live = path.join(root, 'ublock-origin');
+  writeTree(live, LIVE_FILES);
+  const before = snapshotTree(live);
+  const cases = {
+    'invalid JSON': '{ "name": "uBO", ',
+    'no version': JSON.stringify({ name: 'uBO', manifest_version: 3 }),
+    'empty version': JSON.stringify({ name: 'uBO', version: '  ' }),
+    'not an object': '["1.0"]',
+  };
+  for (const [what, manifest] of Object.entries(cases)) {
+    const staging = `${live}.staging`;
+    fs.rmSync(staging, { recursive: true, force: true });
+    writeTree(staging, { 'uBlock0.chromium/manifest.json': manifest, 'uBlock0.chromium/js/background.js': 'console.log("v2")' });
+    let unloaded = false;
+    assert.throws(() => promoteStaged(staging, live, { beforeSwap: () => { unloaded = true; } }), /manifest\.json/, what);
+    assert.equal(unloaded, false, `${what}: the running copy was never unloaded`);
+    assert.deepEqual(snapshotTree(live), before, `${what}: live folder untouched`);
+    assert.equal(fs.existsSync(`${live}.old`), false);
+  }
+  // No manifest at all.
+  fs.rmSync(`${live}.staging`, { recursive: true, force: true });
+  writeTree(`${live}.staging`, { 'readme.txt': 'x' });
+  assert.throws(() => promoteStaged(`${live}.staging`, live), /did not contain a manifest\.json/);
+  assert.deepEqual(snapshotTree(live), before);
+});
+
+test('F37: a manifest with a UTF-8 BOM (Chromium accepts it) installs, and is read as installed', (t) => {
+  const root = tempRoot(t);
+  const live = path.join(root, '7tv');
+  writeTree(live, { 'manifest.json': JSON.stringify({ name: '7TV', version: '3.0.0' }) });
+  const staging = `${live}.staging`;
+  writeTree(staging, { 'dist/manifest.json': `﻿${JSON.stringify({ name: '7TV', version: '3.1.0' })}`, 'dist/content.js': 'x' });
+  let patchedAt = null;
+  const r = promoteStaged(staging, live, {
+    // The 7TV Kick patch rewrites the manifest; the result is what is reported.
+    patch: (dir) => {
+      patchedAt = dir;
+      const m = readStagedManifest(dir);
+      fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ ...m, host_permissions: ['*://*.kick.com/*'] }));
+    },
+  });
+  assert.equal(patchedAt, path.join(staging, 'dist'), 'patched in staging, before the swap');
+  assert.equal(r.manifest.version, '3.1.0');
+  assert.deepEqual(r.manifest.host_permissions, ['*://*.kick.com/*']);
+  assert.equal(r.manifestRoot, path.join(live, 'dist'));
+  assert.equal(readStagedManifest(r.manifestRoot).version, '3.1.0');
+  assert.equal(fs.existsSync(staging), false);
+  assert.equal(fs.existsSync(`${live}.old`), false, 'the old copy is removed once the new one is in place');
+  assert.equal(fs.existsSync(path.join(live, 'manifest.json')), false, 'nothing of the old version is left');
+  assert.equal(findManifestRoot(live), path.join(live, 'dist'));
+  assert.equal(liveManifestRoot(path.join(root, 'x.staging'), path.join(root, 'x.staging'), path.join(root, 'x')), path.join(root, 'x'));
+});
+
+test('F37 regression: when staging cannot be renamed into place, the old folder is restored as it was', (t) => {
+  const root = tempRoot(t);
+  const live = path.join(root, 'ublock-origin');
+  writeTree(live, LIVE_FILES);
+  const before = snapshotTree(live);
+  const staging = `${live}.staging`;
+  writeTree(staging, { 'uBlock0.chromium/manifest.json': JSON.stringify({ version: '2.0.0' }) });
+  const fsImpl = failingRename({ from: staging, to: live });
+  assert.throws(() => promoteStaged(staging, live, { fsImpl }), /EPERM/);
+  assert.deepEqual(snapshotTree(live), before, 'the old version is back, byte for byte');
+  assert.equal(fs.existsSync(`${live}.old`), false);
+  assert.ok(fs.existsSync(staging), 'staging is left for the caller to remove');
+
+  // If putting it back fails too, the error says where the old copy is.
+  const both = failingRename({ from: staging, to: live }, { alsoRestore: true });
+  let err;
+  try { swapDirectory(staging, live, { fsImpl: both }); } catch (e) { err = e; }
+  assert.ok(err, 'threw');
+  assert.equal(err.oldCopyAt, `${live}.old`);
+  assert.match(err.message, /EPERM.*putting the previous version back also failed.*EBUSY/);
+  assert.deepEqual(snapshotTree(`${live}.old`), before, 'nothing of the old copy was lost');
+});
+
+test('F37: a fresh install (nothing live yet) swaps in without an old copy', (t) => {
+  const root = tempRoot(t);
+  const live = path.join(root, 'new-ext');
+  writeTree(`${live}.staging`, { 'manifest.json': JSON.stringify({ version: '1' }) });
+  const r = promoteStaged(`${live}.staging`, live);
+  assert.equal(r.manifestRoot, live);
+  assert.equal(r.manifest.version, '1');
+  assert.equal(fs.existsSync(`${live}.old`), false);
+});
+
+test('F37 regression: a second concurrent install of the same id is refused; the lock frees on success or failure', async () => {
+  const locks = createInstallLocks();
+  let release;
+  const first = locks.run('7tv', () => new Promise((r) => { release = r; }));
+  assert.equal(locks.has('7tv'), true);
+  assert.deepEqual(await locks.run('7tv', async () => 'second ran'), { refused: true });
+  assert.equal(await locks.run('ublock-origin', async () => 'other id'), 'other id', 'another id is independent');
+  release({ ok: true });
+  assert.deepEqual(await first, { ok: true });
+  assert.equal(locks.has('7tv'), false);
+  await assert.rejects(locks.run('7tv', async () => { throw new Error('boom'); }), /boom/);
+  assert.equal(locks.has('7tv'), false, 'freed after a throw');
+  assert.equal(await locks.run('7tv', async () => 'again'), 'again');
 });
