@@ -135,6 +135,20 @@ test('G4.2: DevTools cannot open in a packaged build on the dashboard or a strea
   assert.match(wcc.slice(0, wcc.indexOf('\n});')), /if \(app\.isPackaged\) webPreferences\.devTools = false;/);
 });
 
+test('saved clips: loadDashboard reads the old store through a page it writes under userData', () => {
+  const fn = block('async function loadDashboard()');
+  const readerAt = fn.indexOf("const reader = path.join(app.getPath('userData'), 'legacy-storage-reader.html');");
+  const writeAt = fn.indexOf('fs.writeFileSync(reader,');
+  const callAt = fn.indexOf('migrateFileOriginStorage({');
+  assert.ok(readerAt > 0, 'the reader lives under userData, outside app.asar');
+  assert.ok(writeAt > readerAt && callAt > writeAt, 'written before the import runs');
+  const call = fn.slice(callAt, fn.indexOf('});', callAt));
+  assert.match(call, /sourceFile: reader,/);
+  assert.doesNotMatch(call, /__dirname|appRoot/, 'never a file inside the app');
+  const fin = fn.slice(fn.indexOf('} finally {', callAt));
+  assert.match(fin, /^\} finally \{\s*try \{ fs\.unlinkSync\(reader\); \}/, 'removed whatever happened');
+});
+
 test('a development run never writes a login item (it would register bare electron.exe)', () => {
   const fn = block('function applyStartupSettings()');
   const guard = fn.indexOf('if (!app.isPackaged) return;');

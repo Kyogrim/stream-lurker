@@ -279,8 +279,8 @@ test('migration: a BrowserWindow that cannot even be created is a failure, not a
 });
 
 test('migration: the old store is never read through a page inside app.asar', async () => {
-  // Packaged, with grantFileProtocolExtraPrivileges off, a file:// page inside
-  // the archive cannot load, so reading through one failed on every launch.
+  // The reader is a page written outside the archive, so the import never
+  // depends on how file:// resolves inside app.asar.
   for (const bad of [
     'C:\\Program Files\\Stream Lurker\\resources\\app.asar\\style.css',
     '/opt/stream-lurker/resources/app.asar/style.css',

@@ -1080,8 +1080,8 @@ async function loadDashboard() {
   // Not while running on defaults: the real flag is in the unreadable file.
   if (!config.dashboardStorageMigrated && !configWriteLocked) {
     // Every file:// page shares one localStorage, so a blank page on the real
-    // filesystem reads the old store. Nothing inside app.asar opens as a
-    // file:// page once the grantFileProtocolExtraPrivileges fuse is off.
+    // filesystem reads the old store (see dashboard-protocol.js for why the
+    // file protocol keeps its privileges).
     const reader = path.join(app.getPath('userData'), 'legacy-storage-reader.html');
     let r;
     try {
@@ -3029,12 +3029,19 @@ ipcMain.handle('get-twitch-follows', async () => {
     const username = currentUser.login || 'Twitch User';
     const follows = currentUser.followedLiveUsers?.edges?.map(e => e.node.login).filter(Boolean) || [];
     
+    // Signed out, or into another account, while the request ran: nothing it
+    // returned belongs to the account connected now. Answering success would
+    // let the dashboard show the old account as connected and list its follows.
+    if (!accountEpochs.isCurrent(snap, config.accounts)) {
+      addLog('[Twitch Sync] Twitch was signed in or out while follows were syncing; discarding the result.');
+      return { success: false, stale: true, error: 'Twitch was signed in or out while the sync was running.' };
+    }
+
     addLog(`[Twitch Sync] Successfully synced GQL for ${username}. Found ${follows.length} live follows.`);
     
-    // Only while the same account is still connected: after a Sign Out the
-    // entry is gone, and writing it back would reconnect an account with no
-    // cookies behind it.
-    if (config.accounts && snap.name && accountEpochs.isCurrent(snap, config.accounts) && config.accounts.twitch !== username) {
+    // Only while an account is connected (checked current just above): with
+    // none, writing the name would connect an account with no session.
+    if (config.accounts && snap.name && config.accounts.twitch !== username) {
       config.accounts.twitch = username;
       saveConfig();
     }

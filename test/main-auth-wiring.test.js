@@ -139,33 +139,44 @@ test('F73: background checks drop results when the account changed under them', 
 });
 
 test('F73 (Twitch writers): the startup check and the follows sync never write over a Sign Out', () => {
-  // validateSavedSessions: snapshot before the platform's first await, then
-  // checked after the name lookup and again before the tail's writes.
+  // validateSavedSessions: snapshot before the platform's first await.
   const validate = section(/async function validateSavedSessions\(/);
-  const snapAt = validate.indexOf('let snap = accountEpochs.snapshot(platform, config.accounts);');
-  const firstAwait = validate.indexOf('await ', validate.indexOf('for (const platform of platformsToCheck)'));
-  assert.ok(snapAt > 0 && snapAt < firstAwait, 'snapshot before the first await of each platform');
-  const lookupAt = validate.indexOf('await fetchTwitchUsername(tokenCookie.value)');
-  const lookupGuard = validate.indexOf('accountEpochs.isCurrent(snap, config.accounts)', lookupAt);
-  assert.ok(lookupAt > 0 && lookupGuard > lookupAt, 'checked after the name lookup');
-  assert.ok(lookupGuard < validate.indexOf('config.accounts[platform] = username;'), 'before the recovery write');
-  const tailGuard = validate.indexOf('accountEpochs.isCurrent(snap, config.accounts)', validate.indexOf('if (checkErrored) continue;'));
-  assert.ok(tailGuard > 0, 'the tail is guarded');
-  assert.ok(tailGuard < validate.indexOf('delete config.accounts[platform];'), 'before the expiry delete');
-  assert.ok(tailGuard < validate.indexOf('config.accounts[platform] = placeholderName(platform);'), 'before the placeholder write');
-  // Its own recovery write re-bases the snapshot, or the tail would refuse it.
-  assert.ok(validate.indexOf('snap = accountEpochs.snapshot(platform, config.accounts);', validate.indexOf('config.accounts[platform] = username;')) > 0);
+  const loopAt = validate.indexOf('for (const platform of platformsToCheck)');
+  const snapAt = validate.indexOf('let snap = accountEpochs.snapshot(platform, config.accounts);', loopAt);
+  assert.ok(snapAt > loopAt && snapAt < validate.indexOf('await ', loopAt), 'snapshot before the first await of each platform');
 
-  // get-twitch-follows: bounded request, snapshot before it, and the name is
-  // written only while the same, still-connected account is current.
+  // After the name lookup: a stale snapshot writes nothing, else it recovers.
+  const lookupAt = validate.indexOf('await fetchTwitchUsername(tokenCookie.value)');
+  const afterLookup = validate.slice(lookupAt);
+  assert.match(afterLookup, /^[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!accountEpochs\.isCurrent\(snap, config\.accounts\)\) \{\s*(?:\/\/[^\n]*\s*)*\} else if \(username\) \{/,
+    'the first statement after the lookup skips every write when stale');
+
+  // Each of the check's own writes re-bases the snapshot inside its branch.
+  const recover = afterLookup.slice(afterLookup.indexOf('config.accounts[platform] = username;'), afterLookup.indexOf("} else if (config.accounts[platform] !== 'Twitch User')"));
+  assert.match(recover, /snap = accountEpochs\.snapshot\(platform, config\.accounts\);/, 're-based after the recovered name');
+  const placeholderAt = afterLookup.indexOf("config.accounts[platform] = 'Twitch User';");
+  const placeholder = afterLookup.slice(placeholderAt, afterLookup.indexOf('\n              }', placeholderAt));
+  assert.match(placeholder, /snap = accountEpochs\.snapshot\(platform, config\.accounts\);/, "re-based after the 'Twitch User' write");
+
+  // The tail: a stale snapshot logs and moves on before any write.
+  const tail = validate.slice(validate.indexOf('if (checkErrored) continue;'));
+  const tailGuard = tail.match(/if \(!accountEpochs\.isCurrent\(snap, config\.accounts\)\) \{\s*addLog\(`[^`]*`\);\s*continue;\s*\}/);
+  assert.ok(tailGuard, 'the tail guard skips the platform');
+  assert.ok(tailGuard.index < tail.indexOf('delete config.accounts[platform];'), 'before the expiry delete');
+  assert.ok(tailGuard.index < tail.indexOf('config.accounts[platform] = placeholderName(platform);'), 'before the placeholder write');
+
+  // get-twitch-follows: bounded, snapshot first, stale answers are not success.
   const follows = section(/ipcMain\.handle\('get-twitch-follows'/);
   const fSnap = follows.indexOf("const snap = accountEpochs.snapshot('twitch', config.accounts);");
   const fFetch = follows.indexOf('await fetchTextWithDeadline(net.fetch');
   assert.ok(fSnap > 0 && fFetch > fSnap, 'snapshot before the request');
   assert.doesNotMatch(follows, /await net\.fetch\(/, 'no unbounded request');
-  const fWrite = follows.indexOf('config.accounts.twitch = username;');
-  const fGuard = follows.lastIndexOf('snap.name && accountEpochs.isCurrent(snap, config.accounts)', fWrite);
-  assert.ok(fGuard > fFetch && fGuard < fWrite, 'guarded after the request, before the write');
+  const stale = follows.match(/if \(!accountEpochs\.isCurrent\(snap, config\.accounts\)\) \{[^}]*return \{ success: false, stale: true,/);
+  assert.ok(stale && stale.index > fFetch, 'a stale result is answered as not-success, after the request');
+  assert.ok(stale.index < follows.indexOf('Successfully synced'), 'before anything reports success');
+  const write = follows.indexOf('config.accounts.twitch = username;');
+  assert.ok(stale.index < write, 'before the write');
+  assert.match(follows, /if \(config\.accounts && snap\.name && config\.accounts\.twitch !== username\) \{/, 'only an existing account gets the name');
 });
 
 test('F38/F39/F40: pastes and imports go through the shared parser and shaped writes', () => {

@@ -220,10 +220,12 @@ test('F15: a cell that died off the platform recovers by loading its stream, not
   assert.equal(loads.length, 1);
   assert.match(loads[0][1], /^https:\/\/(www\.)?youtube\.com\//);
   // A recovered platform page cancels the watchdog: no extra attempt later.
+  // Stepped: one long tick jumps the clock before due callbacks run, so a
+  // reload scheduled by a late watchdog would never be seen.
   wv.url = 'https://www.youtube.com/@offsite/live';
   await wv.dispatch('did-start-loading');
   await wv.dispatch('did-finish-load');
-  t.mock.timers.tick(10 * 60 * 1000);
+  for (let i = 0; i < 20; i++) t.mock.timers.tick(60 * 1000);
   assert.equal(count(wv, 'reload') + wv.log.filter(e => e[0] === 'loadURL').length, 1);
   assert.equal(callsOf('closeStreamContainer').length, 0);
 });
@@ -526,6 +528,45 @@ test('r2-9: closing the pop-out of a healthy stream reloads nothing', async (t) 
   assert.equal(cell.dataset.crashed, undefined);
   // Unknown cell (already closed): nothing to do, nothing thrown.
   ml.setCellPoppedOut('kick', 'nobody', false);
+});
+
+test('F15: a reload click on a dead cell whose load goes silent still ends in recovery or a close', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'clicked');
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  t.mock.timers.tick(2000);
+  await cell.querySelector('.reload-btn').dispatch('click');
+  await wv.dispatch('did-start-loading'); // then nothing: cancelled or stalled
+  for (let i = 0; i < 60; i++) {
+    t.mock.timers.tick(60 * 1000);
+    await wv.dispatch('did-start-loading');
+  }
+  assert.ok(count(wv, 'reload') >= 2, 'the silent click led to automatic attempts');
+  assert.deepEqual(callsOf('closeStreamContainer'), [['closeStreamContainer', 'twitch', 'clicked']], 'and finally to the close path');
+});
+
+test('F15: a reload click on a cell that died off the platform loads its stream', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('youtube', 'offclick');
+  wv.url = 'https://evil.example/landing';
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  await cell.querySelector('.reload-btn').dispatch('click');
+  assert.equal(count(wv, 'reload'), 0, 'main would stop a reload of the off-platform page');
+  const loads = wv.log.filter(e => e[0] === 'loadURL').map(e => e[1]);
+  assert.equal(loads.length, 1);
+  assert.match(loads[0], /^https:\/\/(www\.)?youtube\.com\//);
+});
+
+test('F15: a reload click on a healthy cell arms no watchdog', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'fine');
+  await cell.querySelector('.reload-btn').dispatch('click');
+  for (let i = 0; i < 20; i++) t.mock.timers.tick(60 * 1000);
+  assert.equal(count(wv, 'reload'), 1, 'only the click');
+  assert.equal(cell.dataset.crashed, undefined);
 });
 
 test('F15: the manual reload button takes over a pending automatic reload', async (t) => {

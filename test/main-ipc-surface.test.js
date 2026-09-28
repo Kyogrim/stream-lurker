@@ -66,7 +66,12 @@ test('G3.4: the dashboard is served from app://bundle, never file://', () => {
   assert.match(failure, /if \(!protocol\.isProtocolHandled\(DASHBOARD_SCHEME\)\) protocol\.handle\(DASHBOARD_SCHEME, createDashboardHandler\(__dirname\)\);/);
   assert.ok(failure.indexOf('isProtocolHandled') < failure.indexOf('startRuntime();'), 'registered before the runtime opens the window');
   const pkg = JSON.parse(read('package.json'));
-  assert.equal(pkg.build.electronFuses.grantFileProtocolExtraPrivileges, false);
+  // ON on purpose: off, file:// pages lose localStorage and the one-time
+  // saved-clips import can never run (reproduced in a packaged build). The
+  // dashboard is safe either way because it is served from app://bundle.
+  assert.equal(pkg.build.electronFuses.grantFileProtocolExtraPrivileges, true);
+  assert.match(mainJs, /mainWindow\.loadURL\(DASHBOARD_URL\)/, 'the dashboard is loaded from app://bundle');
+  assert.doesNotMatch(mainJs, /mainWindow\.loadFile\(/, 'and never from file://');
   assert.equal(pkg.build.electronFuses.enableCookieEncryption, undefined, 'one-way; must be a deliberate separate change');
 });
 

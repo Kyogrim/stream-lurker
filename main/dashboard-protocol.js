@@ -1,11 +1,17 @@
 // Serves the dashboard from app://bundle instead of file://.
 //
-// A file:// page in a build with the GrantFileProtocolExtraPrivileges fuse on
-// can fetch any local file, so one script injection in the dashboard could read
-// the plaintext cookie database. On app://bundle the dashboard is an ordinary
-// origin: it can load its own files and nothing else on disk. The fuse is
-// turned off in package.json (build.electronFuses), which only works once
-// nothing loads the dashboard from file:// any more.
+// A file:// page with Electron's GrantFileProtocolExtraPrivileges can fetch any
+// local file, so one script injection in a file:// dashboard could read the
+// plaintext cookie database. On app://bundle the dashboard is an ordinary
+// origin: it can load its own files and nothing else on disk. Checked in a
+// packaged build: from app://bundle, fetch, XHR and an iframe on
+// file:///C:/Windows/win.ini are all refused, with the fuse on.
+//
+// The fuse stays ON (package.json build.electronFuses). Turning it off made
+// every file:// page an opaque origin with no localStorage, so the import
+// below failed on every launch and every user's saved clips were lost, while
+// buying nothing: no page the app shows runs on file:// any more. Do not turn
+// it off without another way to read the old store.
 //
 // Moving origins also moves localStorage, where the Clips tab keeps saved
 // clips. migrateFileOriginStorage carries that data across once, reading the
@@ -179,11 +185,10 @@ function withTimeout(promise, ms, what) {
 // Copies the dashboard's file:// localStorage into app://bundle, in a hidden,
 // sandboxed window on the default session (the one the dashboard uses). Every
 // file:// page shares one localStorage, so the old store is read through
-// `sourceFile`: a blank page the caller writes on the real filesystem. It must
-// not be a file inside app.asar: a packaged build turns the
-// grantFileProtocolExtraPrivileges fuse off, and then nothing in the archive
-// opens as a file:// page, so the import would fail on every launch and the
-// saved clips would never arrive. The app:// side loads style.css, so no
+// `sourceFile`: a blank page the caller writes on the real filesystem, so the
+// import does not depend on how file:// resolves inside app.asar (and loads
+// none of the app's own files). It needs the file protocol's privileges: see
+// the note on the fuse at the top of this file. The app:// side loads style.css, so no
 // dashboard script runs. Resolves to
 // { status: 'imported' | 'already' | 'failed', keys, error }; never rejects.
 //

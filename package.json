@@ -30,7 +30,7 @@
     "appId": "com.streamlurker.app",
     "productName": "Stream Lurker",
     "electronFuses": {
-      "grantFileProtocolExtraPrivileges": false
+      "grantFileProtocolExtraPrivileges": true
     },
     "publish": [
       {

@@ -90,6 +90,9 @@ test('normalizeExpiry: far-future seconds stay seconds; only raw numbers can be 
   assert.equal(normalizeExpiry(String(NEVER)), NEVER);
   assert.equal(normalizeExpiry('9999-12-31T23:59:59Z'), NEVER, 'a parsed date is never divided again');
   assert.equal(normalizeExpiry('Fri, 31 Dec 9999 23:59:59 GMT'), NEVER);
+  // A parsed date at or past 1e12 seconds must not be divided like a raw
+  // millisecond number (only a date string can be this far out).
+  assert.equal(normalizeExpiry('+033658-09-27T01:46:40Z'), 1e12);
   assert.equal(normalizeExpiry(1830000000000), 1830000000, 'milliseconds');
   assert.equal(normalizeExpiry('1830000000000'), 1830000000);
   assert.equal(normalizeExpiry(1830000000.5), 1830000000.5, 'Chrome writes fractional seconds');

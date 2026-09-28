@@ -469,6 +469,29 @@ function bindCellActions(cell, platform, username) {
 
   // ── Dead page recovery (contract C6, policy in cell-recovery.js) ──
   const PLAT = platform.toUpperCase();
+
+  // How a dead page is brought back, by the recovery timer and by the reload
+  // button alike. A load that is cancelled (main stops an off-platform page it
+  // crashed on purpose; an aborted request) fires no failure and no dom-ready,
+  // and a stalled one fires nothing at all: without the watchdog the cell would
+  // sit at "Reconnecting" for the rest of the broadcast while main credits its
+  // minutes. An attempt still unfinished counts as failed. Off the platform it
+  // loads the stream itself, since main refuses a reload of that page.
+  const recoveryLoad = () => {
+    if (cell.dataset.crashed === 'true') {
+      clearTimeout(life.recoveryWatchdog);
+      life.recoveryWatchdog = setTimeout(() => {
+        life.recoveryWatchdog = null;
+        if (cell.isConnected && cell.dataset.crashed === 'true') scheduleRecovery(life.lastFailure || 'reload did not complete');
+      }, RECOVERY_WATCHDOG_MS);
+    }
+    try {
+      if (safeHttpsUrl(currentUrl(), STREAM_HOSTS)) webview.reload();
+      else Promise.resolve(webview.loadURL(streamWebviewSrc(platform, username, statusFor(platform, username))))
+        .catch(err => console.error('Stream cell recovery load failed:', err));
+    } catch (err) { console.error('Stream cell reload failed:', err); }
+  };
+
   const scheduleRecovery = (what) => {
     // One outage often fires several events; the first one drives recovery.
     if (life.reloadTimer || life.onlineListener || life.givingUp) return;
@@ -512,23 +535,7 @@ function bindCellActions(cell, platform, username) {
       life.reloadTimer = null;
       if (!cell.isConnected) return;
       life.reloadTimes.push(Date.now());
-      // A recovery load that is cancelled (main stops an off-platform page it
-      // crashed on purpose; an aborted request) fires no failure and no
-      // dom-ready, and a stalled one fires nothing at all. Without this the
-      // cell would sit at "Reconnecting" for the rest of the broadcast while
-      // main credits its minutes. An attempt still unfinished counts as failed.
-      clearTimeout(life.recoveryWatchdog);
-      life.recoveryWatchdog = setTimeout(() => {
-        life.recoveryWatchdog = null;
-        if (cell.isConnected && cell.dataset.crashed === 'true') scheduleRecovery(life.lastFailure || 'reload did not complete');
-      }, RECOVERY_WATCHDOG_MS);
-      try {
-        // Reloading a page off the platform is exactly what main refuses, so
-        // go back to the stream itself when that is where the cell died.
-        if (safeHttpsUrl(currentUrl(), STREAM_HOSTS)) webview.reload();
-        else Promise.resolve(webview.loadURL(streamWebviewSrc(platform, username, statusFor(platform, username))))
-          .catch(err => console.error('Stream cell recovery load failed:', err));
-      } catch (err) { console.error('Stream cell reload failed:', err); }
+      recoveryLoad();
     }, plan.delayMs);
   };
 
@@ -632,7 +639,9 @@ function bindCellActions(cell, platform, username) {
     // own did-fail-load arms a fresh one.
     if (life.onlineListener) window.removeEventListener('online', life.onlineListener);
     life.onlineListener = null;
-    webview.reload();
+    // The same step as automatic recovery: a click on a dead cell whose load
+    // then stalls or is cancelled must not leave it stuck.
+    recoveryLoad();
   });
 
   chatPopoutBtn?.addEventListener('click', (e) => {
