@@ -456,3 +456,15 @@ CLOSE_CASES.forEach(([status, make], i) => {
     assert.deepEqual(opened.map(db => db.isOpen), opened.map(() => false));
   });
 });
+
+// Found by mutation testing: a journal left from an earlier failed run was
+// promoted next to the new backup, and restoring the pair replays it.
+test('a stale snapshot journal is never promoted beside the backup', () => {
+  const dir = tmpdir();
+  const f = path.join(dir, 'Cookies');
+  makeV21(f);
+  fs.writeFileSync(f + '.migration-pending-journal', 'stale journal from an earlier run');
+  const r = migrateCookieDb(f);
+  assert.equal(r.status, 'migrated');
+  assert.equal(fs.existsSync(r.backup + '-journal'), false, 'the backup has no journal from another state');
+});

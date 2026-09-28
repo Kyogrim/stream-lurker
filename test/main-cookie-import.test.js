@@ -731,3 +731,23 @@ test('pasted cookies that carry their own domain are left alone', () => {
   assert.equal(list[0].domain, '.google.com');
   assert.equal(list[1], null);
 });
+
+// Found by mutation testing: JSON that parsed but held no named cookie fell
+// through to the header parser, which split the JSON text itself.
+test('valid JSON with no cookie in it is empty, never re-read as a header string', () => {
+  assert.deepEqual(parseCookieBlob('{"Cookie":"SID=a; HSID=b; SSID=c"}'), []);
+  assert.deepEqual(parseCookieBlob('{"cookies":[]}'), []);
+  assert.deepEqual(parseCookieBlob('[]'), []);
+  const caps = parseCookieBlob('[{"Name":"SID","Value":"v","Domain":".google.com"}]');
+  assert.equal(caps.length, 1, 'Name/Value/Domain exports are read too');
+  assert.equal(caps[0].name, 'SID');
+  assert.equal(caps[0].value, 'v');
+  assert.equal(caps[0].domain, '.google.com');
+});
+
+test('cookies.txt: an empty value on the last line is kept like anywhere else', () => {
+  const T = '\t';
+  const blob = ['.x.com', 'TRUE', '/', 'TRUE', '1830000000', 'a', ''].join(T) + '\n'
+    + ['.x.com', 'TRUE', '/', 'TRUE', '1830000000', 'b', ''].join(T);
+  assert.deepEqual(parseCookieBlob(blob).map(c => [c.name, c.value]), [['a', ''], ['b', '']]);
+});

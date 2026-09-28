@@ -183,11 +183,15 @@ function createReceiverHandler(deps) {
   return async function handleReceiverRequest(req, res) {
     const send = (status, obj, { close = false, headers = {} } = {}) => {
       if (res.headersSent) return;
+      // Serialized before anything is sent: a body JSON cannot encode then
+      // throws while the caller's fallback 500 can still go out, instead of
+      // after the headers, which left the client with no answer at all.
+      const text = JSON.stringify(obj);
       // A refusal is answered without reading what the client still sends;
       // closing the connection discards the rest instead of parsing it.
       if (close) res.setHeader('Connection', 'close');
       res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers });
-      res.end(JSON.stringify(obj));
+      res.end(text);
     };
     try {
       if (!isAllowedHost(req.headers.host, getPort())) return send(403, { success: false, error: 'Forbidden' }, { close: true });

@@ -954,3 +954,12 @@ test('F54: the server bounds slow and piled-up connections', () => {
   assert.equal(s.requestTimeout, 15000);
   assert.ok(s.maxConnections >= 4 && s.maxConnections <= 32, 'room for the real extension');
 });
+
+// Found by mutation testing: the body was serialized after the headers were
+// sent, so a result JSON cannot encode left the client with no answer at all.
+test('a result JSON cannot encode still gets the client an answer (500)', async (t) => {
+  const r = await startReceiver({ importerResult: () => ({ success: true, cookiesSet: 1n }) });
+  t.after(r.close);
+  const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody() });
+  assert.equal(res.status, 500);
+});

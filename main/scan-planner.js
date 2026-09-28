@@ -50,7 +50,8 @@ function clearSessionsFor(map, key) {
 // A platform's tab limit, safe against null/NaN from an old or imported config
 // (`count >= null` is always true, which silently stopped every auto-open).
 function tabLimitFor(config, platform) {
-  const key = TAB_LIMIT_KEYS[platform];
+  // Own keys only: 'constructor' or '__proto__' must not find Object's.
+  const key = Object.prototype.hasOwnProperty.call(TAB_LIMIT_KEYS, platform) ? TAB_LIMIT_KEYS[platform] : null;
   if (!key) return 2;
   return clampSetting(config[key], SETTING_RANGES[key]);
 }

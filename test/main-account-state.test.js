@@ -405,3 +405,15 @@ test('issue-14: a handle with stray whitespace is still a handle', () => {
   assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: ' @bob', source: 'ytcfg' }), { rename: false, pending: ' @bob' });
   assert.equal(youtubeRenameDecision({ stored: '@alice', name: '@bob', source: 'ytcfg', pending: ' @bob' }).rename, true);
 });
+
+// Found by mutation testing: a platform with no map entry got a placeholder
+// ('<Platform> User') that isPlaceholderName did not recognise.
+test('every placeholder the app can write is recognised as one', () => {
+  const { placeholderName } = require('../main/account-state');
+  for (const p of ['twitch', 'kick', 'youtube', 'rumble', 'mixer', 'trovo']) {
+    assert.equal(isPlaceholderName(placeholderName(p)), true, p);
+  }
+  for (const real of ['@Kyogrim', 'kyogrim_en', 'Kyogrim', 'user', 'Twitch Userx']) {
+    assert.equal(isPlaceholderName(real), false, real);
+  }
+});

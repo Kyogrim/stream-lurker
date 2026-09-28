@@ -677,3 +677,17 @@ test('download allowlist: take() accepts a bare URL and skips unparsable hops', 
   assert.equal(d.take(['not a url', '', 'https://a.example/clip.mp4']), 'again.mp4');
   assert.equal(d.take(['not a url', null]), null);
 });
+
+// Found by mutation testing: 0 doubled as "never", so a clock that starts
+// near 0 refused the first open and ignored a gesture noted at 0.
+test('external-open gate: a clock starting at 0 behaves like any other', () => {
+  let t = 0;
+  const gate = createExternalOpenGate({ now: () => t });
+  const key = {};
+  gate.noteGesture(key);
+  t = 100;
+  assert.equal(gate.decide(key, 'https://example.com/a', { focused: true }).open, true);
+  t = 200;
+  gate.noteGesture(key);
+  assert.equal(gate.decide(key, 'https://example.com/b', { focused: true }).reason, 'rate limited', 'still rate limited after a real open');
+});

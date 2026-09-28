@@ -3108,7 +3108,9 @@ ipcMain.handle('save-config', (event, newConfig) => {
 ipcMain.handle('add-streamer', (event, { platform, username }) => {
   const cleanUsername = String(username ?? '').trim();
   if (!cleanUsername) return { success: false, error: 'Username cannot be empty' };
-  platform = String(platform ?? '');
+  // Trimmed here as in channelNameProblem, or ' twitch ' would pass the
+  // check, miss the duplicate below and be stored padded.
+  platform = String(platform ?? '').trim();
   // The name goes into scan URLs and the dashboard's cells; a quote, slash or
   // pasted link used to be stored as is (see config-boundary.js).
   const nameProblem = channelNameProblem(platform, cleanUsername);

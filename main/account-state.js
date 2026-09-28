@@ -12,8 +12,11 @@ function placeholderName(platform) {
 }
 
 // A stored name that carries no information, so it's worth replacing.
+// Matches every name placeholderName can produce, including its fallback for
+// a platform with no entry in PLACEHOLDER_NAMES: one word, then " User".
+// Account names never contain a space (logins, slugs, @handles).
 function isPlaceholderName(name) {
-  return !name || /^(kick|youtube|twitch|rumble) user$/i.test(String(name).trim());
+  return !name || /^[a-z0-9]+ user$/i.test(String(name).trim());
 }
 
 // Whether two names are the same account: YouTube shows a handle with or

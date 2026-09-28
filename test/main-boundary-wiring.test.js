@@ -352,3 +352,8 @@ test('F52: re-syncs announce only a different account; YouTube\'s health check c
   assert.match(kick, /const resolved = kickNameToStore\(config\.accounts\.kick, found\);/);
   assert.match(block('async function refreshPlaceholderAccountNames('), /const name = kickNameToStore\(snap\.name, found\);/);
 });
+
+test('add-streamer trims the platform before it validates, compares and stores it', () => {
+  const add = block("ipcMain.handle('add-streamer'");
+  assert.match(add, /platform = String\(platform \?\? ''\)\.trim\(\);/);
+});

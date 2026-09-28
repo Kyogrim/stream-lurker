@@ -135,12 +135,18 @@ function copyWithJournal(from, to) {
   fs.copyFileSync(from, to);
   const journal = from + '-journal';
   if (fs.existsSync(journal)) fs.copyFileSync(journal, to + '-journal');
+  // Never leave a journal from an earlier snapshot beside this one: restoring
+  // the pair would replay it and roll the copy back to older data.
+  else removeJournal(to);
 }
 
 function removeWithJournal(f) {
   for (const p of [f, f + '-journal']) {
     try { fs.unlinkSync(p); } catch (e) { /* absent */ }
   }
+}
+function removeJournal(f) {
+  try { fs.unlinkSync(f + '-journal'); } catch (e) { /* absent */ }
 }
 
 // Returns { file, status, from?, to?, rowsBefore?, rowsAfter?, backup?, error? }.

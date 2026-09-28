@@ -167,3 +167,16 @@ test('clip file name: truncation never leaves a trailing dot or space before .mp
     assert.ok(name.length <= 150);
   }
 });
+
+// Found by mutation testing: file-name edge cases.
+test('clip file names: no half emoji, no doubled extension, every reserved device name', () => {
+  const long = clipFileName('x'.repeat(145) + '\u{1F600}');
+  assert.equal(long.isWellFormed(), true, 'never cuts a surrogate pair in half');
+  assert.ok(long.length <= 150);
+  assert.equal(clipFileName('GreatClip.mp4.'), 'GreatClip.mp4');
+  assert.equal(clipFileName('GreatClip.mp4 .'), 'GreatClip.mp4');
+  for (const dev of ['NUL .x', 'COM¹', 'LPT³', 'CONIN$', 'conout$']) {
+    assert.ok(clipFileName(dev).startsWith('_'), `${dev} -> ${clipFileName(dev)}`);
+  }
+  assert.equal(clipFileName('CONSOLE'), 'CONSOLE.mp4', 'only the reserved names themselves');
+});

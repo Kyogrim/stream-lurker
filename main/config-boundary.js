@@ -159,7 +159,8 @@ const PLATFORM_LABELS = { twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', ru
 // message for the user.
 function channelNameProblem(platform, username) {
   const p = typeof platform === 'string' ? platform.trim().toLowerCase() : '';
-  const rule = CHANNEL_NAME_RULES[p];
+  // Own keys only: 'constructor' or '__proto__' must not find Object's.
+  const rule = Object.prototype.hasOwnProperty.call(CHANNEL_NAME_RULES, p) ? CHANNEL_NAME_RULES[p] : null;
   if (!rule) return 'Unknown platform.';
   const name = typeof username === 'string' || (typeof username === 'number' && Number.isFinite(username)) ? String(username).trim() : '';
   if (!name) return 'Username cannot be empty';

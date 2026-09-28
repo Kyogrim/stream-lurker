@@ -203,7 +203,8 @@ function createExternalOpenGate({ gestureWindowMs = 5000, minIntervalMs = 2000, 
   const state = new WeakMap(); // webContents -> { gestureAt, lastOpenAt, lastUrl }
   const get = (key) => {
     let s = state.get(key);
-    if (!s) { s = { gestureAt: 0, lastOpenAt: 0, lastUrl: '' }; state.set(key, s); }
+    // null is "never": 0 is a real time for a clock that starts there.
+    if (!s) { s = { gestureAt: null, lastOpenAt: null, lastUrl: '' }; state.set(key, s); }
     return s;
   };
   return {
@@ -217,12 +218,12 @@ function createExternalOpenGate({ gestureWindowMs = 5000, minIntervalMs = 2000, 
       if (!focused) return { open: false, reason: 'its window was not focused' };
       const s = get(key);
       const t = now();
-      if (!s.gestureAt || t - s.gestureAt > gestureWindowMs) return { open: false, reason: 'no click or key press just before it' };
-      if (t - s.lastOpenAt < minIntervalMs) return { open: false, reason: 'rate limited' };
-      if (s.lastUrl === u.href && t - s.lastOpenAt < dedupeMs) return { open: false, reason: 'same link again' };
+      if (s.gestureAt === null || t - s.gestureAt > gestureWindowMs) return { open: false, reason: 'no click or key press just before it' };
+      if (s.lastOpenAt !== null && t - s.lastOpenAt < minIntervalMs) return { open: false, reason: 'rate limited' };
+      if (s.lastOpenAt !== null && s.lastUrl === u.href && t - s.lastOpenAt < dedupeMs) return { open: false, reason: 'same link again' };
       s.lastOpenAt = t;
       s.lastUrl = u.href;
-      s.gestureAt = 0; // one gesture, one tab
+      s.gestureAt = null; // one gesture, one tab
       return { open: true, reason: '', href: u.href };
     },
   };

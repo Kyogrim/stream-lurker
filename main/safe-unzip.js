@@ -20,6 +20,10 @@ function safeEntryPath(name) {
   if (typeof name !== 'string' || name.length === 0 || name.includes('\0')) return null;
   const norm = name.replace(/\\/g, '/');
   if (norm.startsWith('/') || /^[a-zA-Z]:/.test(norm)) return null; // absolute or drive-qualified
+  // Anywhere else, ':' names an NTFS alternate data stream on Windows:
+  // 'manifest.json:x' writes a hidden stream onto manifest.json. No extension
+  // ships such a name, so it is refused rather than written somewhere odd.
+  if (norm.includes(':')) return null;
   const parts = norm.split('/').filter(p => p !== '' && p !== '.');
   if (parts.length === 0) return null;
   if (parts.some(p => p === '..')) return null;
@@ -38,17 +42,28 @@ function extractZipBuffer(buf, destDir, limits = {}) {
       if (file.name.endsWith('/')) return false; // directory entry; created on demand
       const rel = safeEntryPath(file.name);
       const target = rel && path.resolve(root, rel);
-      if (!target || !target.startsWith(root + path.sep)) {
+      // fflate collects results in a plain object, where '__proto__' would set
+      // the prototype and the entry would vanish unreported.
+      if (!target || !target.startsWith(root + path.sep) || file.name === '__proto__') {
         refused.push(file.name);
         return false;
       }
       entries += 1;
-      total += file.originalSize;
+      // originalSize is only what the archive declares. A stored entry is read
+      // by its compressed size, so a record claiming 0 bytes could carry any
+      // amount, and several records can point at the same data. Count the
+      // larger of the two for every record.
+      total += Math.max(file.size, file.originalSize);
       if (entries > maxEntries) throw new Error(`archive has more than ${maxEntries} files`);
       if (total > maxTotalBytes) throw new Error(`archive expands past ${maxTotalBytes} bytes`);
       return true;
     },
   });
+
+  // And the real sizes, whatever the headers said, before anything is written.
+  let actual = 0;
+  for (const data of Object.values(files)) actual += data.length;
+  if (actual > maxTotalBytes) throw new Error(`archive expands past ${maxTotalBytes} bytes`);
 
   fs.mkdirSync(root, { recursive: true });
   let written = 0;

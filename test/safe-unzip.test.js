@@ -156,3 +156,51 @@ test('a drive-relative name on the destination drive is refused, not written', (
   assert.equal(r.written, 1);
   assert.deepEqual(fs.readdirSync(dest), ['ok.txt']);
 });
+
+// ── Found by mutation testing: sizes and names the archive lies about ──────
+
+test('a stored entry that declares 0 bytes still counts its real size against the cap', () => {
+  // Stored (level 0) entries are read by their compressed size, whatever the
+  // central directory declares, so the declared size alone let a bomb through.
+  const blob = new Uint8Array(64 * 1024).fill(7);
+  const zip = declareSize(zipSync({ 'blob.bin': blob }, { level: 0 }), 0);
+  const dest = path.join(tmp(), 'out');
+  assert.throws(() => extractZipBuffer(zip, dest, { maxTotalBytes: 1024 }), /expands past 1024/);
+  assert.equal(fs.existsSync(dest), false, 'nothing written');
+});
+
+test('a deflated entry that under-declares its size never writes past the cap', () => {
+  const blob = new Uint8Array(256 * 1024).fill(1); // compresses to almost nothing
+  const zip = declareSize(zipSync({ 'blob.bin': blob }), 16);
+  const dest = path.join(tmp(), 'out');
+  let threw = false;
+  try { extractZipBuffer(zip, dest, { maxTotalBytes: 4096 }); } catch (e) { threw = true; }
+  const written = fs.existsSync(dest)
+    ? fs.readdirSync(dest).reduce((n, f) => n + fs.statSync(path.join(dest, f)).size, 0) : 0;
+  assert.ok(threw || written <= 4096, `wrote ${written} bytes past a 4096-byte cap`);
+});
+
+// fflate's zipSync cannot build an entry named __proto__ (it walks a plain
+// object), so a same-length placeholder is renamed in the raw bytes: in the
+// local header and in the central directory alike.
+function renameEntry(zip, from, to) {
+  assert.equal(from.length, to.length);
+  const a = strToU8(from), b = strToU8(to);
+  for (let i = 0; i + a.length <= zip.length; i++) {
+    if (a.every((c, j) => zip[i + j] === c)) zip.set(b, i);
+  }
+  return zip;
+}
+
+test('names with a colon are refused (NTFS alternate data streams), and so is a root __proto__', () => {
+  const dest = path.join(tmp(), 'out');
+  const r = extractZipBuffer(renameEntry(zipSync({
+    'docs/Re: notes.txt': strToU8('hidden'),
+    'manifest.json:hidden': strToU8('stream'),
+    xxxxxxxxx: strToU8('x'), // renamed to __proto__ below
+    'ok.txt': strToU8('y'),
+  }), 'xxxxxxxxx', '__proto__'), dest);
+  assert.equal(r.written, 1);
+  assert.deepEqual([...r.refused].sort(), ['__proto__', 'docs/Re: notes.txt', 'manifest.json:hidden']);
+  assert.deepEqual(fs.readdirSync(dest), ['ok.txt']);
+});

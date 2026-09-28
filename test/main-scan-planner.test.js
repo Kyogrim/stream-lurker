@@ -520,3 +520,9 @@ test('log lines: each auto-close and auto-open decision, and silence for live or
   ]);
   assert.deepEqual(w.closed, ['twitch:low', 'twitch:top']);
 });
+
+// Found by mutation testing: prototype names resolved to inherited functions
+// and threw instead of falling back to the default limit.
+test('tabLimitFor falls back to 2 for prototype-named platforms', () => {
+  for (const p of ['constructor', '__proto__', 'toString', 'valueOf']) assert.equal(tabLimitFor({}, p), 2, p);
+});

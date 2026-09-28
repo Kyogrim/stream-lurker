@@ -727,3 +727,11 @@ test('C1: only an app-login record reads as app-login; changing one platform kee
   assert.deepEqual(withSignedOut(others, 'twitch', true, 7), { ...others, twitch: 7 });
   assert.deepEqual(withSignedOut({ ...others, twitch: 7 }, 'twitch', false), others);
 });
+
+// Found by mutation testing: platform names that are Object.prototype keys
+// used to resolve to inherited properties and throw instead of refusing.
+test('channelNameProblem refuses prototype-named platforms instead of throwing', () => {
+  for (const p of ['constructor', '__proto__', 'toString', 'hasOwnProperty', ' Constructor ']) {
+    assert.equal(channelNameProblem(p, 'someone'), 'Unknown platform.', p);
+  }
+});

@@ -43,8 +43,9 @@ function normalizeExpiry(value) {
 // (Cookie-Editor / EditThisCookie / Puppeteer), Netscape cookies.txt, and a
 // plain "name=value; name=value" header string. Returns normalized cookie
 // objects; hostOnly is only set when the source says so.
-function parseCookieBlob(raw) {
-  raw = String(raw || '').trim();
+function parseCookieBlob(input) {
+  const text = String(input || '');
+  const raw = text.trim();
   const out = [];
   if (!raw) return out;
 
@@ -53,7 +54,11 @@ function parseCookieBlob(raw) {
     try {
       let arr = JSON.parse(raw);
       if (!Array.isArray(arr)) arr = arr.cookies || [arr];
-      for (const c of arr) {
+      for (const item of arr) {
+        // Some exporters capitalise the keys (Name, Value, Domain, ...).
+        const c = item && typeof item === 'object' && !item.name && item.Name
+          ? Object.fromEntries(Object.entries(item).map(([k, v]) => [k.charAt(0).toLowerCase() + k.slice(1), v]))
+          : item;
         if (!c || !c.name) continue;
         const cookie = {
           name: String(c.name),
@@ -68,13 +73,17 @@ function parseCookieBlob(raw) {
         if (typeof c.hostOnly === 'boolean') cookie.hostOnly = c.hostOnly;
         out.push(cookie);
       }
-      if (out.length) return out;
-    } catch (e) { /* fall through to other formats */ }
+      // Valid JSON is never re-read as a header string: splitting the JSON
+      // text on ';' and '=' made junk cookies out of it.
+      return out;
+    } catch (e) { /* not JSON: fall through to other formats */ }
   }
 
   // Netscape cookies.txt (tab-separated): domain, includeSub, path, secure, expiry, name, value
   if (/\t/.test(raw) || /^#\s*(HTTP Cookie File|Netscape)/im.test(raw)) {
-    for (const rawLine of raw.split(/\r?\n/)) {
+    // Only surrounding line breaks go: trim() also took the tab that ends a
+    // last line whose value is empty, and that cookie was dropped.
+    for (const rawLine of text.replace(/^[\r\n]+|[\r\n]+$/g, '').split(/\r?\n/)) {
       let line = rawLine;
       // curl-style exporters write httpOnly cookies as "#HttpOnly_<domain>".
       // Those are exactly Google's session cookies (SID, HSID, SSID,

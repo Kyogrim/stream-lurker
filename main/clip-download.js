@@ -41,9 +41,16 @@ function clipPageUrl(value) {
 function clipFileName(value) {
   let name = path.win32.basename(String(value == null ? '' : value));
   name = name.replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '').trim();
-  name = name.replace(/\.mp4$/i, '').replace(/[. ]+$/, '');
-  if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i.test(name)) name = `_${name}`;
-  name = name.slice(0, MAX_NAME_LENGTH - 4).replace(/[. ]+$/, '');
+  // Trailing dots and spaces go before the extension does, or 'x.mp4.' kept
+  // its .mp4 and got a second one.
+  name = name.replace(/[. ]+$/, '').replace(/\.mp4$/i, '').replace(/[. ]+$/, '');
+  // Windows reserves these with any extension, with spaces before it, and
+  // with superscript digits; CONIN$ and CONOUT$ too.
+  if (/^(con|prn|aux|nul|conin\$|conout\$|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(\s*\..*)?$/i.test(name)) name = `_${name}`;
+  let cut = name.slice(0, MAX_NAME_LENGTH - 4);
+  // Never half of a surrogate pair: it becomes U+FFFD on disk.
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  name = cut.replace(/[. ]+$/, '');
   return `${name || 'clip'}.mp4`;
 }
 
