@@ -503,6 +503,14 @@ get back.
   deletes a cookie database that is too new for it, so a v24 file opened by Electron 30 is wiped.
   Never downgrade `electron` in package.json, and never run an older build on a profile a newer one
   has opened (one more reason dev builds get a copy of the profile).
+- **The dashboard runs on `app://bundle`, and the file-protocol fuse stays ON.** Saved clips live in
+  the dashboard's localStorage, which moved with its origin; `migrateFileOriginStorage`
+  (`main/dashboard-protocol.js`) copies them once from the old `file://` store. That import needs
+  `build.electronFuses.grantFileProtocolExtraPrivileges: true`: with it off, every `file://` page is an
+  opaque origin with no localStorage, the import fails on every launch, and every user's saved clips
+  are lost. The dashboard is safe either way because an `app://` page cannot read `file://`
+  (verified: fetch, XHR and iframe all refused). It only shows in a packaged build, so test it with
+  `npm run package` and `dist/win-unpacked/Stream Lurker.exe --user-data-dir=<copy of a profile>`.
 - **Every Electron bump:** users skip versions (updates are user-triggered), so any old release can
   update straight to the new one. Check that the new Chromium still migrates v23, which is what
   `cookie-migration.js` leaves for anyone arriving from an Electron 30 release, and extend the
