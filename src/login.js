@@ -239,7 +239,18 @@ async function refreshExtensionInfo() {
   } catch (e) {
     return;
   }
-  if (gen === pairingCodeGen) showPairingCode(info?.pairingCode);
+  if (gen === pairingCodeGen) {
+    showPairingCode(info?.pairingCode);
+    // Installs from before 32-character codes still hold an 8-character one.
+    // Connector 1.3 refuses those (one /ping answer is enough to brute-force a
+    // 32-bit code offline), so say how to fix it here rather than leave the
+    // extension failing on its own. Never over another message.
+    const code = info?.pairingCode || '';
+    const note = document.getElementById('ext-panel-note');
+    if (code && code.length < 32 && note && !note.textContent) {
+      setExtensionNote('This pairing code is from an older version. Connector 1.3 needs a longer one: click New code, then paste it into the extension.', 'warn');
+    }
+  }
   if (connEl) {
     const r = receiverStatus(info);
     connEl.textContent = r.text;

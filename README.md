@@ -77,7 +77,7 @@ Weekly schedules pulled straight from the platforms, plus your own manual lurk p
 | **Live-now glance** | A top-bar pill showing who's live right now, one click to open any of them. |
 | **Pop-out / PiP** | Float any single stream in an always-on-top window; the grid copy auto-suspends so nothing is decoded twice. |
 | **1-click login** | A companion browser extension imports your existing sessions — no copy-pasting cookies. |
-| **Adblock support** | Load unpacked Chromium extensions (uBlock Origin, 7TV, …) into the stream containers. |
+| **Browser extensions** | Load unpacked Chromium extensions (7TV, …) into the stream containers. Ad blockers load but cannot block ads here: the app's own request handling on the stream session takes precedence. |
 | **Clips** | Browse trending clips from the Twitch streamers you monitor. |
 | **Backup & transfer** | Export your streamers, history and settings to a file — or import them on another PC. |
 | **Runs in the tray** | Optionally launches with Windows and starts straight to the tray, so the scanner is always going. |

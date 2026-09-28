@@ -15,8 +15,10 @@
 // else has any business reading these answers. /ping proves the app holds
 // the extension's pairing code (an HMAC over a nonce the extension picks)
 // without revealing it, so the extension never sends cookies to some other
-// local process squatting on the port. Tested end to end over real sockets
-// in test/main-cookie-receiver.test.js.
+// local process squatting on the port. The proof also names the port the app
+// is bound to: otherwise a squatter on one port could forward the nonce to the
+// real app on another and replay the app's genuine answer. Tested end to end
+// over real sockets in test/main-cookie-receiver.test.js.
 
 const crypto = require('crypto');
 const http = require('http');
@@ -28,16 +30,18 @@ const PING_PROOF_PREFIX = 'stream-lurker-ping:';
 const NONCE = /^[0-9a-f]{16,64}$/i;
 const IMPORT_PLATFORMS = ['twitch', 'youtube', 'kick'];
 
-function pingProof(code, nonce) {
-  return crypto.createHmac('sha256', String(code).toUpperCase()).update(PING_PROOF_PREFIX + nonce).digest('hex');
+// Message: "stream-lurker-ping:<port>:<nonce>", keyed by the upper-case code.
+// extension/connector.js proofMessage() must build the identical string.
+function pingProof(code, port, nonce) {
+  return crypto.createHmac('sha256', String(code).toUpperCase()).update(`${PING_PROOF_PREFIX}${port}:${nonce}`).digest('hex');
 }
 
 // { app } plus, for a well-formed nonce, the proof. No version: the extension
 // needs neither, and a page probing the port learns nothing it can use.
-function pingBody(query, code) {
+function pingBody(query, code, port) {
   const body = { app: 'stream-lurker' };
   const nonce = query && typeof query.get === 'function' ? query.get('nonce') : null;
-  if (nonce && NONCE.test(nonce) && code) body.proof = pingProof(code, nonce);
+  if (nonce && NONCE.test(nonce) && code && port) body.proof = pingProof(code, port, nonce);
   return body;
 }
 
@@ -179,7 +183,7 @@ function createReceiverHandler(deps) {
 
       if (url.pathname === '/ping') {
         if (req.method !== 'GET') return send(405, { success: false, error: 'Method not allowed' }, { close: true, headers: { Allow: 'GET' } });
-        return send(200, pingBody(url.searchParams, getPairingCode()));
+        return send(200, pingBody(url.searchParams, getPairingCode(), getPort()));
       }
       if (url.pathname !== '/import') return send(404, { success: false, error: 'Not found' }, { close: true });
       if (req.method !== 'POST') return send(405, { success: false, error: 'Method not allowed' }, { close: true, headers: { Allow: 'POST' } });

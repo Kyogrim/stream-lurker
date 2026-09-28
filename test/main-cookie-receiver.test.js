@@ -95,7 +95,7 @@ test('C1 /ping: a 16-64 hex nonce gets the HMAC proof; anything else gets none',
   t.after(r.close);
   const nonce = crypto.randomBytes(16).toString('hex');
   const res = await request(r.port, { path: `/ping?nonce=${nonce}` });
-  const expected = crypto.createHmac('sha256', CODE).update(`stream-lurker-ping:${nonce}`).digest('hex');
+  const expected = crypto.createHmac('sha256', CODE).update(`stream-lurker-ping:${r.port}:${nonce}`).digest('hex');
   assert.deepEqual(res.json, { app: 'stream-lurker', proof: expected });
   assert.match(res.json.proof, /^[0-9a-f]{64}$/, 'lowercase hex');
   assert.equal(PING_PROOF_PREFIX, 'stream-lurker-ping:');
@@ -103,7 +103,12 @@ test('C1 /ping: a 16-64 hex nonce gets the HMAC proof; anything else gets none',
     const other = await request(r.port, { path: `/ping?nonce=${bad}` });
     assert.deepEqual(other.json, { app: 'stream-lurker' }, bad);
   }
-  assert.equal(pingProof(CODE.toLowerCase(), nonce), expected, 'the key is the upper-case code');
+  assert.equal(pingProof(CODE.toLowerCase(), r.port, nonce), expected, 'the key is the upper-case code');
+  // The port is part of what is signed, so the app's answer on one port is
+  // useless to a squatter replaying it from another (relay defence).
+  assert.notEqual(pingProof(CODE, r.port + 1, nonce), expected);
+  const unbound = crypto.createHmac('sha256', CODE).update(`stream-lurker-ping:${nonce}`).digest('hex');
+  assert.notEqual(expected, unbound, 'the pre-amendment message is no longer what is signed');
 });
 
 test('C1 interop: the extension client verifies the proof and imports with the header code', async (t) => {
@@ -111,7 +116,10 @@ test('C1 interop: the extension client verifies the proof and imports with the h
   t.after(r.close);
   const deps = { fetch: globalThis.fetch, crypto: globalThis.crypto, ports: [r.port], timeoutMs: 2000 };
   assert.deepEqual(await connector.findApp({ ...deps, code: CODE.toLowerCase() }), { status: 'verified', port: r.port });
-  assert.equal((await connector.findApp({ ...deps, code: 'DEADBEEF' })).status, 'mismatch');
+  assert.equal((await connector.findApp({ ...deps, code: 'DEADBEEF'.repeat(4) })).status, 'mismatch');
+  // An 8-character code (every install before 32-character codes) is 32 bits,
+  // brute-forceable from one proof, so the extension refuses to rely on it.
+  assert.equal((await connector.findApp({ ...deps, code: 'DEADBEEF' })).status, 'short-code');
   assert.equal((await connector.findApp({ ...deps, code: '' })).status, 'no-code');
 
   const manual = await connector.postImport({ fetch: globalThis.fetch, port: r.port, code: CODE, platform: 'kick', cookies: [{ name: 'session_token', value: 'v' }] });
