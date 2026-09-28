@@ -218,18 +218,52 @@ test('a short (pre-128-bit) code pings nothing and says why, so a squatter that 
   const summary = SL.describeSync({ connectedPlatforms: ['twitch'], lastResync: NOW - MIN, lastResyncStatus: 'code-too-short' }, NOW).summary;
   assert.equal(summary.tone, 'err');
   assert.match(summary.text, /too short.*Paste the current code/);
+  // Pasting "the current code" again stores the same 8 characters: both
+  // places give the one step that actually fixes it.
+  assert.match(summary.text, /only 8 characters, click New code/);
 });
 
-test('status when nothing verifies: mismatch, outdated, not-found, no-code', async () => {
+test('status when nothing verifies: mismatch, app-code-too-short, outdated, not-found, no-code', async () => {
   const find = (ports, code) => SL.findApp({ fetch: makeLoopback(ports).fetch, crypto: webcrypto, code });
   assert.equal((await find({ 47100: { kind: 'app', code: OTHER_CODE } }, CODE)).status, 'mismatch');
+  assert.equal((await find({ 47100: { kind: 'unsigned-app' } }, CODE)).status, 'app-code-too-short');
   assert.equal((await find({ 47100: { kind: 'outdated' } }, CODE)).status, 'outdated');
+  assert.equal((await find({ 47100: { kind: 'outdated' }, 47101: { kind: 'unsigned-app' } }, CODE)).status, 'app-code-too-short', 'a current app is the one to pair with');
   assert.equal((await find({ 47100: { kind: 'outdated' }, 47101: { kind: 'app', code: OTHER_CODE } }, CODE)).status, 'mismatch');
+  assert.equal((await find({ 47100: { kind: 'unsigned-app' }, 47101: { kind: 'app', code: OTHER_CODE } }, CODE)).status, 'mismatch');
   assert.equal((await find({ 47100: { kind: 'other-json' } }, CODE)).status, 'not-found');
   assert.equal((await find({}, CODE)).status, 'not-found');
   const noCode = await find({ 47100: { kind: 'app', code: CODE } }, '');
   assert.deepEqual(noCode, { status: 'no-code', port: null }, 'without a code nothing can be verified');
+  // A fresh extension in front of a current app on an 8-character code: ask
+  // for the code first, never "update the app" (it is current).
+  assert.deepEqual(await find({ 47100: { kind: 'unsigned-app' } }, ''), { status: 'no-code', port: null });
+  assert.equal((await find({ 47100: { kind: 'outdated' }, 47101: { kind: 'unsigned-app' } }, '')).status, 'no-code');
+  // Only an app from before proofs: no code pairs with it, so updating is the
+  // one fix, and asking for its code would lead to a New code it lacks.
   assert.equal((await find({ 47100: { kind: 'outdated' } }, '')).status, 'outdated');
+});
+
+test('a current app on an 8-character code gets the New-code fix, never "needs updating" (C1 code-length rule)', async () => {
+  // Every install from before 32-character codes: the app withholds its
+  // proof and says nothing else. A 32-character code in the extension (config
+  // restored from a backup older than a New code click) finds only that.
+  const net = makeLoopback({ 47100: { kind: 'unsigned-app' } });
+  const found = await SL.findApp({ fetch: net.fetch, crypto: webcrypto, code: CODE });
+  assert.deepEqual(found, { status: 'app-code-too-short', port: null });
+  const view = SL.describeConnection(found);
+  assert.equal(view.tone, 'err');
+  assert.match(view.text, /Click New code in Platform Logins.*paste the new code here/);
+  assert.doesNotMatch(view.text, /needs updating|update (it|the app)/i);
+
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube'] });
+  assert.equal((await SL.runResync(resyncDeps(storage, net))).status, 'app-code-too-short');
+  assert.equal(net.imports.length, 0, 'nothing goes to a listener that proved nothing');
+  assert.ok(!JSON.stringify(net.requests).includes(CODE));
+  const summary = SL.describeSync(storage.data, 1_000_000 + 5 * MIN).summary;
+  assert.equal(summary.tone, 'err');
+  assert.match(summary.text, /^Checked 5 min ago: .*Click New code in Platform Logins.*paste the new code here/);
+  assert.doesNotMatch(summary.text, /needs updating|update (it|the app)/i);
 });
 
 test('port list: 47100-47104 first and in order, fallbacks at least 100 apart (G2.4)', () => {
@@ -327,6 +361,7 @@ test('resync records its early skips so the popup never shows a stale "ok" as cu
 test('resync sends nothing to an unproven or mismatched listener', async () => {
   for (const [ports, status] of [
     [{ 47100: { kind: 'outdated' } }, 'app-outdated'],
+    [{ 47100: { kind: 'unsigned-app' } }, 'app-code-too-short'],
     [{ 47100: { kind: 'app', code: OTHER_CODE } }, 'code-mismatch'],
     [{ 47100: { kind: 'forged', proof: 'ab'.repeat(32) } }, 'code-mismatch'],
   ]) {
@@ -440,7 +475,7 @@ test('updatePlatform unlessResultAfter: skips only when the stored result is str
   assert.deepEqual(bare.data.connectedPlatforms, []);
 });
 
-test('an import the app accepts and never answers ends the pass with a recorded error (stalled /import)', { timeout: 5000 }, async () => {
+test('an import the app accepts and never answers ends the pass, recorded as unanswered, not failed (stalled /import)', { timeout: 5000 }, async () => {
   const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube', 'kick'], lastResyncStatus: 'done', lastResync: 1 });
   // twitch: no response at all; youtube: headers, then a body that never ends.
   const net = makeLoopback({ 47100: { kind: 'app', code: CODE, stallImport: ['twitch'], stallImportBody: ['youtube'] } });
@@ -452,13 +487,47 @@ test('an import the app accepts and never answers ends the pass with a recorded 
   assert.equal(r.status, 'done');
   const res = storage.data.lastResyncResults;
   for (const p of ['twitch', 'youtube']) {
-    assert.deepEqual(res[p], { kind: 'error', message: 'Stream Lurker did not answer the import in time', at: 6_000_000 }, p);
+    assert.deepEqual(res[p], { kind: 'unanswered', at: 6_000_000 }, p);
   }
   assert.equal(res.kick.kind, 'ok', 'one stalled platform does not hold up the next');
   assert.equal(storage.data.lastResyncStatus, 'done');
   assert.equal(storage.data.lastResync, 6_000_000);
   assert.deepEqual(storage.data.connectedPlatforms, ['twitch', 'youtube', 'kick'], 'a timeout never disconnects');
-  assert.equal(SL.describeSync(storage.data, clock.t).rows[0].text, 'Stream Lurker did not answer the import in time (just now)');
+  // The app finishes the import regardless, so the popup must not call it a
+  // failure: it points at the app, which knows how it went.
+  const row = SL.describeSync(storage.data, clock.t).rows[0];
+  assert.equal(row.tone, 'idle');
+  assert.equal(row.text, 'Sent (just now). Stream Lurker was still working on it when this browser stopped waiting; Platform Logins in the app shows whether it went through.');
+});
+
+test('a slow app import (hidden-page name lookup past the worker budget) is applied by the app and never shown as an error', { timeout: 5000 }, async () => {
+  // The app keeps working after the extension stops waiting (main/cookie-
+  // receiver.js awaits the importer whatever the socket does), so model an
+  // answer that arrives after the abort and check both sides of the story.
+  let applied = 0;
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['youtube'] });
+  const net = makeLoopback({
+    47100: {
+      kind: 'app', code: CODE,
+      beforeImportReply: async () => { await new Promise(res => setTimeout(res, 120)); applied++; },
+    },
+  });
+  // Like a real fetch, give up the moment the caller aborts; the "app" above
+  // carries on regardless.
+  const abortable = (url, init = {}) => Promise.race([
+    net.fetch(url, init),
+    new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))),
+  ]);
+  const r = await SL.runResync({ ...resyncDeps(storage, { fetch: abortable }), importTimeoutMs: 30 });
+  assert.equal(r.results.youtube.kind, 'unanswered');
+  assert.equal(applied, 0, 'the pass ended before the app answered');
+  await new Promise(res => setTimeout(res, 200));
+  assert.equal(applied, 1, 'the app did apply it');
+  const view = SL.describeSync(storage.data, 1_000_000);
+  assert.equal(view.rows.length, 1);
+  assert.equal(view.rows[0].tone, 'idle');
+  assert.doesNotMatch(view.rows[0].text, /did not answer|fail|error/i);
+  assert.deepEqual(storage.data.connectedPlatforms, ['youtube']);
 });
 
 test('postImport: a timeout throws IMPORT_TIMEOUT; other failures stay network errors; defaults fit Chrome\'s 30 s fetch limit', async () => {
@@ -473,6 +542,8 @@ test('postImport: a timeout throws IMPORT_TIMEOUT; other failures stay network e
   let seen;
   await SL.postImport({ fetch: async (url, init) => { seen = init.signal; return { ok: true, status: 200, json: async () => ({ success: true }) }; }, port: 1, code: CODE, platform: 'kick', cookies: [], auto: true });
   assert.ok(seen && seen.aborted === false);
+  // Chrome terminates an extension service worker whose fetch() response takes
+  // more than 30 s, so this cannot be raised to the app's 45 s worst case.
   assert.ok(SL.AUTO_IMPORT_TIMEOUT_MS < 30000, 'a worker is killed after 30 s waiting on fetch, recording nothing');
   assert.ok(SL.MANUAL_IMPORT_TIMEOUT_MS > 45000, 'a click waits out the app\'s 45 s hidden-page lookup');
 });
@@ -497,6 +568,95 @@ test('a platform the user stops while its import is in flight does not reappear'
   await SL.runResync(resyncDeps(storage, net));
   assert.deepEqual(storage.data.connectedPlatforms, []);
   assert.ok(!('twitch' in storage.data.lastResyncResults));
+});
+
+test('Stop on a platform whose turn has not come yet: its cookies are never sent (Stop\'s promise)', async () => {
+  // Two browser profiles on two accounts: the user stops YouTube here while
+  // Twitch's import is in flight (it can wait 25 s), then connects YouTube
+  // from the other profile. This pass must not re-plant this profile's
+  // account a moment later.
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube', 'kick'], lastResyncResults: { youtube: { kind: 'ok', cookiesSet: 3, at: 9 } } });
+  const net = makeLoopback({
+    47100: {
+      kind: 'app', code: CODE,
+      beforeImportReply: (body) => (body.platform === 'twitch' ? SL.updatePlatform(storage, 'youtube', { connected: false, result: null }) : undefined),
+    },
+  });
+  const cookies = makeCookieJar([...YT_COOKIES, { name: 'session_token', domain: '.kick.com' }]);
+  const r = await SL.runResync(resyncDeps(storage, net, cookies));
+  assert.deepEqual(net.imports.map(i => i.body.platform), ['twitch', 'kick'], 'the pass skips only the stopped platform and carries on');
+  assert.ok(!net.requests.some(q => JSON.stringify(q).includes('__Secure-1PSID')), 'no YouTube cookie left the browser');
+  assert.equal(r.status, 'done');
+  assert.ok(!('youtube' in r.results), 'a skipped platform gets no result');
+  assert.deepEqual(storage.data.connectedPlatforms, ['twitch', 'kick']);
+  assert.ok(!('youtube' in storage.data.lastResyncResults));
+  assert.equal(storage.data.lastResyncResults.kick.kind, 'ok');
+});
+
+test('a platform the user stops while the app is refusing it (SIGNED_OUT) does not come back as a row', async () => {
+  // Signed-out rows show even for a platform that is not connected, and have
+  // no Stop button: one written after the Stop could only be cleared by
+  // turning the sync back on.
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch'] });
+  const net = makeLoopback({
+    47100: { kind: 'app', code: CODE, signedOut: ['twitch'], beforeImportReply: () => SL.updatePlatform(storage, 'twitch', { connected: false, result: null }) },
+  });
+  const r = await SL.runResync(resyncDeps(storage, net));
+  assert.equal(r.results.twitch.kind, 'signed-out', 'the pass did get the refusal');
+  assert.deepEqual(storage.data.connectedPlatforms, []);
+  assert.ok(!('twitch' in storage.data.lastResyncResults));
+  assert.deepEqual(SL.describeSync(storage.data, 1_000_000).rows, []);
+});
+
+test('the app quitting mid-pass: the next import goes nowhere, not to whatever took the port', async () => {
+  // Twitch's import is answered, then the app exits (quit, auto-update
+  // restart, crash) and a local process binds 47100 before YouTube's turn.
+  // Its proof is the kind an unpaired squatter can give.
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube', 'kick'], lastResyncResults: { kick: { kind: 'ok', cookiesSet: 4, at: 7 } } });
+  const net = makeLoopback({
+    47100: {
+      kind: 'app', code: CODE,
+      beforeImportReply: (body) => { if (body.platform === 'twitch') net.ports[47100] = { kind: 'forged', proof: 'ab'.repeat(32) }; },
+    },
+  });
+  const cookies = makeCookieJar([...YT_COOKIES, { name: 'session_token', domain: '.kick.com' }]);
+  const clock = { t: 8_000_000 };
+  const r = await SL.runResync(resyncDeps(storage, net, cookies, clock));
+  assert.deepEqual(net.imports.map(i => i.body.platform), ['twitch'], 'nothing after the app left');
+  const afterSwap = net.requests.slice(net.requests.findIndex(q => q.url.endsWith('/import')) + 1);
+  assert.ok(afterSwap.length >= 1, 'the port was checked again before YouTube');
+  for (const q of afterSwap) {
+    assert.match(q.url, /^http:\/\/127\.0\.0\.1:47100\/ping\?nonce=[0-9a-f]{32}$/);
+    assert.equal(q.method, 'GET');
+    assert.ok(!JSON.stringify(q).includes(CODE), 'the squatter never sees the code');
+    assert.ok(!JSON.stringify(q).includes('__Secure-1PSID'), 'or a cookie');
+  }
+  assert.equal(r.status, 'done');
+  assert.deepEqual(r.results.twitch, { kind: 'ok', cookiesSet: 2, at: 8_000_000 });
+  assert.deepEqual(r.results.youtube, { kind: 'error', message: SL.APP_LOST_MESSAGE, at: 8_000_000 });
+  assert.ok(!('kick' in r.results), 'the pass stops there');
+  assert.deepEqual(storage.data.lastResyncResults.youtube, r.results.youtube);
+  assert.deepEqual(storage.data.lastResyncResults.kick, { kind: 'ok', cookiesSet: 4, at: 7 }, 'a skipped platform keeps its last result and time');
+  assert.deepEqual(storage.data.connectedPlatforms, ['twitch', 'youtube', 'kick'], 'losing the app never disconnects');
+  const row = SL.describeSync(storage.data, clock.t).rows.find(x => x.platform === 'youtube');
+  assert.equal(row.tone, 'err');
+  assert.match(row.text, /stopped answering during the sync/);
+
+  // The app just gone (restarting, nothing on the port yet): same outcome.
+  const gone = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube'] });
+  const net2 = makeLoopback({
+    47100: { kind: 'app', code: CODE, beforeImportReply: (body) => { if (body.platform === 'twitch') delete net2.ports[47100]; } },
+  });
+  const r2 = await SL.runResync(resyncDeps(gone, net2));
+  assert.deepEqual(net2.imports.map(i => i.body.platform), ['twitch']);
+  assert.equal(r2.results.youtube.message, SL.APP_LOST_MESSAGE);
+
+  // With the app there all along, each import is preceded by a fresh proof
+  // on the port it goes to, and nothing else changes.
+  const steady = makeLoopback({ 47100: { kind: 'outdated' }, 47101: { kind: 'app', code: CODE } });
+  await SL.runResync(resyncDeps(makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube'] }), steady));
+  assert.deepEqual(steady.requests.map(q => `${q.port}${new URL(q.url).pathname}`),
+    ['47100/ping', '47101/ping', '47101/ping', '47101/import', '47101/ping', '47101/import']);
 });
 
 test('concurrent read-modify-writes do not lose updates', async () => {
@@ -529,6 +689,9 @@ test('"app not running" is calm; a code mismatch, an outdated app or a missing c
   assert.match(s('code-mismatch').text, /Paste the current code/);
   assert.equal(s('app-outdated').tone, 'err');
   assert.match(s('app-outdated').text, /needs updating/);
+  assert.equal(s('app-code-too-short').tone, 'err');
+  assert.match(s('app-code-too-short').text, /^Checked 5 min ago: .*New code/);
+  assert.doesNotMatch(s('app-code-too-short').text, /needs updating/);
   assert.equal(s('not-paired').tone, 'err');
   assert.deepEqual(s('done'), { tone: 'idle', text: 'Last auto-sync 5 min ago.' });
   assert.match(SL.describeSync({ connectedPlatforms: [] }, NOW).summary.text, /Connect a platform/);
@@ -581,9 +744,99 @@ test('results stored by version 1.2.0 (plain strings) still render', () => {
   assert.match(view.rows[1].text, /^Invalid pairing code/);
 });
 
-test('connection line: outdated app says it needs updating; only verified is ok', () => {
+// What every upgrading user has: 1.2.0 strings, all written together with
+// lastResync, and (for most) an 8-character code or a closed app on the first
+// 1.3 pass. That pass moves lastResync; the strings must keep their own time.
+const LEGACY_AT = NOW - 3 * 24 * 60 * MIN;
+const LEGACY_INVALID = 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.';
+function legacyState(pairingCode) {
+  return {
+    pairingCode,
+    connectedPlatforms: ['twitch', 'youtube', 'kick'],
+    lastResync: LEGACY_AT,
+    lastResyncResults: { twitch: 'ok (12 cookies)', youtube: 'no cookies in browser', kick: LEGACY_INVALID },
+  };
+}
+
+test('1.2.0 results keep their own time through 1.3 skip passes: never "just now", never current green (F96)', async () => {
+  for (const [label, code, status] of [
+    ['app closed', CODE, 'app-not-running'],
+    ['8-character code', 'ABCD1234', 'code-too-short'],
+  ]) {
+    const storage = makeStorage(legacyState(code));
+    const clock = { t: NOW };
+    const r = await SL.runResync(resyncDeps(storage, makeLoopback({}), undefined, clock));
+    assert.equal(r.status, status, label);
+    assert.equal(storage.data.lastResync, NOW, `${label}: the pass recorded its own time`);
+    assert.deepEqual(storage.data.lastResyncResults, {
+      twitch: { kind: 'ok', text: 'ok (12 cookies)', legacy: true, at: LEGACY_AT },
+      youtube: { kind: 'no-cookies', legacy: true, at: LEGACY_AT },
+      kick: { kind: 'error', message: LEGACY_INVALID, legacy: true, at: LEGACY_AT },
+    }, `${label}: converted once, stamped with the time 1.2 recorded`);
+
+    const view = SL.describeSync(storage.data, NOW + 5 * MIN);
+    assert.deepEqual(view.rows.map(row => [row.platform, row.tone, row.text]), [
+      ['twitch', 'ok', 'Last sync ok (12 cookies) (3 days ago)'],
+      ['youtube', 'idle', 'Skipped (3 days ago): not signed in to YouTube in this browser.'],
+      ['kick', 'err', `${LEGACY_INVALID} (3 days ago)`],
+    ], label);
+    assert.ok(view.rows.every(row => !/just now|min ago/.test(row.text)), `${label}: no row reads as current`);
+
+    // Later passes leave the converted entries (and their time) alone.
+    clock.t = NOW + 30 * MIN;
+    await SL.runResync(resyncDeps(storage, makeLoopback({}), undefined, clock));
+    assert.equal(storage.data.lastResyncResults.twitch.at, LEGACY_AT, `${label}: second pass`);
+    assert.equal(SL.describeSync(storage.data, clock.t).rows[0].text, 'Last sync ok (12 cookies) (3 days ago)');
+  }
+});
+
+test('1.2.0 results are replaced by fresh ones once the app answers; a Connect in between keeps the others\' time', async () => {
+  const storage = makeStorage(legacyState(CODE));
+  // A manual Connect before the first pass rewrites the map under the lock;
+  // the strings it carries over still get 1.2's time from the pass.
+  await SL.updatePlatform(storage, 'kick', { connected: true, result: { kind: 'ok', cookiesSet: 3, at: NOW - MIN } });
+  const net = makeLoopback({ 47100: { kind: 'app', code: CODE } });
+  await SL.runResync(resyncDeps(storage, makeLoopback({}), undefined, { t: NOW }));
+  assert.deepEqual(storage.data.lastResyncResults.kick, { kind: 'ok', cookiesSet: 3, at: NOW - MIN });
+  assert.equal(storage.data.lastResyncResults.twitch.at, LEGACY_AT);
+
+  await SL.runResync(resyncDeps(storage, net, undefined, { t: NOW + MIN }));
+  const res = storage.data.lastResyncResults;
+  assert.deepEqual(res.twitch, { kind: 'ok', cookiesSet: 2, at: NOW + MIN });
+  assert.equal(res.youtube.kind, 'ok');
+  assert.ok(!Object.values(res).some(e => typeof e === 'string' || e.legacy), 'nothing from 1.2 is left');
+});
+
+test('a 1.2.0 string whose time is lost renders calm and undated, never as current (defensive)', async () => {
+  // lastResyncStatus is only ever written by a 1.3 pass, which would have
+  // converted the strings first; if one survives anyway, lastResync is not
+  // its time.
+  const moved = { ...legacyState(CODE), lastResync: NOW, lastResyncStatus: 'app-not-running' };
+  const calm = [
+    ['idle', 'From before the extension update: ok (12 cookies).'],
+    ['idle', 'From before the extension update: no cookies in browser.'],
+    ['idle', `From before the extension update: ${LEGACY_INVALID}`],
+  ];
+  const view = SL.describeSync(moved, NOW);
+  assert.deepEqual(view.rows.map(row => [row.tone, row.text]), calm);
+  // The pass that converts them then does not stamp them with the moved time.
+  const storage = makeStorage(moved);
+  await SL.runResync(resyncDeps(storage, makeLoopback({}), undefined, { t: NOW + MIN }));
+  assert.deepEqual(storage.data.lastResyncResults.twitch, { kind: 'ok', text: 'ok (12 cookies)', legacy: true });
+  assert.deepEqual(SL.describeSync(storage.data, NOW + MIN).rows.map(row => [row.tone, row.text]), calm);
+  // Before any 1.3 pass, lastResync is still the strings' own time.
+  const before = SL.describeSync(legacyState(CODE), NOW);
+  assert.deepEqual(before.rows.map(row => row.tone), ['ok', 'idle', 'err']);
+  assert.match(before.rows[1].text, /^Skipped \(3 days ago\)/, '"no cookies in browser" is the idle skip, not an error');
+});
+
+test('connection line: only an app from before proofs needs updating; a current one on a short code needs New code; only verified is ok', () => {
   assert.deepEqual(SL.describeConnection({ status: 'verified', port: 47101 }), { tone: 'ok', text: 'Connected to Stream Lurker (port 47101)' });
   assert.match(SL.describeConnection({ status: 'outdated' }).text, /app needs updating/);
+  const unsigned = SL.describeConnection({ status: 'app-code-too-short' });
+  assert.equal(unsigned.tone, 'err');
+  assert.match(unsigned.text, /New code/);
+  assert.doesNotMatch(unsigned.text, /needs updating/);
   assert.equal(SL.describeConnection({ status: 'mismatch' }).tone, 'err');
   assert.equal(SL.describeConnection({ status: 'no-code' }).tone, 'idle');
   assert.match(SL.describeConnection({ status: 'not-found' }).text, /not found/);

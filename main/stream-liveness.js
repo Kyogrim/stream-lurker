@@ -23,20 +23,26 @@ function offlineMinSpanMs(intervalMs) {
   return Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs * OFFLINE_MIN_SPAN_SHARE : 0;
 }
 
-// Credit stops once no scan has confirmed the stream live for two intervals
-// plus a minute: one errored scan is tolerated, the second is not.
+// Credit stops once the last confirmation is older than two intervals plus a
+// minute AND a scan has finished since without repeating it. On schedule that
+// tolerates one errored scan, not two. Age alone is not enough: the interval
+// tick is skipped while a scan runs, so one slow scan (a YouTube stall, 30 s
+// per channel three at a time) spaces results several intervals apart even
+// while every one of them confirms the stream live.
 function staleAfterMs(intervalMs) {
   return 2 * intervalMs + 60000;
 }
 
 function createStreamLiveness() {
-  // key -> { lastLiveAt, offlineStreak, firstOfflineAt, paused }
+  // key -> { lastLiveAt, lastObservedAt, offlineStreak, firstOfflineAt, paused }
+  // lastObservedAt: the last scan that reported on the key at all (live,
+  // offline or errored), or that failed as a whole.
   const entries = new Map();
 
   function entryFor(key) {
     let e = entries.get(key);
     if (!e) {
-      e = { lastLiveAt: undefined, offlineStreak: 0, firstOfflineAt: undefined, paused: false };
+      e = { lastLiveAt: undefined, lastObservedAt: undefined, offlineStreak: 0, firstOfflineAt: undefined, paused: false };
       entries.set(key, e);
     }
     return e;
@@ -45,7 +51,10 @@ function createStreamLiveness() {
   function creditable(e, now, intervalMs) {
     if (e.offlineStreak > 0) return false;
     if (e.lastLiveAt === undefined) return true;
-    return now - e.lastLiveAt <= staleAfterMs(intervalMs);
+    // Stale only once a later scan failed to confirm it; while the next scan
+    // is still running, the last confirmation stands however old it is.
+    const unconfirmedSince = e.lastObservedAt !== undefined && e.lastObservedAt > e.lastLiveAt;
+    return !(unconfirmedSince && now - e.lastLiveAt > staleAfterMs(intervalMs));
   }
 
   return {
@@ -64,6 +73,7 @@ function createStreamLiveness() {
     // result.
     observe(key, result, now) {
       const e = entryFor(key);
+      e.lastObservedAt = now;
       if (result.isLive) {
         e.lastLiveAt = now;
         e.offlineStreak = 0;
@@ -76,6 +86,14 @@ function createStreamLiveness() {
         e.offlineStreak += 1;
       }
       return e.offlineStreak;
+    },
+
+    // A whole scan failed (threw before any result was applied). It finished
+    // without confirming anything, so it counts against every stream like an
+    // errored result; without this, a scan that throws every time would keep
+    // crediting open cells forever.
+    scanFailed(now) {
+      for (const e of entries.values()) e.lastObservedAt = now;
     },
 
     offlineStreak(key) {

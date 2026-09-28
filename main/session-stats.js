@@ -21,7 +21,16 @@ function sessionLengthMs({ startMs, endMs, creditedMinutes }) {
 
 // One-time repair for values recorded under the old wall-clock rule: a single
 // session cannot be longer than all of that streamer's watch time. Returns the
-// keys that were lowered. Idempotent; leaves anything it cannot compare alone.
+// keys that were lowered, GLOBAL_LONGEST_KEY for the overall record.
+// Idempotent; leaves anything it cannot compare alone.
+//
+// The overall record (the Lurk Stats headline) is lowered too. finalizeSession
+// has only ever written it together with the per-streamer record, so it was
+// always the largest of them, and Math.max never brings it down by itself:
+// left alone it kept showing the sleep-inflated session after every
+// per-streamer record was repaired.
+const GLOBAL_LONGEST_KEY = 'longestSessionMs';
+
 function capLongestSessions(watchTime) {
   const repaired = [];
   if (!watchTime || typeof watchTime !== 'object') return repaired;
@@ -37,7 +46,18 @@ function capLongestSessions(watchTime) {
       repaired.push(key);
     }
   }
+  // Only against real per-streamer records: with none, there is nothing to
+  // say the overall one is wrong.
+  const records = Object.values(longest).filter(ms => typeof ms === 'number' && Number.isFinite(ms) && ms >= 0);
+  const overall = watchTime[GLOBAL_LONGEST_KEY];
+  if (records.length && typeof overall === 'number' && Number.isFinite(overall)) {
+    const ceiling = Math.max(...records);
+    if (overall > ceiling) {
+      watchTime[GLOBAL_LONGEST_KEY] = ceiling;
+      repaired.push(GLOBAL_LONGEST_KEY);
+    }
+  }
   return repaired;
 }
 
-module.exports = { MINUTE_MS, sessionLengthMs, capLongestSessions };
+module.exports = { MINUTE_MS, GLOBAL_LONGEST_KEY, sessionLengthMs, capLongestSessions };

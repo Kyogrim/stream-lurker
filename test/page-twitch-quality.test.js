@@ -27,8 +27,16 @@ test.before(async () => { ({ qualityAndTheaterScript } = await import('../src/in
 //                 matches) or 'none' (no hook at all)
 //   cogControls   the cog names the menu in aria-controls
 //   stickyCog     the cog only opens the menu; a second click leaves it open
-// Escape reaching the document closes the menu when it was aimed inside it,
-// and otherwise acts as a page hotkey that leaves theatre mode. Each Escape's
+//   autoClose     the page shuts the menu by itself this many ms after
+//                 opening it, before the walk is over
+//   cogIcon       the cog re-renders its icon on every click (a new node
+//                 inside the cog that has nothing to do with the menu)
+//   focusGuard    every cog click leaves a zero-size node in the player (a
+//                 focus-trap sentinel that stays mounted)
+//   deafMenu      Escape inside the menu does not close it
+// Escape reaching the document closes the menu when it was aimed inside it
+// (unless deafMenu), and otherwise acts as a page hotkey that leaves theatre
+// mode. Each Escape's
 // target is recorded in stats.escapes ('document', 'menu' or 'other').
 function twitchPage({
   pathname = '/somechannel',
@@ -44,6 +52,10 @@ function twitchPage({
   menuHooks = 'player',
   cogControls = false,
   stickyCog = false,
+  autoClose = 0,
+  cogIcon = false,
+  focusGuard = false,
+  deafMenu = false,
 } = {}) {
   const page = makePage({ host: 'www.twitch.tv', pathname });
   const { doc } = page;
@@ -90,7 +102,7 @@ function twitchPage({
     if (e.key !== 'Escape') return;
     const inMenu = !!menu && menu.contains(e.target);
     stats.escapes.push(e.target === doc ? 'document' : (inMenu ? 'menu' : 'other'));
-    if (inMenu) closeMenu();
+    if (inMenu) { if (!deafMenu) closeMenu(); }
     else player.setAttribute('class', player.className.replace(' video-player--theatre', ''));
   });
   const openMenu = () => {
@@ -106,6 +118,7 @@ function twitchPage({
     };
     if (rowDelay) page.clock.setTimeout(addRow, rowDelay); else addRow();
     m.appendChild(doc.el('button', { role: 'menuitem' }, 'Erweitert', { left: 900, top: 330, width: 300, height: 30 }));
+    if (autoClose) page.clock.setTimeout(() => { if (menu === m) closeMenu(); }, autoClose);
     setExpanded();
   };
   function showQualitySubmenu() {
@@ -126,6 +139,11 @@ function twitchPage({
   }
   cog.addEventListener('click', () => {
     stats.cogClicks++;
+    if (cogIcon) {
+      cog.textContent = '';
+      cog.appendChild(doc.el('svg', {}, '', { left: 1205, top: 685, width: 20, height: 20 }));
+    }
+    if (focusGuard) player.appendChild(doc.el('span', { tabindex: '0' }, '', { left: 0, top: 0, width: 0, height: 0 }));
     if (menu) { if (!stickyCog) closeMenu(); } else openMenu();
   });
 
@@ -209,19 +227,55 @@ test('a menu the page already closed is not toggled back open (F44)', async () =
   assert.equal(p.menuOpen, false);
 });
 
-test('no concrete menu node to aim at: no Escape reaches the page hotkeys, theatre stays on', async () => {
+test('no concrete menu node to aim at: closed through what the click added, no Escape, theatre stays on', async () => {
   // Neither menu hook matches and the Quality row is never found, so nothing
-  // says whether a menu is open or where it is. The old fallback sent Escape
-  // to the document, where a page hotkey can leave theatre mode, which the
-  // script has already latched and would never restore.
+  // names the menu. The old fallback sent Escape to the document, where a
+  // page hotkey can leave theatre mode, which the script has already latched
+  // and would never restore. Dropping the close instead left the menu open:
+  // each later attempt's click shut it rather than opening it, and the
+  // seventh left it open for good.
   const p = twitchPage({ rowText: null, menuHooks: 'none' });
   p.start('160p');
   await p.clock.advance(60 * 60_000);
   assert.deepEqual(p.stats.escapes, []);
   assert.match(p.player.className, /video-player--theatre/);
-  assert.equal(p.stats.cogClicks, 7, 'one click per attempt, no close keyed on a guess');
+  assert.equal(p.stats.opens, 7);
+  assert.equal(p.stats.cogClicks, 14, 'one open and one close per attempt');
+  assert.equal(p.menuOpen, false);
   const lines = p.logText('[Twitch Quality]');
   assert.match(lines[lines.length - 1], /Giving up on 160p for \/somechannel after 7 attempts/);
+});
+
+test('no hook and the page shut the menu itself: nothing the click added is left, so no toggle', async () => {
+  const p = twitchPage({ rowText: null, menuHooks: 'none', autoClose: 1000 });
+  p.start('160p');
+  await p.clock.advance(60 * 60_000);
+  assert.equal(p.stats.opens, 7);
+  assert.equal(p.stats.cogClicks, 7, 'a close click would have reopened it');
+  assert.equal(p.menuOpen, false);
+  assert.deepEqual(p.stats.escapes, []);
+});
+
+test('a close aimed at the real menu is not followed by a guessed one', async () => {
+  // The hooks name the menu; neither the cog nor Escape shuts it, so what the
+  // click added to the player is still there. The guess is only for when
+  // there was nothing to aim at: after an aimed close, a second click is as
+  // likely to reopen a menu that close did shut.
+  const p = twitchPage({ stickyCog: true, deafMenu: true });
+  p.start('160p');
+  await p.clock.advance(60_000);
+  assert.equal(p.selected, '160p');
+  assert.equal(p.stats.cogClicks, 2, 'one open, one aimed close');
+  assert.deepEqual(p.stats.escapes, ['menu']);
+});
+
+test('what else the click leaves (a re-rendered cog icon, a zero-size focus guard) is not taken for the menu', async () => {
+  const p = twitchPage({ rowText: null, menuHooks: 'none', autoClose: 1000, cogIcon: true, focusGuard: true });
+  p.start('160p');
+  await p.clock.advance(60 * 60_000);
+  assert.equal(p.stats.opens, 7);
+  assert.equal(p.stats.cogClicks, 7);
+  assert.equal(p.menuOpen, false);
 });
 
 test('a menu no selector finds is still closed through the element the cog names in aria-controls', async () => {

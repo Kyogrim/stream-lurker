@@ -121,7 +121,17 @@ test('F73: background checks drop results when the account changed under them', 
   assert.ok(guardAt < health.indexOf("state === 'live'"));
   assert.match(health, /isPlaceholderName\(snap\.name\)/);
   const refresh = section(/async function refreshPlaceholderAccountNames\(/);
-  assert.ok(refresh.indexOf('accountEpochs.isCurrent') > refresh.indexOf('await kickNameProbe.run()'));
+  const kickProbeAt = refresh.indexOf('await kickNameProbe.run()');
+  assert.ok(refresh.indexOf('accountEpochs.isCurrent(snap, config.accounts)', kickProbeAt) > kickProbeAt, 'checked after the probe');
+  // r2-6: the snapshot is taken before the first await (the cookie read), or
+  // a Sign Out during that read becomes the starting state; and it is
+  // checked again after that read, before any page is loaded.
+  const snapAt = refresh.indexOf("const snap = accountEpochs.snapshot('kick', config.accounts);");
+  const readAt = refresh.indexOf('await readKickSessionCookies()');
+  assert.ok(snapAt > 0 && readAt > snapAt, 'r2-6: snapshot before the cookie read');
+  assert.equal(refresh.indexOf('await '), readAt, 'r2-6: nothing awaited before the snapshot');
+  const recheck = refresh.indexOf('accountEpochs.isCurrent(snap, config.accounts)', readAt);
+  assert.ok(recheck > readAt && recheck < kickProbeAt, 'r2-6: re-checked between the cookie read and the probe');
   assert.match(section(/ipcMain\.handle\('logout-platform'/), /accountEpochs\.bump\(p\)/);
   for (const fn of [/async function importGoogleSession\(/, /async function importKickSession\(/, /async function importTwitchSession\(/]) {
     assert.match(section(fn), /accountEpochs\.bump\(/);

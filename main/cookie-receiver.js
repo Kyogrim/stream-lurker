@@ -17,8 +17,9 @@
 // without revealing it, so the extension never sends cookies to some other
 // local process squatting on the port. The proof also names the port the app
 // is bound to: otherwise a squatter on one port could forward the nonce to the
-// real app on another and replay the app's genuine answer. Tested end to end
-// over real sockets in test/main-cookie-receiver.test.js.
+// real app on another and replay the app's genuine answer. A code too short
+// to survive an offline guess (MIN_PROOF_CODE_LENGTH) gets no proof at all.
+// Tested end to end over real sockets in test/main-cookie-receiver.test.js.
 
 const crypto = require('crypto');
 const http = require('http');
@@ -29,6 +30,18 @@ const LOCKOUT_MS = 60 * 1000;
 const PING_PROOF_PREFIX = 'stream-lurker-ping:';
 const NONCE = /^[0-9a-f]{16,64}$/i;
 const IMPORT_PLATFORMS = ['twitch', 'youtube', 'kick'];
+// No proof is signed with a shorter code. An 8-character code (every install
+// from before 32-character codes, kept for connector 1.2) is 32 bits: one
+// proof lets whoever can reach /ping (another Windows user's process on the
+// shared loopback, another extension's service worker) recover it offline in
+// hours, bypassing the lockout, and then import over the app's sessions. No
+// client uses such a proof: 1.2 predates proofs, and 1.3 refuses these codes
+// before it pings. Mirrors extension/connector.js MIN_CODE_LENGTH.
+const MIN_PROOF_CODE_LENGTH = 32;
+// Connector 1.2's code field has maxlength="16", so it cuts a 32-character
+// code to this. Only 1.2 and older send the code in the body alone.
+const LEGACY_CODE_FIELD_LENGTH = 16;
+const TRUNCATED_CODE_ERROR = 'This copy of the extension is out of date and cut the pairing code to 16 characters. Reload Stream Lurker Connector on your browser\'s Extensions page, then paste the code again.';
 
 // Message: "stream-lurker-ping:<port>:<nonce>", keyed by the upper-case code.
 // extension/connector.js proofMessage() must build the identical string.
@@ -36,12 +49,14 @@ function pingProof(code, port, nonce) {
   return crypto.createHmac('sha256', String(code).toUpperCase()).update(`${PING_PROOF_PREFIX}${port}:${nonce}`).digest('hex');
 }
 
-// { app } plus, for a well-formed nonce, the proof. No version: the extension
-// needs neither, and a page probing the port learns nothing it can use.
+// { app } plus, for a well-formed nonce and a code long enough to sign with
+// (MIN_PROOF_CODE_LENGTH), the proof. No version: the extension needs
+// neither, and a page probing the port learns nothing it can use.
 function pingBody(query, code, port) {
   const body = { app: 'stream-lurker' };
   const nonce = query && typeof query.get === 'function' ? query.get('nonce') : null;
-  if (nonce && NONCE.test(nonce) && code && port) body.proof = pingProof(code, port, nonce);
+  const signable = typeof code === 'string' && code.trim().length >= MIN_PROOF_CODE_LENGTH;
+  if (nonce && NONCE.test(nonce) && signable && port) body.proof = pingProof(code, port, nonce);
   return body;
 }
 
@@ -196,12 +211,19 @@ function createReceiverHandler(deps) {
       }
 
       const expected = getPairingCode();
-      const rejectCode = (given) => {
+      // truncated: see the body-code check below. Counted and locked out
+      // exactly like any other wrong code; only the words differ.
+      const rejectCode = (given, { truncated = false } = {}) => {
         const r = guard.fail();
         try { onCodeRejected(); } catch (e) { /* bookkeeping must not change the answer */ }
-        if (r.failures === 1) log(`[Ext] Refused an import with the wrong pairing code (${maskCode(given)}). If that was your browser extension, paste the current code from Platform Logins into it.`);
+        if (r.failures === 1) {
+          log(truncated
+            ? `[Ext] Refused an import from an out-of-date copy of the browser extension that cut the pairing code to ${LEGACY_CODE_FIELD_LENGTH} characters (${maskCode(given)}). Reload Stream Lurker Connector on the browser's Extensions page, then paste the code from Platform Logins into it again.`
+            : `[Ext] Refused an import with the wrong pairing code (${maskCode(given)}). If that was your browser extension, paste the current code from Platform Logins into it.`);
+        }
         if (r.lockedNow) log(`[Ext] ${r.failures} wrong pairing codes in a row; refusing imports for ${Math.round(LOCKOUT_MS / 1000)} s.`);
-        return send(403, { success: false, error: 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.' }, { close: true });
+        const error = truncated ? TRUNCATED_CODE_ERROR : 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.';
+        return send(403, { success: false, error }, { close: true });
       };
 
       // Checked before a single body byte is read.
@@ -218,7 +240,16 @@ function createReceiverHandler(deps) {
       // Extensions before 1.3.0 send the code in the body only.
       if (!headerCode) {
         const bodyCode = typeof payload.pairingCode === 'string' ? payload.pairingCode : '';
-        if (!codesMatch(bodyCode, expected)) return rejectCode(bodyCode);
+        if (!codesMatch(bodyCode, expected)) {
+          // Connector 1.2 (no header) holding a longer code cut by its
+          // 16-character field: the generic text would send the user back to
+          // the same truncating paste, and it is all 1.2's popup shows.
+          // Decided on header absence and lengths only, never on how much of
+          // the code matches, which would be a partial-match oracle.
+          const truncated = bodyCode.trim().length === LEGACY_CODE_FIELD_LENGTH
+            && typeof expected === 'string' && expected.trim().length > LEGACY_CODE_FIELD_LENGTH;
+          return rejectCode(bodyCode, { truncated });
+        }
       }
       guard.succeed();
 
@@ -328,6 +359,8 @@ module.exports = {
   LOCKOUT_AFTER_FAILURES,
   LOCKOUT_MS,
   PING_PROOF_PREFIX,
+  MIN_PROOF_CODE_LENGTH,
+  TRUNCATED_CODE_ERROR,
   pingProof,
   pingBody,
   isAllowedHost,

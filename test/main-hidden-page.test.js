@@ -5,7 +5,7 @@
 // Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { runPageScript, runScriptWithin, createProbeGate, isCrossDocumentMainFrameNavigation, HIDDEN_PAGE_DEADLINE_MS } = require('../main/hidden-page');
+const { runPageScript, runScriptWithin, createProbeGate, settleWithin, isCrossDocumentMainFrameNavigation, HIDDEN_PAGE_DEADLINE_MS } = require('../main/hidden-page');
 const { createClock, createFakeWindow } = require('./main-auth-fakes');
 
 // Records unhandled rejections for the duration of one test.
@@ -239,4 +239,39 @@ test('probe gate: a probe that throws is not kept', async () => {
   await new Promise((r) => setImmediate(r));
   await assert.rejects(gate.run(), /boom/);
   assert.equal(calls, 2);
+});
+
+// r2-17: the extension gives up on an automatic import after 25 s, and a
+// probe page may take 45. The import waits only a budget for the probe.
+test('r2-17: settleWithin answers at the budget when the probe hangs, and leaves the probe running', async () => {
+  const clock = createClock();
+  let finishProbe;
+  const probe = new Promise((r) => { finishProbe = r; });
+  let answer = null;
+  settleWithin(probe, 15000, clock).then((a) => { answer = a; });
+  await clock.advance(14999);
+  assert.equal(answer, null, 'still waiting inside the budget');
+  await clock.advance(1);
+  assert.deepEqual(answer, { settled: false }, 'answered at the budget, not at the 45 s page deadline');
+  // The caller keeps the probe and finishes with it later.
+  finishProbe({ state: 'live', name: '@late' });
+  assert.deepEqual(await probe, { state: 'live', name: '@late' });
+  assert.equal(clock.pending(), 0);
+});
+
+test('r2-17: settleWithin passes a prompt answer through and clears its timer', async () => {
+  const clock = createClock();
+  const quick = settleWithin(Promise.resolve({ name: 'kickname', source: 'api' }), 15000, clock);
+  await clock.flush();
+  assert.deepEqual(await quick, { settled: true, value: { name: 'kickname', source: 'api' } });
+  assert.equal(clock.pending(), 0, 'no timer left behind');
+  // A probe that throws reads as a failed probe (null), in time.
+  const unhandled = watchUnhandled();
+  const failed = settleWithin(Promise.reject(new Error('page crashed')), 15000, clock);
+  await clock.flush();
+  assert.deepEqual(await failed, { settled: true, value: null });
+  await new Promise((r) => setImmediate(r));
+  unhandled.stop();
+  assert.deepEqual(unhandled.seen, []);
+  assert.equal(clock.pending(), 0);
 });

@@ -132,7 +132,10 @@ test('background: "Sync now" runs a real pass and answers the popup; overlapping
   assert.equal(r.status, 'done');
   assert.equal(r.results.twitch.kind, 'ok');
   assert.equal(r.results.youtube.kind, 'signed-out');
-  assert.equal(net.requests.filter(q => q.url.includes('/ping')).length, 2, 'one port walk, not two');
+  // One walk (47100 then 47101), then each import right after a fresh proof
+  // of the port it goes to. Two passes would double every line.
+  assert.deepEqual(net.requests.map(q => `${q.port}${new URL(q.url).pathname}`),
+    ['47100/ping', '47101/ping', '47101/ping', '47101/import', '47101/ping', '47101/import'], 'one port walk, not two');
   assert.equal(net.imports.length, 2);
   assert.ok(net.imports.every(i => i.port === 47101 && i.headers['X-Pairing-Code'] === CODE && i.body.auto === true));
   assert.deepEqual(storage.data.connectedPlatforms, ['twitch'], 'SIGNED_OUT dropped youtube');
@@ -148,8 +151,10 @@ test('background: an import the app never answers cannot wedge the shared pass',
   const bg = loadBackground({ storage, net, cookies: makeCookieJar(YT_COOKIES), fastTimers: true });
   const r = await sendMessage(bg.listeners, { type: 'resync-now' });
   assert.equal(r.status, 'done');
-  assert.equal(r.results.twitch.kind, 'error');
-  assert.equal(storage.data.lastResyncResults.twitch.message, 'Stream Lurker did not answer the import in time');
+  // The app finishes an import it started, so a wait the worker had to end
+  // is recorded as unanswered, not as a failure.
+  assert.equal(r.results.twitch.kind, 'unanswered');
+  assert.equal(storage.data.lastResyncResults.twitch.kind, 'unanswered');
   assert.ok(storage.data.lastResync > 1, 'the pass recorded itself instead of leaving the last one on screen');
 
   // The next trigger is a new pass, not the stuck one: this time the app answers.
@@ -341,13 +346,67 @@ test('popup: re-proves the app on click; a process that took the port after the 
   assert.ok(p.platformButtons.every(b => b.disabled));
 });
 
-test('popup: an app without proof support is reported as needing an update', async () => {
+test('popup: an app from before proofs (its /ping carries a version) is reported as needing an update', async () => {
   const storage = makeStorage({ pairingCode: CODE });
   const net = makeLoopback({ 47100: { kind: 'outdated' } });
   const p = loadPopup({ storage, net, cookies: makeCookieJar([]) });
   await waitFor(() => /needs updating/.test(p.byId.conn.textContent), 'outdated status');
   assert.ok(p.platformButtons.every(b => b.disabled));
   assert.equal(net.imports.length, 0);
+});
+
+test('popup: a current app still on its 8-character code asks for the code, then says New code, never "needs updating"', async () => {
+  // Connector 1.3 installed fresh by someone whose app predates 32-character
+  // codes: the app answers /ping with neither proof nor version.
+  const storage = makeStorage({});
+  const net = makeLoopback({ 47100: { kind: 'unsigned-app' } });
+  const p = loadPopup({ storage, net, cookies: makeCookieJar(YT_COOKIES) });
+  const conn = p.byId.conn;
+  await waitFor(() => /Enter the pairing code/.test(conn.textContent), 'no-code status');
+  assert.doesNotMatch(conn.textContent, /needs updating/);
+  assert.equal(p.byId.dot.className, 'dot idle');
+  assert.ok(p.platformButtons.every(b => b.disabled));
+
+  // A 32-character code the app does not hold (a config restored from before
+  // a New code click): the fix is New code, not an app update.
+  p.byId.code.value = CODE;
+  p.byId.code.fire('input');
+  p.flushTimers();
+  await waitFor(() => /New code/.test(conn.textContent), 'app-code-too-short status');
+  assert.doesNotMatch(conn.textContent, /needs updating/);
+  assert.equal(p.byId.dot.className, 'dot');
+  p.btn('twitch').click();
+  assert.equal(net.imports.length, 0);
+  assert.ok(!JSON.stringify(net.requests).includes(CODE), 'the code went nowhere');
+
+  // New code in the app, pasted here: paired.
+  const NEW = OTHER_CODE;
+  net.ports[47100] = { kind: 'app', code: NEW };
+  p.byId.code.value = NEW;
+  p.byId.code.fire('input');
+  p.flushTimers();
+  await waitFor(() => /Connected to Stream Lurker \(port 47100\)/.test(conn.textContent), 'verified status');
+  assert.ok(p.platformButtons.every(b => !b.disabled));
+});
+
+test('popup: Stop during a running pass keeps that platform\'s cookies in the browser', async () => {
+  const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch', 'youtube'] });
+  const net = makeLoopback({ 47100: { kind: 'app', code: CODE } });
+  const p = loadPopup({ storage, net, cookies: makeCookieJar(YT_COOKIES) });
+  await waitFor(() => /port 47100/.test(p.byId.conn.textContent), 'verified status');
+  await waitFor(() => p.rows().length === 2, 'two sync rows');
+  // While Twitch's import is in flight, the user clicks Stop on YouTube.
+  net.ports[47100].beforeImportReply = async (body) => {
+    if (body.platform !== 'twitch') return;
+    p.rows().find(r => r.name === 'YouTube').stop.click();
+    await waitFor(() => !storage.data.connectedPlatforms.includes('youtube'), 'youtube stopped');
+  };
+  p.byId['sync-now'].click();
+  await waitFor(() => storage.data.lastResyncStatus === 'done' && !p.byId['sync-now'].dataset.running, 'pass finished');
+  assert.deepEqual(net.imports.map(i => i.body.platform), ['twitch']);
+  assert.ok(!JSON.stringify(net.requests).includes('__Secure-1PSID'), 'no YouTube cookie was sent');
+  await waitFor(() => p.rows().length === 1, 'youtube row gone');
+  assert.equal(p.rows()[0].name, 'Twitch');
 });
 
 test('popup: fixing the code clears a stored "code doesn\'t match" at once, not at the next alarm', async () => {
@@ -386,7 +445,7 @@ test('popup: fixing the code clears a stored "code doesn\'t match" at once, not 
 });
 
 test('popup: an app updated since the last pass ("needs updating") is re-synced on open', async () => {
-  for (const status of ['app-outdated', 'not-paired', 'code-too-short']) {
+  for (const status of ['app-outdated', 'not-paired', 'code-too-short', 'app-code-too-short']) {
     const storage = makeStorage({ pairingCode: CODE, connectedPlatforms: ['twitch'], lastResync: Date.now() - 60_000, lastResyncStatus: status });
     const net = makeLoopback({ 47100: { kind: 'app', code: CODE } });
     const p = loadPopup({ storage, net, cookies: makeCookieJar(YT_COOKIES) });
@@ -401,6 +460,25 @@ test('popup: an app updated since the last pass ("needs updating") is re-synced 
   await waitFor(() => /port 47100/.test(p.byId.conn.textContent), 'verified status');
   await new Promise(r => setTimeout(r, 50));
   assert.equal(net.imports.length, 0);
+});
+
+test('popup: an upgrade from 1.2.0 with the app closed keeps the old results dated, not "just now" (F96)', async () => {
+  const threeDaysAgo = Date.now() - 3 * 24 * 3600_000;
+  const storage = makeStorage({
+    pairingCode: CODE,
+    connectedPlatforms: ['youtube', 'twitch'],
+    lastResync: threeDaysAgo,
+    lastResyncResults: { youtube: 'ok (34 cookies)', twitch: 'no cookies in browser' },
+  });
+  const p = loadPopup({ storage, net: makeLoopback({}), cookies: makeCookieJar(YT_COOKIES) });
+  const before = [['Twitch', 'Skipped (3 days ago): not signed in to Twitch in this browser.', 'idle'], ['YouTube', 'Last sync ok (34 cookies) (3 days ago)', 'ok']];
+  await waitFor(() => p.rows().length === 2, 'rows from 1.2 state');
+  assert.deepEqual(p.rows().map(r => [r.name, r.text, r.tone]), before);
+
+  p.byId['sync-now'].click();
+  await waitFor(() => storage.data.lastResyncStatus === 'app-not-running' && !p.byId['sync-now'].dataset.running, 'skip pass');
+  await waitFor(() => /wasn't running/.test(p.byId['sync-summary'].textContent), 'calm summary');
+  assert.deepEqual(p.rows().map(r => [r.name, r.text, r.tone]), before, 'the pass moved lastResync; the rows kept their own time');
 });
 
 test('popup: shows the stored auto-sync outcome on open, including a code mismatch', async () => {

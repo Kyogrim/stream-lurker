@@ -77,7 +77,8 @@ test('the aria-label fallback only ever clicks a button', () => {
 // never settles (crashed or hung guest), 'reject' fails, 'throw' throws
 // synchronously (webview not attached). `guest` is live: tests flip crashed,
 // loading or mode mid-test the way a crash and a reload would. emit() fires a
-// webview event such as 'render-process-gone' at whatever is listening.
+// webview event such as 'render-process-gone' at whatever is listening, with
+// the fields the real event carries in detail.
 function fakeCell(username, { mode = 'ok', answer = false, crashed = false, loading = false, attached = true, connected = true } = {}) {
   const guest = { mode, answer, crashed, loading, attached };
   const calls = [];
@@ -106,10 +107,13 @@ function fakeCell(username, { mode = 'ok', answer = false, crashed = false, load
     cell, webview, calls, guest,
     // Settles the i-th hung call (default: the latest).
     finish: (v, i = settles.length - 1) => settles[i] && settles[i](v),
-    emit: (type) => { for (const fn of (listeners.get(type) || []).slice()) fn({ type }); },
+    emit: (type, detail = {}) => { for (const fn of (listeners.get(type) || []).slice()) fn({ type, ...detail }); },
     listenerCount: () => [...listeners.values()].reduce((n, l) => n + l.length, 0),
   };
 }
+
+// The 'did-start-navigation' fields of a reload, or a new page, in the cell.
+const NEW_DOCUMENT = { url: 'https://www.twitch.tv/somechannel', isMainFrame: true, isInPlace: false };
 
 test('a hung cell no longer blocks the cells after it (F41)', async () => {
   const dead = fakeCell('dead', { mode: 'hang' });
@@ -188,6 +192,8 @@ test('a call left hanging by a guest crash does not stop claims after the cell r
   for (const c of both) assert.equal(c.calls.length, 1, `${c.cell.dataset.username}: nothing is sent into a dead guest`);
 
   for (const c of both) { c.guest.crashed = false; c.guest.loading = true; c.guest.mode = 'ok'; }
+  // A reload fires both; the main-frame navigation is what releases.
+  phoenix.emit('did-start-navigation', NEW_DOCUMENT);
   phoenix.emit('did-start-loading');
   await poll();
   for (const c of both) assert.equal(c.calls.length, 1, `${c.cell.dataset.username}: nothing is sent into a loading page`);
@@ -200,11 +206,11 @@ test('a call left hanging by a guest crash does not stop claims after the cell r
 });
 
 test('each page-lifetime event releases a hung call, and only once (F41)', async () => {
-  for (const type of ['render-process-gone', 'did-start-loading', 'destroyed']) {
+  for (const [type, detail] of [['render-process-gone'], ['did-start-navigation', NEW_DOCUMENT], ['destroyed']]) {
     const c = fakeCell(type, { mode: 'hang' });
     const poll = () => points.pollOnce({ cells: [c.cell], timeoutMs: 20, log: () => {} });
     await poll();
-    c.emit(type);
+    c.emit(type, detail);
     await poll();
     assert.equal(c.calls.length, 2, `${type} releases the hold`);
     // The first page answers late. That must not free the call made into the
@@ -218,6 +224,41 @@ test('each page-lifetime event releases a hung call, and only once (F41)', async
     await poll();
     assert.equal(c.calls.length, 3, `${type}: the new call's own answer releases it`);
   }
+});
+
+test('frame activity that keeps the page does not release a hung call', async () => {
+  // did-start-loading fires when any frame starts loading: every ad or embed
+  // load in a hung page used to release the hold and let one more
+  // never-answered call through, each with a reply listener pending in main.
+  const c = fakeCell('hung', { mode: 'hang' });
+  const poll = () => points.pollOnce({ cells: [c.cell], timeoutMs: 20, log: () => {} });
+  await poll();
+  const keepsPage = [
+    ['did-start-loading'],
+    ['did-start-navigation', { url: 'https://ads.example/frame', isMainFrame: false, isInPlace: false }],
+    ['did-start-navigation', { url: 'https://www.twitch.tv/raidtarget', isMainFrame: true, isInPlace: true }],
+  ];
+  for (let i = 0; i < 20; i++) {
+    for (const [type, detail] of keepsPage) c.emit(type, detail);
+    await poll();
+  }
+  assert.equal(c.webview.isLoadingMainFrame(), false, 'the main frame never started loading');
+  assert.equal(c.calls.length, 1, 'still the one stuck call');
+  // A new document in the main frame does end the page.
+  c.emit('did-start-navigation', NEW_DOCUMENT);
+  await poll();
+  assert.equal(c.calls.length, 2);
+});
+
+test('a navigation event without its frame fields releases rather than holding for good', async () => {
+  // A hold that is never released skips the cell for good (F41); an early
+  // release costs one pending call.
+  const c = fakeCell('bare', { mode: 'hang' });
+  const poll = () => points.pollOnce({ cells: [c.cell], timeoutMs: 20, log: () => {} });
+  await poll();
+  c.emit('did-start-navigation');
+  await poll();
+  assert.equal(c.calls.length, 2);
 });
 
 test('a healthy cell polled all day leaves no listeners behind (F41)', async () => {

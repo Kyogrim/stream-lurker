@@ -1,7 +1,10 @@
 // Stream-cell lifecycle in the Multi-Lurk grid, run against the real renderer
 // modules on the fake DOM from renderer-fake-dom.js:
 //   F15  a crashed or failed-to-load cell is reloaded with capped backoff and
-//        closed through the close button's path when that fails (contract C6)
+//        closed through the close button's path when that fails (contract C6);
+//        never a popped-out stream's pop-out window (r2-9), and a page that
+//        is back before the 'online' event (r2-10) or its pending reload
+//        (r4-1) is left alone
 //   F90  mute and ghost state survive a reload
 //   F42  "Need Alt+T" never steals focus and is acted on once per page
 //   F88  main closing a stream doesn't move a user off a static tab
@@ -29,6 +32,8 @@ FakeElement.prototype.focus = function focus() { this.ownerDocument.activeElemen
 FakeElement.prototype.blur = function blur() {
   if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body;
 };
+// The pop-out button ghosts the grid copy with ghostBtn.click().
+FakeElement.prototype.click = function click() { this.dispatch('click'); };
 globalThis.ResizeObserver = class { observe() {} unobserve() {} };
 globalThis.CSS = { escape: s => String(s).replace(/["\\]/g, '\\$&') };
 
@@ -274,6 +279,38 @@ test('F15: a recovered page that never fires load still clears on dom-ready', as
   assert.equal(cell.dataset.crashed, undefined);
 });
 
+test('F15: a page back by another route cancels the pending recovery reload', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'rerouted');
+
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  t.mock.timers.tick(5000);
+  assert.equal(count(wv, 'reload'), 1);
+  // The recovery reload fails too: the second one is 30 s out.
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-fail-load', { isMainFrame: true, errorCode: -105, errorDescription: 'ERR_NAME_NOT_RESOLVED', validatedURL: wv.url });
+  assert.match(logs().at(-1), /Reloading in 30s \(attempt 2\/3\)/);
+
+  // An extension install makes main reload every cell, and this one comes up.
+  ml.reloadAllStreamContainers();
+  assert.equal(count(wv, 'reload'), 2);
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('dom-ready');
+  await wv.dispatch('did-finish-load');
+  assert.equal(cell.dataset.crashed, undefined);
+  assert.ok(logs().some(l => /rerouted \(TWITCH\) recovered/.test(l)), logs().join('\n'));
+
+  // The stale timer must not reload the working stream or spend a reload.
+  t.mock.timers.tick(30000);
+  assert.equal(count(wv, 'reload'), 2, 'no reload of the healthy page');
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  assert.match(logs().at(-1), /Reloading in 30s \(attempt 2\/3\)/, 'only the one real recovery reload counts');
+  t.mock.timers.tick(30000);
+  assert.equal(count(wv, 'reload'), 3);
+  assert.equal(callsOf('closeStreamContainer').length, 0);
+});
+
 test('F15: routine failures are ignored', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
   reset();
@@ -322,6 +359,116 @@ test('F15: offline, recovery waits for the network instead of burning attempts',
   assert.match(logs().at(-1), /attempt 1\/3/);
   t.mock.timers.tick(5000);
   assert.equal(count(wv, 'reload'), 1);
+});
+
+test('r2-10: a page back before the network event is not reloaded by it', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'lagging');
+  online = false;
+  await wv.dispatch('did-fail-load', { isMainFrame: true, errorCode: -106 });
+  assert.equal(windowListeners.online.length, 1);
+
+  // The user retries by hand and it works: navigator.onLine had not caught up.
+  await cell.querySelector('.reload-btn').dispatch('click');
+  assert.equal(windowListeners.online.length, 0, 'the manual reload drops the armed wait');
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-finish-load');
+  assert.equal(cell.dataset.crashed, undefined);
+  const linesBefore = logs().length;
+  online = true;
+  (windowListeners.online || []).slice().forEach(fn => fn());
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(count(wv, 'reload'), 1, 'only the manual reload');
+  assert.deepEqual(logs().slice(linesBefore), []);
+
+  // Same without the button: the page came back on its own before 'online'.
+  online = false;
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-fail-load', { isMainFrame: true, errorCode: -106 });
+  assert.equal(windowListeners.online.length, 1);
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-finish-load');
+  online = true;
+  windowListeners.online.slice().forEach(fn => fn());
+  assert.equal(windowListeners.online.length, 0);
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(count(wv, 'reload'), 1);
+  assert.ok(!logs().some(l => /Reloading in/.test(l)), logs().join('\n'));
+
+  // Still down when the network returns: recovery runs as before.
+  online = false;
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-fail-load', { isMainFrame: true, errorCode: -106 });
+  online = true;
+  windowListeners.online.slice().forEach(fn => fn());
+  assert.match(logs().at(-1), /attempt 1\/3/);
+  t.mock.timers.tick(5000);
+  assert.equal(count(wv, 'reload'), 2);
+});
+
+test('r2-9: a popped-out stream whose grid copy crash-loops keeps its pop-out window', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('twitch', 'pip');
+  await cell.querySelector('.popout-btn').dispatch('click');
+  assert.equal(cell.dataset.poppedOut, 'true');
+  assert.equal(cell.dataset.ghostMode, 'true', 'the grid copy is suspended');
+
+  const crashLoop = async (delays) => {
+    for (const delay of delays) {
+      await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+      t.mock.timers.tick(delay);
+      await wv.dispatch('did-start-loading');
+      await wv.dispatch('did-finish-load');
+      t.mock.timers.tick(60000);
+    }
+  };
+  await crashLoop([5000, 30000, 120000]);
+  assert.equal(count(wv, 'reload'), 3);
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  // close-stream-container would close the pop-out too (main closePopout).
+  assert.equal(callsOf('closeStreamContainer').length, 0);
+  assert.match(logs().at(-1), /did not fix the grid copy; leaving the pop-out window open/);
+  // It stops retrying the grid copy and says so once.
+  const linesBefore = logs().length;
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  // Longer than the longest backoff, shorter than the 10-minute window.
+  t.mock.timers.tick(3 * 60 * 1000);
+  assert.equal(count(wv, 'reload'), 3);
+  assert.equal(logs().length, linesBefore);
+  assert.equal(cell.dataset.crashed, 'true');
+
+  // The pop-out closes: the grid copy is the stream again, gets a fresh
+  // round of reloads (the 3 above are still inside the window, so without
+  // the reset this would close it at once) and, if that fails too, the
+  // normal close.
+  ml.setCellPoppedOut('twitch', 'pip', false);
+  assert.equal(cell.dataset.poppedOut, undefined);
+  assert.equal(cell.dataset.ghostMode, 'false', 'the auto-ghost is undone');
+  assert.match(logs().at(-1), /pip \(TWITCH\): page process crashed\. Reloading in 5s \(attempt 1\/3\)/);
+  t.mock.timers.tick(5000);
+  assert.equal(count(wv, 'reload'), 4);
+  await wv.dispatch('did-start-loading');
+  await wv.dispatch('did-finish-load');
+  await crashLoop([30000, 120000]);
+  assert.equal(count(wv, 'reload'), 6);
+  await wv.dispatch('render-process-gone', { details: { reason: 'crashed' } });
+  assert.deepEqual(callsOf('closeStreamContainer'), [['closeStreamContainer', 'twitch', 'pip']]);
+  assert.match(logs().at(-1), /closing the stream/);
+});
+
+test('r2-9: closing the pop-out of a healthy stream reloads nothing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: T0 });
+  reset();
+  const { cell, wv } = openCell('kick', 'fine', 'https://kick.com/fine');
+  await cell.querySelector('.popout-btn').dispatch('click');
+  ml.setCellPoppedOut('kick', 'fine', false);
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(count(wv, 'reload'), 0);
+  assert.equal(cell.dataset.crashed, undefined);
+  // Unknown cell (already closed): nothing to do, nothing thrown.
+  ml.setCellPoppedOut('kick', 'nobody', false);
 });
 
 test('F15: the manual reload button takes over a pending automatic reload', async (t) => {
@@ -512,6 +659,37 @@ test('F42: Alt+T only for a visible Twitch cell, once per page, never out of an 
   await ask();
   assert.equal(sent(), 4);
   assert.ok(cell.isConnected);
+});
+
+test('F42: a stream excluded from the grid still gets its Alt+T when watched from its sidebar tab', async (t) => {
+  // In single view style.css shows the maximized cell even when it is
+  // excluded from the grid, so the user sees this page full-size.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  reset();
+  const { cell, wv } = openCell('twitch', 'solo');
+  openCell('twitch', 'rest');
+  const ask = () => wv.dispatch('console-message', { message: '[Twitch Theater] Need Alt+T' });
+  const toggle = doc.querySelector('[data-tab="stream-twitch-solo"] .grid-toggle-btn');
+  await toggle.dispatch('click');
+  assert.ok(cell.classList.contains('excluded-from-grid'));
+
+  // Excluded on the grid view: hidden, so nothing is sent.
+  tabs.switchTab('multi-lurk');
+  await ask();
+  assert.equal(count(wv, 'input'), 0);
+
+  // Another stream full-size: still hidden.
+  tabs.switchTab('stream-twitch-rest');
+  await ask();
+  assert.equal(count(wv, 'input'), 0);
+
+  // Its own sidebar tab: on screen, one press.
+  tabs.switchTab('stream-twitch-solo');
+  assert.ok(grid.classList.contains('single-view'));
+  assert.ok(cell.classList.contains('maximized'));
+  await ask();
+  assert.equal(count(wv, 'input'), 2, 'keyDown + keyUp');
+  assert.ok(cell.classList.contains('excluded-from-grid'), 'still excluded from the grid view');
 });
 
 test('F42: every visible cell gets its Alt+T, and focus returns to where it was', async (t) => {

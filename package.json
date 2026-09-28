@@ -76,6 +76,7 @@
       "renderer.js",
       "src/**/*.js",
       "icon.ico",
+      "icon.png",
       "package.json"
     ]
   },

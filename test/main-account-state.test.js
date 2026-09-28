@@ -7,6 +7,7 @@ const {
   placeholderName, isPlaceholderName, sameAccountName, hasKickSessionToken, youtubeAuthFingerprint,
   isNewYouTubeSignIn, youtubeRenameDecision, createAccountEpochs, createSyncTickets,
 } = require('../main/account-state');
+const { kickNameToStore } = require('../main/kick-user');
 
 const ck = (name, value = 'v', domain = 'kick.com') => ({ name, value, domain });
 
@@ -145,6 +146,89 @@ test('F53 item 4: manual imports, other platforms and undisturbed re-syncs go th
   assert.equal(kick.ok, true, 'a Twitch sign-out does not touch Kick');
   blocked.clear();
   assert.equal((await simulatedImport({ tickets, blocked, auto: true })).ok, true);
+});
+
+// r2-7: set-google-cookies holds automatic YouTube re-syncs off while a paste
+// runs (a block that is not persisted) and ends the ones already running
+// (a ticket bump right before its writes).
+test('r2-7 regression: a re-sync already running when a paste writes is ended, even though the paste then fails', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  // The paste starts and writes while the re-sync resolves; it then fails,
+  // so nothing turns re-sync off for good and the block is gone again.
+  const paste = () => { blocked.add('youtube'); tickets.bump('youtube'); blocked.delete('youtube'); };
+  const r = await simulatedImport({ tickets, blocked, auto: true, platform: 'youtube', during: { resolve: paste } });
+  assert.deepEqual(r, { refused: true, cookies: [], account: {} });
+});
+
+test('r2-7 regression: a re-sync that arrives while a paste runs writes nothing', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set(['youtube']); // youtubePastesRunning > 0
+  const r = await simulatedImport({ tickets, blocked, auto: true, platform: 'youtube' });
+  assert.equal(r.refused, true);
+  assert.deepEqual(r.cookies, []);
+});
+
+test('r2-7: after a failed paste, re-sync works again; a manual Connect click is never held off', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  blocked.add('youtube'); tickets.bump('youtube'); blocked.delete('youtube'); // a paste came and went
+  assert.equal((await simulatedImport({ tickets, blocked, auto: true, platform: 'youtube' })).ok, true, 'nothing persisted');
+  blocked.add('youtube');
+  assert.equal((await simulatedImport({ tickets, blocked, auto: false, platform: 'youtube' })).ok, true, 'a click in the extension is the user deciding');
+});
+
+// r4-2: writeCookieList asks the ticket before every cookie and stops at the
+// first no. The importer's check right after must then see no as well, or it
+// would save the account over the half-written session.
+test('r4-2: a ticket that has said no never says yes again, even once the block lifts', () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  const isBlocked = (p) => blocked.has(p);
+  const ticket = tickets.take('youtube', { auto: true, isBlocked });
+  assert.equal(ticket.valid(), true);
+  blocked.add('youtube'); // a paste starts (youtubePastesRunning > 0)
+  assert.equal(ticket.valid(), false, 'the re-sync stops at its next cookie');
+  blocked.delete('youtube'); // and fails before it ends anything for good
+  assert.equal(ticket.valid(), false, 'so the stopped re-sync undoes instead of saving');
+  // Only that import is affected: a new re-sync, and any manual import, go through.
+  assert.equal(tickets.take('youtube', { auto: true, isBlocked }).valid(), true);
+  assert.equal(tickets.take('youtube', { auto: false, isBlocked: () => true }).valid(), true);
+});
+
+test('r4-2 regression: a re-sync stopped mid-write by a block that then lifts is undone, not saved', async () => {
+  const tickets = createSyncTickets();
+  const blocked = new Set();
+  const ticket = tickets.take('youtube', { auto: true, isBlocked: (p) => blocked.has(p) });
+  // writeCookieList: asked before every cookie. The block arrives during the
+  // second, the loop stops at the third, and the block is gone again before
+  // the importer's own check after the write.
+  const written = [];
+  for (const name of ['SID', 'HSID', 'SSID']) {
+    if (!ticket.valid()) break;
+    written.push(name);
+    await null;
+    if (name === 'HSID') blocked.add('youtube');
+  }
+  blocked.delete('youtube');
+  assert.deepEqual(written, ['SID', 'HSID']);
+  assert.equal(ticket.valid(), false, 'ticket.undo(), not the account save');
+});
+
+// r2-6: refreshPlaceholderAccountNames snapshots Kick before its cookie read.
+test('r2-6 regression: a Sign Out during the placeholder refresh\'s cookie read drops the lookup', () => {
+  const epochs = createAccountEpochs();
+  const accounts = { kick: 'Kick User' };
+  const before = epochs.snapshot('kick', accounts); // taken before the await (now)
+  // logout-platform lands while readKickSessionCookies() is pending.
+  epochs.bump('kick');
+  delete accounts.kick;
+  const after = epochs.snapshot('kick', accounts); // where it used to be taken
+  assert.equal(epochs.isCurrent(before, accounts), false, 'the lookup is dropped');
+  // The old placement saw nothing wrong, and then took any name for the
+  // signed-out account, a page-read one included.
+  assert.equal(epochs.isCurrent(after, accounts), true);
+  assert.equal(kickNameToStore(after.name, { name: 'featuredstreamer', source: 'dom' }), 'featuredstreamer');
 });
 
 test('issue-17: a jar with only the rotating Google cookies has no session to validate', () => {

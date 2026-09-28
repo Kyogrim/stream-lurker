@@ -169,6 +169,28 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   assert.match(block('async function loadDashboard('), /if \(!config\.dashboardStorageMigrated && !configWriteLocked\)/);
 });
 
+test('r4-1: a Retry that reads the file scans the real list at once, not an interval later', () => {
+  const retry = block('function retryConfigLoad(');
+  const locked = retry.indexOf('if (configWriteLocked) {');
+  const lockedReturn = retry.indexOf('return;', locked);
+  assert.ok(locked > retry.indexOf('loadConfig();') && lockedReturn > locked, 'a failed retry asks again and stops');
+  const scan = retry.indexOf('requestScan();');
+  assert.ok(scan > lockedReturn, 'only once the file was read');
+  // After the extensions and the reload: a cell opened before its extension
+  // loaded never gets the content scripts, and the reloaded page picks up
+  // what the scan opens through get-active-containers.
+  assert.ok(before(retry, 'loadExtensions()', 'requestScan();'));
+  assert.ok(before(retry, 'mainWindow.reload();', 'requestScan();'));
+  assert.equal((retry.match(/requestScan\(\)/g) || []).length, 1);
+  // A fresh scan: performScan would join one already reading the empty
+  // default list, and the cards would stay 'Checking...'.
+  assert.doesNotMatch(retry.replace(/\/\/[^\n]*/g, ''), /performScan/);
+  // The reloaded dashboard reads the scan's results; one finishing during the
+  // reload is not lost (renderer.js reads them again once its listeners exist).
+  assert.match(mainJs, /ipcMain\.handle\('get-statuses', \(\) => \{\s*return lastScanResults;/);
+  assert.match(mainJs, /ipcMain\.handle\('get-active-containers', \(\) => \{\s*return Array\.from\(activeWindows\.keys\(\)\);/);
+});
+
 test('F30/F76: every exit path finalizes sessions, saves, then flushes cookies', () => {
   const exit = block('function persistOnExit(');
   assert.ok(before(exit, 'finalizeAllSessions();', 'saveConfig();'), 'finalize before save or the numbers never reach disk');
@@ -210,6 +232,23 @@ test('issue-13: bringing a dead dashboard forward reloads it at once (no menu, n
   assert.match(menu.slice(menu.indexOf("label: 'Show Dashboard'"), menu.indexOf("label: 'Force Scan Now'")), /reloadDeadDashboardOnShow\(\);/);
   const second = mainJs.slice(mainJs.indexOf("app.on('second-instance'"), mainJs.indexOf('app.whenReady()'));
   assert.ok(second.indexOf('reloadDeadDashboardOnShow();') > second.indexOf("argv.includes('--hidden')"), 'not for an autostart relaunch');
+  // issue-3: clicking a go-live toast brings the window forward too. A dead
+  // dashboard cannot open the stream, and the toast is gone after the click,
+  // so the stream waits for the reload instead of being dropped.
+  const notify = block('function notifyGoLive(');
+  const click = notify.slice(notify.indexOf("notif.on('click'"), notify.indexOf("notif.on('failed'"));
+  assert.ok(before(click, 'mainWindow.focus();', 'reloadDeadDashboardOnShow();'));
+  assert.ok(before(click, 'reloadDeadDashboardOnShow();', 'if (!dashboardHealth.canOpenStreams) {'));
+  assert.match(click, /if \(!dashboardHealth\.canOpenStreams\) \{\s*pendingAlertOpens\.add\(stream\.platform, stream\.username, Date\.now\(\)\);[\s\S]*?return;\s*\}\s*spawnStreamContainer\(stream\.platform, stream\.username\);/);
+  const win = block('function createMainWindow(');
+  const loaded = win.slice(win.indexOf("mainWindow.webContents.on('did-finish-load'"));
+  const drain = loaded.slice(0, loaded.indexOf('});') + 3);
+  assert.ok(before(drain, 'dashboardHealth.loaded();', 'pendingAlertOpens.take(Date.now())'), 'opened only once it can hold cells');
+  assert.match(drain, /for \(const s of clicked\.open\) spawnStreamContainer\(s\.platform, s\.username\);/);
+  // spawnStreamContainer marks the stream active before it sends, which is
+  // what lets the renderer's get-active-containers restore pick it up.
+  const spawn = block('function spawnStreamContainer(');
+  assert.ok(before(spawn, 'activeWindows.set(key, true);', "webContents.send('open-stream-tab'"));
 });
 
 test('F32: no debugger is attached to the dashboard', () => {
@@ -239,6 +278,22 @@ test('F74: the tray menu is built when opened (stored only on Linux, and refresh
   for (const fn of ['function spawnStreamContainer(', 'function sendStreamStatusToUI(', 'function closeAllStreamContainers(']) {
     assert.match(block(fn), /refreshTrayMenu\(\);/, fn);
   }
+});
+
+test('F106: packaged Linux builds ship icon.png and use it for the window and the tray', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  // Both in app.asar: path.join(__dirname, ...) looks there. (linux.icon only
+  // feeds the .desktop / AppImage icon; extraResources lands outside the asar.)
+  assert.ok(pkg.build.files.includes('icon.png'), 'icon.png is packaged');
+  assert.ok(pkg.build.files.includes('icon.ico'), 'icon.ico stays: the Windows tray wants its 16x16 frame');
+  // nativeImage decodes .ico only on Windows.
+  assert.match(block('function appIconPath('), /path\.join\(__dirname, process\.platform === 'win32' \? 'icon\.ico' : 'icon\.png'\)/);
+  assert.match(block('function createMainWindow('), /icon: appIconPath\(\),/);
+  const tray = block('function createTray(');
+  assert.match(tray, /nativeImage\.createFromPath\(appIconPath\(\)\)/);
+  assert.doesNotMatch(mainJs, /path\.join\(__dirname, 'icon\.ico'\)/, 'no hard-coded .ico left for other platforms');
+  // The 16 px resize is for the Windows tray; an AppIndicator wants 22-24 px.
+  assert.match(tray, /\} else if \(process\.platform !== 'linux'\) \{[\s\S]*?icon\.resize\(\{ width: 16, height: 16 \}\)/);
 });
 
 test('F76: the session length counter follows the credited minutes', () => {

@@ -5,8 +5,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   SETTING_RANGES, clampSetting, scanIntervalMs, normalizeConfigNumbers, normalizeStreamers, sanitizeConfig, normalizeEventList,
-  streamerPlatform, streamerName,
+  streamerPlatform, streamerName, droppedStreamerLines, MAX_LOGGED_ENTRIES,
 } = require('../main/config-sanitize');
+const { importedConfig } = require('../main/config-boundary');
 
 test('F66: checkInterval is clamped to 1-60 minutes; non-numbers fall back to 3', () => {
   const cases = [[null, 3], [0, 1], [-5, 1], ['abc', 3], ['', 3], ['5', 5], [1e9, 60], [3, 3], [NaN, 3], [Infinity, 3], [2.6, 3], [undefined, 3], [{}, 3], [true, 3]];
@@ -84,6 +85,52 @@ test('G2.2: sanitizeConfig runs both and makes a scan-style filter safe', () => 
   assert.doesNotThrow(() => cfg.streamers.filter(s => s.platform.toLowerCase() === 'kick').map(s => s.username.toLowerCase()));
   assert.deepEqual(sanitizeConfig(null), { clamped: [], dropped: [] });
   assert.deepEqual(sanitizeConfig([]), { clamped: [], dropped: [] });
+});
+
+// r4-3: main.js sanitizeIncomingConfig logs these lines, and used to log one
+// per dropped entry: a hostile backup of 50,000 junk entries was 50,000
+// console writes and IPC messages, and wiped the 200-line activity log.
+test('r4-3 regression: an import with 1000 unusable streamer entries logs at most 11 lines', () => {
+  const incoming = {
+    watchTime: {},
+    streamers: [
+      ...Array.from({ length: 500 }, () => null),
+      ...Array.from({ length: 300 }, (_, i) => ({ platform: 'twitch', username: `bad name ${i} <script>` })),
+      ...Array.from({ length: 200 }, () => ({ platform: 'kick', username: 'dupe' })),
+    ],
+  };
+  // The import path in main.js: importedConfig refuses entries, then
+  // sanitizeIncomingConfig runs the normalizer and logs both lists together.
+  const imported = importedConfig(incoming, { streamers: [] });
+  const { dropped: normalizerDropped } = sanitizeConfig(imported.config);
+  const dropped = [...imported.dropped, ...normalizerDropped];
+  assert.equal(dropped.length, 999, 'every entry but the first "dupe" is set aside');
+  const salvage = 'config.json.dropped-streamers-2026-09-27T00-00-00-000Z.json';
+  const lines = droppedStreamerLines(dropped, salvage);
+  assert.equal(lines.length, MAX_LOGGED_ENTRIES + 1);
+  assert.ok(MAX_LOGGED_ENTRIES <= 10);
+  lines.slice(0, MAX_LOGGED_ENTRIES).forEach(l => assert.match(l, /^\[Config\] Skipped streamer entry \(not an object\): null$/));
+  assert.equal(lines[MAX_LOGGED_ENTRIES], `[Config] Skipped 989 more streamer entries not listed here; all 999 are in ${salvage}.`);
+  for (const l of lines) assert.ok(l.length < 300, 'each line is short');
+});
+
+test('r4-3: the load path is capped the same way; small lists are listed whole; no file is claimed when saving it failed', () => {
+  const cfg = { streamers: Array.from({ length: 50000 }, (_, i) => (i % 2 ? 'x'.repeat(5000) : { username: i })) };
+  const { dropped } = sanitizeConfig(cfg);
+  assert.equal(dropped.length, 50000);
+  const lines = droppedStreamerLines(dropped, null);
+  assert.equal(lines.length, MAX_LOGGED_ENTRIES + 1);
+  assert.equal(lines[MAX_LOGGED_ENTRIES], `[Config] Skipped ${50000 - MAX_LOGGED_ENTRIES} more streamer entries not listed here.`, 'no salvage file to point at');
+  assert.ok(lines.every(l => l.length < 300), 'a 5000-character entry is shown cut short');
+
+  const few = (n) => Array.from({ length: n }, (_, i) => ({ index: i, entry: { platform: 'kick' }, reason: 'no username' }));
+  assert.deepEqual(droppedStreamerLines(few(1), 'f.json'), ['[Config] Skipped streamer entry (no username): {"platform":"kick"}']);
+  assert.equal(droppedStreamerLines(few(MAX_LOGGED_ENTRIES), 'f.json').length, MAX_LOGGED_ENTRIES, 'exactly the cap: no count line');
+  assert.equal(droppedStreamerLines(few(MAX_LOGGED_ENTRIES + 1), 'f.json')[MAX_LOGGED_ENTRIES], `[Config] Skipped 1 more streamer entry not listed here; all ${MAX_LOGGED_ENTRIES + 1} are in f.json.`);
+  assert.deepEqual(droppedStreamerLines([], 'f.json'), []);
+  assert.deepEqual(droppedStreamerLines(undefined, null), []);
+  // An entry JSON cannot show is still described, not thrown on.
+  assert.match(droppedStreamerLines([{ entry: 10n, reason: 'not an object' }], null)[0], /: 10$/);
 });
 
 test('F93 layer 2: both calendar lists reach the dashboard as lists of event objects', () => {

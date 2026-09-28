@@ -132,14 +132,13 @@ test('F01: clip titles, authors and URLs never reach the HTML parser', async (t)
   await savedCards[0].querySelector('.play-btn').dispatch('click');
   assert.deepEqual(apiCalls, [['open', 'https://clips.twitch.tv/Slug3']]);
 
-  // Download: signed Twitch CDN URL; an off-host source falls back to the
-  // thumbnail-derived MP4 on the Twitch CDN.
+  // Download: signed Twitch CDN URL; an off-host source is refused outright,
+  // not swapped for an MP4 guessed from the thumbnail.
   apiCalls.length = 0;
   await cards[3].querySelector('.download-btn').dispatch('click');
   await cards[2].querySelector('.download-btn').dispatch('click');
   assert.deepEqual(apiCalls, [
     ['download', 'https://production.assets.clips.twitchcdn.net/v2/media/3/x.mp4?sig=abc123&token=%7B%22a%22%3A%22b%20c%22%7D', 'Slug3.mp4'],
-    ['download', 'https://clips-media-assets2.twitch.tv/x2.mp4', 'Slug2.mp4'],
   ]);
 
   // Saving a hostile clip persists it; re-rendering stays inert.
@@ -152,6 +151,76 @@ test('F01: clip titles, authors and URLs never reach the HTML parser', async (t)
   await savedList.children[2].querySelector('.remove-btn').dispatch('click');
   assert.equal(cards[0].querySelector('.save-btn').title, 'Save');
   assertNoRawPayload(doc, { domOnly: true });
+});
+
+// The URL shapes a live GetClips query returned on 2026-09-27 (shroud, xqc,
+// kaicenat): every source on one CloudFront distribution, thumbnails under
+// static-cdn.jtvnw.net/twitch-video-assets. The signed source answered 200;
+// the thumbnail-derived thumb-0000000000.mp4 answered 404.
+test('F01 regression: current clips download from the signed CloudFront URL, off-list sources are refused', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const doc = createDocument();
+  const consoleEl = doc.add('div', 'console-logs');
+  const grid = doc.add('div', 'trending-clips-grid');
+  doc.add('div', 'saved-clips-list');
+  const refresh = doc.add('button', 'refresh-clips-btn');
+  const filter = doc.add('select', 'clips-filter-select');
+  filter.value = 'trending';
+
+  const uuid = 'f45445b1-9e8c-4cfd-88b0-d6cbe5d00b61';
+  const thumb = `https://static-cdn.jtvnw.net/twitch-video-assets/twitch-vap-video-assets-prod-us-west-2/${uuid}/landscape/thumb/thumb-0000000000-1920x1080.jpg`;
+  const source = q => `https://d1ndex63qxojbr.cloudfront.net/nauth/${uuid}/landscape/avc/${q}/index.mp4`;
+  const legacyThumb = 'https://clips-media-assets2.twitch.tv/AT-cm%7C987-preview-480x272.jpg';
+  const clip = (i, fields) => ({
+    id: `r${i}`, slug: `Real${i}`, title: `Clip ${i}`, viewCount: 100 - i, durationSeconds: 30,
+    url: `https://clips.twitch.tv/Real${i}`, broadcaster: { displayName: 'someone' }, ...fields,
+  });
+  const clips = [
+    clip(0, { thumbnailURL: thumb, videoQualities: [{ sourceURL: source(1080), quality: '1080' }, { sourceURL: source(720), quality: '720' }] }),
+    // Anyone can put a distribution on bare cloudfront.net.
+    clip(1, { thumbnailURL: thumb, videoQualities: [{ sourceURL: `https://attacker.cloudfront.net/nauth/${uuid}/landscape/avc/1080/index.mp4` }] }),
+    clip(2, { thumbnailURL: thumb, videoQualities: [{ sourceURL: `https://d1ndex63qxojbr.cloudfront.net.evil.tld/nauth/${uuid}/index.mp4` }] }),
+    clip(3, { thumbnailURL: thumb, videoQualities: [{ quality: '1080' }] }),
+    // No source at all: an old saved clip, where the thumbnail guess is all
+    // there is (the baseline's fallback).
+    clip(4, { thumbnailURL: legacyThumb }),
+    clip(5, { thumbnailURL: legacyThumb, videoQualities: [] }),
+  ];
+  const signedFor = [];
+  const fetchImpl = async (url, opts) => {
+    const body = JSON.parse(opts.body)[0];
+    if (body.operationName === 'GetClips') {
+      return { json: async () => [{ data: { user: { clips: { edges: clips.map(node => ({ node })) } } } }] };
+    }
+    signedFor.push(body.variables.slug);
+    return { json: async () => [{ data: { clip: { playbackAccessToken: { signature: 'f00d', value: '{"clip_uri":"x"}' } } } }] };
+  };
+  const apiCalls = [];
+  const restore = install(doc, { api: { downloadClip: (u, name) => { apiCalls.push([u, name]); return { success: true }; } }, fetchImpl });
+  t.after(restore);
+
+  const { state } = await load('src/state.js');
+  state.currentConfig = { streamers: [{ platform: 'twitch', username: 'someone' }] };
+  const mod = await load('src/clips.js');
+  mod.initClipsManager();
+  await refresh.dispatch('click');
+
+  const cards = grid.children;
+  assert.equal(cards.length, clips.length);
+  assert.equal(cards[0].querySelector('.clip-thumb').src, thumb, 'the current thumbnail shape still renders');
+  for (const card of cards) await card.querySelector('.download-btn').dispatch('click');
+
+  assert.deepEqual(apiCalls, [
+    [`${source(1080)}?sig=f00d&token=%7B%22clip_uri%22%3A%22x%22%7D`, 'Real0.mp4'],
+    ['https://clips-media-assets2.twitch.tv/AT-cm%7C987.mp4', 'Real4.mp4'],
+    ['https://clips-media-assets2.twitch.tv/AT-cm%7C987.mp4', 'Real5.mp4'],
+  ]);
+  assert.deepEqual(signedFor, ['Real0'], 'a refused source is never sent to Twitch for signing');
+  assert.ok(!apiCalls.some(([u]) => /thumb-0000000000\.mp4/.test(u)), 'no MP4 guessed from a current thumbnail');
+  const lines = consoleEl.children.map(c => c.textContent);
+  for (const i of [1, 2, 3]) {
+    assert.ok(lines.includes(`[Clips] Not downloading Clip ${i}: its video is not a Twitch clip file.`), lines.join('\n'));
+  }
 });
 
 test('F02: stream titles, categories, errors and usernames render as text', async (t) => {

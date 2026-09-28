@@ -23,12 +23,14 @@ function close(server) {
 
 // The real receiver, wired like main.js: signedOut maps a platform to its
 // refusal reason ('signed-out' or 'app-login'); a manual import clears it.
-async function startApp({ signedOut = {} } = {}) {
+// setCode is the app's New code button.
+async function startApp({ signedOut = {}, code = CODE } = {}) {
   const imported = [];
   let port = 0;
+  let pairingCode = code;
   const handler = rx.createReceiverHandler({
     getPort: () => port,
-    getPairingCode: () => CODE,
+    getPairingCode: () => pairingCode,
     guard: rx.createPairingGuard(),
     importers: Object.fromEntries(PLATFORMS.map((p) => [p, async (cookies, { auto }) => {
       imported.push({ platform: p, auto, cookies });
@@ -39,7 +41,7 @@ async function startApp({ signedOut = {} } = {}) {
   });
   const server = rx.createReceiverServer(handler);
   port = await listen(server);
-  return { server, port, imported, signedOut };
+  return { server, port, imported, signedOut, setCode: (c) => { pairingCode = c; } };
 }
 
 // A squatter that bound a port while the app was closed. It passes the
@@ -144,6 +146,60 @@ test('the real sides agree: proof, manual import with the name, auto import with
   assert.deepEqual([manual.success, manual.username], [true, 'alice']);
   const auto = await SL.postImport({ ...deps, port: app.port, code: CODE, platform: 'twitch', cookies, auto: true });
   assert.deepEqual([auto.success, auto.username], [true, '']);
+});
+
+test('an app still on its 8-character code: a fresh extension asks for the code, then says New code, never "needs updating" (C1 code-length rule)', async (t) => {
+  // Every install from before 32-character codes, meeting connector 1.3.
+  const SHORT = 'ABCD1234';
+  const NEW = '0F1E2D3C4B5A69788796A5B4C3D2E1F0';
+  const app = await startApp({ code: SHORT });
+  t.after(() => close(app.server));
+  const find = (code) => SL.findApp({ ...deps, code, ports: [app.port], timeoutMs: 2000 });
+  const neverUpdate = (text, what) => assert.doesNotMatch(text, /needs updating|update (it|the app)/i, `${what}: ${text}`);
+
+  // What the real receiver answers: no proof for a code that short, and no
+  // version (apps from before proofs always sent one).
+  const raw = await (await fetch(`http://127.0.0.1:${app.port}/ping?nonce=${'ab'.repeat(16)}`)).json();
+  assert.deepEqual(raw, { app: 'stream-lurker' });
+
+  // 1. Connector 1.3 installed fresh, nothing in its storage yet.
+  const fresh = await find('');
+  assert.notEqual(fresh.status, 'outdated');
+  assert.deepEqual(fresh, { status: 'no-code', port: null });
+  assert.match(SL.describeConnection(fresh).text, /Enter the pairing code/);
+  neverUpdate(SL.describeConnection(fresh).text, 'no code yet');
+
+  // 2. The user pastes what Platform Logins shows: 8 characters.
+  const pasted = await find(SHORT);
+  assert.equal(pasted.status, 'short-code');
+  assert.match(SL.describeConnection(pasted).text, /New code/);
+  neverUpdate(SL.describeConnection(pasted).text, '8-character code');
+
+  // 3. A 32-character code the app no longer holds: config.json restored from
+  // a .bak older than a New code click. Nothing is sent, the fix is named.
+  const restored = await find(CODE);
+  assert.deepEqual(restored, { status: 'app-code-too-short', port: null });
+  assert.match(SL.describeConnection(restored).text, /Click New code in Platform Logins/);
+  neverUpdate(SL.describeConnection(restored).text, 'restored config');
+  const storage = memoryStorage({ pairingCode: CODE, connectedPlatforms: ['twitch'] });
+  const passDeps = { ...deps, storage, cookies: cookieJar, findOptions: { ports: [app.port], timeoutMs: 2000 } };
+  assert.equal((await SL.runResync(passDeps)).status, 'app-code-too-short');
+  assert.equal(app.imported.length, 0);
+  const summary = SL.describeSync(storage.data, Date.now()).summary;
+  assert.equal(summary.tone, 'err');
+  assert.match(summary.text, /Click New code in Platform Logins/);
+  neverUpdate(summary.text, 'auto-sync summary');
+
+  // 4. New code in the app, pasted into the extension: paired, and it syncs.
+  // The receiver still sends no version: connector 1.3 reads a /ping version
+  // as an app from before proofs.
+  app.setCode(NEW);
+  const signed = await (await fetch(`http://127.0.0.1:${app.port}/ping?nonce=${'cd'.repeat(16)}`)).json();
+  assert.deepEqual(Object.keys(signed).sort(), ['app', 'proof']);
+  storage.data.pairingCode = NEW;
+  assert.deepEqual(await find(NEW), { status: 'verified', port: app.port });
+  assert.equal((await SL.runResync(passDeps)).status, 'done');
+  assert.deepEqual(app.imported.map((i) => [i.platform, i.auto]), [['twitch', true]]);
 });
 
 test('SIGNED_OUT end to end: the popup shows the app\'s reason, app-login included, and a manual connect lifts it (F53)', async (t) => {

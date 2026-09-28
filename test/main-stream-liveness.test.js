@@ -46,6 +46,35 @@ test('errors: one errored scan is tolerated, credit stops once the last confirma
   assert.equal(l.credit('kick:x', T0 + 4 * INTERVAL + MIN, INTERVAL).credit, false, 'still stale');
 });
 
+test('issue-2: an old confirmation stands until a later scan fails to repeat it', () => {
+  const l = createStreamLiveness();
+  l.observe('kick:x', live('x'), T0);
+  // A slow scan is still running: nothing has reported since the confirmation.
+  const late = T0 + 10 * INTERVAL;
+  assert.equal(l.credit('kick:x', late, INTERVAL).credit, true);
+  assert.equal(l.sessionEnd('kick:x', late, INTERVAL), late, 'a cell closed meanwhile keeps its whole session');
+  // The scan lands and confirms it: still credited.
+  l.observe('kick:x', live('x'), late + MIN);
+  assert.equal(l.credit('kick:x', late + 2 * MIN, INTERVAL).credit, true);
+  // The next one lands errored after a long wait: the confirmation is old and
+  // a finished scan did not repeat it.
+  l.observe('kick:x', errored('x'), late + 9 * MIN);
+  assert.equal(l.credit('kick:x', late + 9 * MIN, INTERVAL).credit, false);
+  assert.equal(l.sessionEnd('kick:x', late + 9 * MIN, INTERVAL), late + MIN + INTERVAL);
+});
+
+test('issue-2: a scan that fails as a whole counts against every stream', () => {
+  const l = createStreamLiveness();
+  l.observe('kick:x', live('x'), T0);
+  l.observe('kick:y', live('y'), T0);
+  for (let t = T0 + INTERVAL; t <= T0 + 4 * INTERVAL; t += INTERVAL) l.scanFailed(t);
+  assert.equal(l.credit('kick:x', T0 + staleAfterMs(INTERVAL), INTERVAL).credit, true, 'one failed scan is tolerated');
+  assert.equal(l.credit('kick:x', T0 + staleAfterMs(INTERVAL) + 1, INTERVAL).credit, false);
+  assert.equal(l.credit('kick:y', T0 + 4 * INTERVAL, INTERVAL).credit, false);
+  l.observe('kick:x', live('x'), T0 + 5 * INTERVAL);
+  assert.equal(l.credit('kick:x', T0 + 5 * INTERVAL + MIN, INTERVAL).credit, true, 'a confirmation resumes it');
+});
+
 test('offline streak counts consecutive clean offline results', () => {
   const l = createStreamLiveness();
   assert.equal(OFFLINE_CONFIRMATIONS, 2);
@@ -163,5 +192,65 @@ test('G4.6: credit resumes when scans recover with the stream still live, and th
   assert.equal(ended.activeWindows.size, 0, 'closed after two clean offline scans');
   for (const key of ['kick:a', 'kick:b', 'kick:c', 'kick:d']) {
     assert.ok(ended.credited.get(key) <= 60 + staleAfterMs(INTERVAL) / MIN);
+  }
+});
+
+// main.js cadence, not the idealised one above: the scan tick fires every
+// interval but is skipped while a scan is still running (resetPoller), a
+// scan's results land when it finishes, the first scan runs 3 s after
+// startup, and the watch-time ticker runs on its own one-minute timer.
+function simulateCadence({ intervalMs, scanMs, to, scanResult, phaseMs = 17 * 1000 }) {
+  const liveness = createStreamLiveness();
+  const activeWindows = new Map();
+  const openedSessions = new Map();
+  const notifiedSessions = new Map();
+  const config = { autoOpen: true, maxKickTabs: 10, streamers: [{ platform: 'kick', username: 'a' }] };
+  let finishesAt = null;
+  let ticked = 0;
+  let credited = 0;
+  for (let t = 0; t < to; t += 1000) {
+    const now = T0 + t;
+    if (finishesAt !== null && t >= finishesAt) {
+      finishesAt = null;
+      applyScanResults(config.streamers.map(s => scanResult(s.username, t)), {
+        now, intervalMs, config, activeWindows, openedSessions, notifiedSessions, liveness,
+        modeOf: () => 'auto', notify: () => {}, log: () => {},
+        closeTab: (p, u) => activeWindows.delete(streamKey(p, u)),
+        spawn: (p, u) => { activeWindows.set(streamKey(p, u), true); liveness.start(streamKey(p, u), now); },
+      });
+    }
+    const due = t === 3000 || (t > 0 && t % intervalMs === 0);
+    if (due && finishesAt === null) finishesAt = t + scanMs;
+    if (t >= phaseMs && (t - phaseMs) % MIN === 0) {
+      for (const key of activeWindows.keys()) {
+        ticked++;
+        if (liveness.credit(key, now, intervalMs).credit) credited++;
+      }
+    }
+  }
+  return { ticked, credited };
+}
+
+test('issue-2: scans slower than two intervals do not pause credit for a stream every scan confirms live', () => {
+  // The rule before this fix credited 87/116, 89/113 and 96/115 minutes here.
+  for (const [intervalMin, scanMin] of [[1, 3.5], [3, 6.5], [2, 4.5], [1, 2.5], [1, 0.2]]) {
+    const { ticked, credited } = simulateCadence({
+      intervalMs: intervalMin * MIN, scanMs: scanMin * MIN, to: 120 * MIN, scanResult: (u) => live(u),
+    });
+    assert.ok(ticked > 100, `interval ${intervalMin}, scan ${scanMin}: the cell was open (${ticked} min)`);
+    assert.equal(credited, ticked, `interval ${intervalMin}, scan ${scanMin}: every minute credited`);
+  }
+});
+
+test('issue-2: with slow scans an outage still pauses credit at the first scan that finishes without confirming', () => {
+  for (const [intervalMin, scanMin] of [[1, 3.5], [3, 6.5], [3, 0.2]]) {
+    const { credited } = simulateCadence({
+      intervalMs: intervalMin * MIN, scanMs: scanMin * MIN, to: 240 * MIN,
+      scanResult: (u, t) => (t < 30 * MIN ? live(u) : errored(u)),
+    });
+    // Live for the first 30 minutes (less the first scan), then at most the
+    // staleness allowance plus the scan that brought the first error.
+    const bound = 30 + staleAfterMs(intervalMin * MIN) / MIN + scanMin;
+    assert.ok(credited >= 25 && credited <= bound, `interval ${intervalMin}, scan ${scanMin}: credited ${credited}, bound ${bound}`);
   }
 });

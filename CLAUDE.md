@@ -514,17 +514,21 @@ get back.
 "Tested" here means, in order of cost:
 
 **1. Syntax, one file per call.** `node --check` parses only its first operand; the rest become
-`process.argv`, so `node --check main.js preload.js` never looks at preload.js. ES modules go in on
-stdin with `--input-type=module`, which pins the parse to ESM instead of leaving it to Node's
-module-syntax detection (package.json has no `"type"`); with a file operand, `--input-type` is
-refused outright. Bash (Git Bash on Windows); PowerShell has no `<` redirection.
+`process.argv`, so `node --check main.js preload.js` never looks at preload.js. Both loops feed the
+file on stdin with an explicit `--input-type`, because a file operand leaves the parse to Node's
+module-syntax detection: that passes `import`/`export` in a CommonJS file, and a sandboxed preload
+cannot load ESM, so the preload fails, `window.api` is undefined, and the check passed. Pinned, the
+result also does not depend on package.json's `"type"`. `--input-type` applies only to stdin or
+`--eval` (with a file operand it is refused outright), and errors read from stdin say `[stdin]`,
+which is why each loop names the file. Bash (Git Bash on Windows); PowerShell has no `<` redirection.
 
 ```bash
 bad=0
-# CommonJS and plain scripts. If package.json ever gains "type": "module", these
-# files change meaning under node --check: revisit both loops.
+# CommonJS and plain scripts, pinned like the ES-module loop: a file operand leaves
+# the parse to module-syntax detection, which passes import/export in a CommonJS
+# file (and a sandboxed preload cannot load ESM).
 for f in main.js preload.js main/*.js src/twitch-preload.js extension/*.js; do
-  node --check "$f" || { echo "SYNTAX: $f"; bad=1; }
+  node --input-type=commonjs --check < "$f" || { echo "SYNTAX: $f"; bad=1; }
 done
 # ES modules. Errors read from stdin say [stdin], which is why the loop names the file.
 for f in renderer.js src/*.js; do
@@ -546,19 +550,35 @@ and with the app closed your build runs on the real cookies and config. Electron
 `--user-data-dir`: `app.getPath('userData')` returns it and the single-instance lock is keyed on it,
 so the copy runs next to the real app without handing off.
 
+Electron ignores an empty `--user-data-dir`, and one it cannot create, and runs on
+`%APPDATA%/stream-lurker`, so run the block as **one** bash invocation (save it to a file and
+`bash file.sh` if the harness refuses it), never line by line, because `SL_PROFILE` does not survive
+between tool calls. Every step is chained into the launch, and the launch line checks for a finished
+copy itself, so a failed step, the placeholder left in, or the last line run alone starts nothing.
+`npx electron` returns only when the dev build quits, so run the whole invocation in the background.
+
 ```bash
 # Quit the app first (tray > Quit Stream Lurker): a copy taken mid-write can be torn.
 SL_PROFILE="<your scratchpad>/sl-profile"   # <- a path that does not exist yet, never under %APPDATA%
 # The copy keeps launchOnStartup, and a dev build that sees it on registers
 # node_modules' electron.exe as a Windows sign-in entry, so it is switched off.
+# The marker is written only after that, and the launch refuses a folder without
+# it; the check shares the launch's line so no split of this block runs it bare.
+# (npx electron . is the same as npm start --)
 mkdir "$SL_PROFILE" && cp -r "$APPDATA/stream-lurker/." "$SL_PROFILE" &&
-node -e "const f=process.argv[1],fs=require('fs'),c=JSON.parse(fs.readFileSync(f,'utf8'));c.launchOnStartup=false;fs.writeFileSync(f,JSON.stringify(c,null,2))" "$SL_PROFILE/config.json"
-npx electron . --user-data-dir="$SL_PROFILE"   # same as: npm start -- --user-data-dir="$SL_PROFILE"
+node -e "const f=process.argv[1],fs=require('fs'),c=JSON.parse(fs.readFileSync(f,'utf8'));c.launchOnStartup=false;fs.writeFileSync(f,JSON.stringify(c,null,2))" "$SL_PROFILE/config.json" &&
+touch "$SL_PROFILE/.sl-dev-copy" &&
+[ -n "$SL_PROFILE" ] && [ -f "$SL_PROFILE/.sl-dev-copy" ] && npx electron . --user-data-dir="$SL_PROFILE"
 ```
 
 The copy keeps the streamer list and Auto-Open, so it scans and opens streams like the real app. It
 also keeps the pairing code: with the real app closed, the browser extension's 30-minute re-sync
 lands in the copy.
+
+Running the block again stops at `mkdir`, because the copy exists. To start the same copy again, run
+the `SL_PROFILE=` line and the last line, together in one invocation. The marker check refuses an
+empty path, the live profile, and a copy the block did not finish (delete that one and run the block
+again).
 
 For pure logic, a test in `test/` beats a throwaway harness; a harness in the scratchpad is fine
 for exploring real cases first. Do not claim something works because it parses.
@@ -582,9 +602,8 @@ gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --
   recalling a bad one from anyone who installed it, and a fix does not reach anyone who does not
   check, so when a fix matters, say so in the release notes.
 - **Windows only.** `npm run release` publishes the NSIS installer and `latest.yml`. Do not run
-  `release-linux`: it puts an untested AppImage and `latest-linux.yml` on the same tag, and packaged
-  Linux builds have a blank tray and window icon today (`icon.png` is not in `build.files`, and
-  Linux cannot decode `icon.ico`). Linux needs that fixed and its own tested release step first.
+  `release-linux`: it puts an untested AppImage and `latest-linux.yml` on the same tag. Linux needs
+  its own tested release step first.
 - **The extension ships inside the installer** (`build.extraResources`, loaded unpacked), and a
   browser can keep running an older copy of it long after the app updates. A release must keep
   working with older extension versions: that is why the receiver still takes `body.pairingCode`
@@ -611,7 +630,12 @@ gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --
   app first either way. The single-instance lock does not save you here: a script that never asks
   for it is never refused. Without the switch, a loose script uses `%APPDATA%/<its package.json
   productName or name>` (`%APPDATA%/Electron` for a bare script), a profile with none of the app's
-  cookies, so its results are meaningless.
+  cookies, so its results are meaningless. Electron ignores an empty `--user-data-dir`, and one it
+  cannot create, exactly as if the switch were missing, and `electron .` from this repo then runs on
+  `%APPDATA%/stream-lurker`, the live profile. So set the path and launch in **one** bash
+  invocation (a file run with `bash file.sh` if the harness refuses the block), with the launch
+  guarded as in Verification step 3, never across tool calls: a variable does not survive between
+  them.
 
 ### Miscellany
 

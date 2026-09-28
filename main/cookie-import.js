@@ -123,6 +123,26 @@ function isHostOnlyCookie(c) {
 
 const hostOf = (domain) => String(domain || '').trim().replace(/^\./, '').toLowerCase();
 
+// Whether a cookie domain (a leading dot allowed) is a bare hostname. The
+// platform filters are suffix matches and cookieSetDetails builds the write
+// URL from the domain, so without this 'attacker.example/.youtube.com' passed
+// the YouTube filter, counted as host-only (no leading dot) and was written
+// to https://attacker.example/.youtube.com/: a cookie on attacker.example,
+// after same-named cookies there (Twitch's auth-token, say) were cleared.
+const COOKIE_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+function isCookieHost(domain) {
+  return COOKIE_HOST.test(hostOf(domain));
+}
+
+// Whether a cookie domain is `site` or one of its subdomains, as a real
+// hostname. What every platform import filters on (C1: the scope is enforced
+// here too, whatever the extension or a paste sends).
+function isCookieDomainOf(domain, site) {
+  if (!isCookieHost(domain)) return false;
+  const d = hostOf(domain);
+  return d === site || d.endsWith(`.${site}`);
+}
+
 // Registrable domain, good enough for the hosts imports are filtered to
 // (twitch.tv, kick.com, youtube.com, google.com).
 const regDomain = (h) => hostOf(h).split('.').slice(-2).join('.');
@@ -135,8 +155,8 @@ function cookieSetDetails(c, { defaultDomain = '', nowS = Math.floor(Date.now() 
   const name = String(c.name);
   const ownDomain = String(c.domain || '').trim();
   const domain = ownDomain || String(defaultDomain || '').trim();
+  if (!isCookieHost(domain)) return null;
   const host = hostOf(domain);
-  if (!host) return null;
   const hostPrefixed = name.startsWith('__Host-');
   const hostOnly = hostPrefixed || (!!ownDomain && isHostOnlyCookie(c));
   // __Host- requires Path=/ and Secure; __Secure- requires Secure.
@@ -196,12 +216,44 @@ function removalUrl(existing) {
   return `https://${hostOf(existing.domain)}${existing.path || '/'}`;
 }
 
+// Carries out a plan against `cookies` (Electron's ses.cookies, or anything
+// with its get/remove/set). stillValid() is asked before every remove and
+// every set, and the first false ends it: an automatic re-sync whose ticket a
+// paste, a Sign Out or a login in the app took away used to run its loops to
+// the end, interleaving its removes and sets of the same Google cookies with
+// the paste's own until the jar held a mix of both sessions. onSetError(details,
+// err) hears about each cookie Chromium refused. Resolves { set, stopped }.
+async function applyCookiePlan(plan, cookies, { stillValid = () => true, onSetError = () => {} } = {}) {
+  for (const name of plan.clear.keys()) {
+    try {
+      const existing = await cookies.get({ name });
+      for (const ex of existing) {
+        if (!shouldClearExisting(ex, plan)) continue;
+        if (!stillValid()) return { set: 0, stopped: true };
+        await cookies.remove(removalUrl(ex), name);
+      }
+    } catch (e) { /* a name that cannot be read or cleared: its write may still succeed */ }
+  }
+  let set = 0;
+  for (const details of plan.writes) {
+    if (!stillValid()) return { set, stopped: true };
+    try {
+      await cookies.set(details);
+      set++;
+    } catch (e) {
+      onSetError(details, e);
+    }
+  }
+  return { set, stopped: false };
+}
+
 // C1: what a YouTube import may write. youtube.com and any subdomain, and
 // exactly google.com / accounts.google.com, which carry the Google sign-in.
 function isYouTubeCookieDomain(domain) {
+  if (isCookieDomainOf(domain, 'youtube.com')) return true;
+  if (!isCookieHost(domain)) return false;
   const d = hostOf(domain);
-  if (!d) return false;
-  return d === 'youtube.com' || d.endsWith('.youtube.com') || d === 'google.com' || d === 'accounts.google.com';
+  return d === 'google.com' || d === 'accounts.google.com';
 }
 
 // The cookies of a YouTube session as the jar holds them (ses.cookies.get
@@ -248,10 +300,13 @@ module.exports = {
   parseCookieBlob,
   isHostOnlyCookie,
   regDomain,
+  isCookieHost,
+  isCookieDomainOf,
   cookieSetDetails,
   planCookieWrites,
   shouldClearExisting,
   removalUrl,
+  applyCookiePlan,
   isYouTubeCookieDomain,
   youtubeJarCookies,
   assignPastedYouTubeDomains,

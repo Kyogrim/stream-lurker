@@ -136,6 +136,29 @@ test('clip URL helpers only return Twitch https URLs', async () => {
   assert.equal(c.legacyClipMp4Url({ thumbnailURL: 'https://evil.tld/AT-123-preview-480x272.jpg' }), '');
 });
 
+test('clip files: Twitch\'s CloudFront distribution by exact name, never bare cloudfront.net', async () => {
+  const c = await load('src/clips.js');
+  const s = await load('src/state.js');
+  const real = 'https://d1ndex63qxojbr.cloudfront.net/nauth/f45445b1-9e8c-4cfd-88b0-d6cbe5d00b61/landscape/avc/1080/index.mp4';
+  assert.equal(c.clipSourceUrl({ videoQualities: [{ sourceURL: real }] }), real);
+  assert.equal(c.signedClipUrl(real, { signature: 's', value: '{"a":1}' }), `${real}?sig=s&token=%7B%22a%22%3A1%7D`);
+  for (const bad of [
+    'https://attacker.cloudfront.net/nauth/x/index.mp4',
+    'https://cloudfront.net/nauth/x/index.mp4',
+    'https://d1ndex63qxojbr.cloudfront.net.evil.tld/x/index.mp4',
+    'https://xd1ndex63qxojbr.cloudfront.net/x/index.mp4',
+    'http://d1ndex63qxojbr.cloudfront.net/nauth/x/index.mp4',
+  ]) {
+    assert.equal(c.clipSourceUrl({ videoQualities: [{ sourceURL: bad }] }), '', bad);
+    assert.equal(c.signedClipUrl(bad, { signature: 's', value: 'v' }), '', bad);
+  }
+  // Thumbnails (and the CSP img-src that mirrors their list) stay on Twitch's
+  // own domains: the video host is not an image host.
+  assert.equal(c.clipThumbUrl({ thumbnailURL: 'https://d1ndex63qxojbr.cloudfront.net/x.jpg' }), '');
+  assert.ok(!s.TWITCH_MEDIA_HOSTS.some(h => /(^|\.)cloudfront\.net$/.test(h)), s.TWITCH_MEDIA_HOSTS.join());
+  assert.deepEqual(s.TWITCH_CLIP_FILE_HOSTS, [...s.TWITCH_MEDIA_HOSTS, 'd1ndex63qxojbr.cloudfront.net']);
+});
+
 test('normalizeCalendarEvent: integer day 0-6, plain strings, or null', async () => {
   const { normalizeCalendarEvent } = await load('src/calendar.js');
   assert.deepEqual(

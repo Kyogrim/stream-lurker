@@ -11,11 +11,11 @@ const {
   createDashboardHandler, migrateFileOriginStorage,
 } = require('./main/dashboard-protocol');
 const {
-  isPlatformUrl, isOAuthPopupUrl, isAllowedTopLevelUrl, isAllowedFrameUrl, mayOpenExternally,
+  isPlatformUrl, isLoginPopupUrl, isUserGestureInput, isAllowedTopLevelUrl, isAllowedFrameUrl, mayOpenExternally,
   sanitizeWebviewAttach, isBlockedStreamLoad, isPermissionAllowed, isTrustedDashboardSender,
   createExternalOpenGate, createLogThrottle, createDownloadAllowlist,
 } = require('./main/web-security');
-const { sanitizeConfig, scanIntervalMs, streamerPlatform, streamerName } = require('./main/config-sanitize');
+const { sanitizeConfig, droppedStreamerLines, scanIntervalMs, streamerPlatform, streamerName } = require('./main/config-sanitize');
 const { SCAN_REQUEST_TIMEOUT_MS, fetchTextWithDeadline, parseJsonBody } = require('./main/scan-fetch');
 const {
   checkTwitchGql, checkTwitchHelix, mergeFallbackResults, twitchCredentialKey, createTwitchTokenCache,
@@ -27,15 +27,15 @@ const { createSingleFlight } = require('./main/scan-runner');
 const { createFatalReporter, createLoadGuard, formatConsoleMessage } = require('./main/app-log');
 const { loadConfigFromDisk, readConfigFileResult } = require('./main/config-store');
 const { syncLoginItem } = require('./main/login-item');
-const { createAlertKeeper } = require('./main/live-alerts');
+const { createAlertKeeper, createPendingOpens } = require('./main/live-alerts');
 const { spoofedChromeVersion, normalizeUserAgent, applyClientHints } = require('./main/ua-spoof');
 const { createDashboardHealth } = require('./main/dashboard-health');
 const { sessionLengthMs, capLongestSessions } = require('./main/session-stats');
 const { existingDir, extensionPickerDir } = require('./main/dialog-dirs');
-const { runPageScript, runScriptWithin, createProbeGate } = require('./main/hidden-page');
+const { runPageScript, runScriptWithin, createProbeGate, settleWithin } = require('./main/hidden-page');
 const {
-  parseCookieBlob, planCookieWrites, shouldClearExisting, removalUrl,
-  isYouTubeCookieDomain, youtubeJarCookies, assignPastedYouTubeDomains, hasGoogleSessionCookies,
+  parseCookieBlob, planCookieWrites, applyCookiePlan, removalUrl,
+  isYouTubeCookieDomain, isCookieDomainOf, youtubeJarCookies, assignPastedYouTubeDomains, hasGoogleSessionCookies,
 } = require('./main/cookie-import');
 const {
   placeholderName, isPlaceholderName, sameAccountName, hasKickSessionToken, youtubeAuthFingerprint,
@@ -141,6 +141,9 @@ let dashboardReloadTimer = null;
 // Go-live toasts stay referenced until clicked, or their click would be lost
 // (see live-alerts.js).
 const liveAlerts = createAlertKeeper();
+// Streams whose toast was clicked while the dashboard was dead; opened when it
+// has loaded again (see live-alerts.js).
+const pendingAlertOpens = createPendingOpens();
 // Extension folders that were not reachable at the last load (an unmounted
 // drive). They stay in config.extensions; only the user removes an entry.
 const unavailableExtensions = new Set();
@@ -247,10 +250,12 @@ function readConfigFile(filePath) {
 
 // Load configuration, preferring config.json and falling back to the .bak copy
 // written by saveConfig. A damaged file is always preserved as
-// config.json.corrupt-<timestamp>. Defaults are written only when nothing is
-// on disk; a file that exists but cannot be read (locked by a backup or sync
-// tool, an unreachable drive) turns saving off instead, so it is never
-// overwritten (see config-store.js).
+// config.json.corrupt-<timestamp>.json, the timestamp being ISO 8601 with ':'
+// and '.' turned into '-' (config.json.corrupt-2026-09-27T14-03-11-123Z.json;
+// a damaged .bak becomes config.json.bak.corrupt-<timestamp>.json). Defaults
+// are written only when nothing is on disk; a file that exists but cannot be
+// read (locked by a backup or sync tool, an unreachable drive) turns saving
+// off instead, so it is never overwritten (see config-store.js).
 function loadConfig() {
   configLoadAttempted = true;
   try {
@@ -288,9 +293,11 @@ function loadConfig() {
       sanitizeIncomingConfig(config, 'config.json');
 
       // Longest sessions used to be wall-clock time, sleep included; one
-      // session can never exceed that streamer's total (see session-stats.js).
+      // session can never exceed that streamer's total, and the overall
+      // record never exceeds the largest per-streamer one (see
+      // session-stats.js).
       const repaired = capLongestSessions(config.watchTime);
-      if (repaired.length) addLog(`[Config] Corrected ${repaired.length} longest-session record(s) that exceeded the streamer's total watch time.`);
+      if (repaired.length) addLog(`[Config] Corrected ${repaired.length} longest-session record(s) that were longer than the watch time behind them.`);
 
       if (recovered) {
         addLog('[Config] Recovered configuration from config.json.bak — watch history and streamers are intact.');
@@ -383,6 +390,12 @@ function retryConfigLoad() {
     .catch((err) => reportFatal('loadExtensions', err))
     .then(() => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload();
+      // Every scan so far read the empty default list, so the reloaded cards
+      // would say 'Checking...' and no live 'auto' streamer would open until
+      // the next interval, up to an hour away. Fresh, not performScan: one
+      // already running is reading that empty list. What it opens reaches
+      // the reloaded page through get-active-containers.
+      requestScan();
     });
 }
 
@@ -439,17 +452,17 @@ function sanitizeIncomingConfig(cfg, source, alreadyDropped = []) {
   if (!dropped.length) return;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const salvagePath = `${getConfigPath()}.dropped-streamers-${stamp}.json`;
+  let salvageFile = null;
   try {
     fs.writeFileSync(salvagePath, JSON.stringify({ source, dropped }, null, 2), 'utf8');
-    addLog(`[Config] Set aside ${dropped.length} unusable monitored-streamer entr${dropped.length === 1 ? 'y' : 'ies'} from ${source}; preserved in ${path.basename(salvagePath)}.`);
+    salvageFile = path.basename(salvagePath);
+    addLog(`[Config] Set aside ${dropped.length} unusable monitored-streamer entr${dropped.length === 1 ? 'y' : 'ies'} from ${source}; preserved in ${salvageFile}.`);
   } catch (e) {
     addLog(`[Config] Could not preserve unusable streamer entries from ${source}: ${e.message}`);
   }
-  for (const d of dropped) {
-    let shown;
-    try { shown = JSON.stringify(d.entry); } catch (e) { shown = String(d.entry); }
-    addLog(`[Config] Skipped streamer entry (${d.reason}): ${String(shown).slice(0, 120)}`);
-  }
+  // Capped: an imported backup (F11) may hold any number of junk entries,
+  // and one addLog each flooded the activity log and stalled main.
+  for (const line of droppedStreamerLines(dropped, salvageFile)) addLog(line);
 }
 
 // Load a SINGLE extension into the live persist:default session so a freshly
@@ -621,11 +634,13 @@ function contentsRole(contents) {
 }
 
 const externalOpenGate = createExternalOpenGate();
-const securityLogThrottle = createLogThrottle();
+// At most 20 security lines a minute, however many distinct origins a page
+// cycles through; the rest are summed into one line when the minute ends.
+const securityLogThrottle = createLogThrottle({
+  maxPerMinute: 20,
+  onSuppressed: (n) => addLog(`[Security] ${n} more blocked event${n === 1 ? ' was' : 's were'} not logged (more than 20 in one minute).`),
+});
 const clipDownloads = createDownloadAllowlist();
-
-// Input that means the user asked for something, as opposed to a page script.
-const USER_GESTURE_INPUTS = new Set(['mouseDown', 'mouseUp', 'keyDown', 'rawKeyDown', 'char', 'gestureTap', 'touchEnd']);
 
 function logSecurityOnce(key, text) {
   if (securityLogThrottle.shouldLog(key)) addLog(`[Security] ${text}`);
@@ -675,10 +690,11 @@ function openExternallyIfClicked(contents, url, what) {
 }
 
 function handleWindowOpen(contents, { url }) {
-  // Kick's "Continue with Google / Apple" may need a real popup. Allow exactly
-  // those hosts, from a login window only; the child is sandboxed and closes
-  // with its opener.
-  if (contentsRole(contents) === 'login' && isOAuthPopupUrl(url)) {
+  // Kick's "Continue with Google / Apple" may need a real popup. Allow the
+  // sign-in hosts and the platforms' own redirect routes (isLoginPopupUrl),
+  // from a login window only; the child is sandboxed, keeps the 'login'
+  // allowlist and closes with its opener.
+  if (contentsRole(contents) === 'login' && isLoginPopupUrl(url)) {
     addLog(`[Auth] Allowed sign-in popup to ${originOf(url)}.`);
     return {
       action: 'allow',
@@ -708,14 +724,26 @@ function guardTopLevelNavigation(contents, url, how) {
 }
 
 app.on('web-contents-created', (event, contents) => {
-  // Three routes to the same fact (the user clicked or typed here), so gesture
-  // detection does not hinge on any one of them reaching a webview guest.
+  // Three routes to the same fact (the user clicked, or pressed Enter or
+  // Space, here), so gesture detection does not hinge on any one of them
+  // reaching a webview guest. Which input counts is isUserGestureInput.
   const noteGesture = (e, input) => {
-    if (input && USER_GESTURE_INPUTS.has(input.type)) externalOpenGate.noteGesture(contents);
+    if (isUserGestureInput(input)) externalOpenGate.noteGesture(contents);
   };
   contents.on('input-event', noteGesture);
   contents.on('before-mouse-event', noteGesture);
   contents.on('before-input-event', noteGesture);
+
+  // Web Bluetooth has no permission prompt to deny: requestDevice asks this
+  // event for a device, and a listener that does not preventDefault gets the
+  // first one found. Answered here with nothing, on every surface, so no page
+  // (a stream cell after one click included) can reach a nearby device
+  // whatever Electron's no-listener default is.
+  contents.on('select-bluetooth-device', (e, devices, callback) => {
+    e.preventDefault();
+    try { callback(''); } catch (err) { /* request already gone */ }
+    logSecurityOnce(`bt|${contentsRole(contents)}`, `Blocked a Bluetooth device request from a ${contentsRole(contents)} page.`);
+  });
 
   // Webviews keep allowpopups: without it a target=_blank link dies inside
   // Chromium before this handler runs and cannot be sent to the browser.
@@ -774,6 +802,19 @@ app.on('web-contents-created', (event, contents) => {
       try { if (!contents.isDestroyed()) contents.stop(); } catch (err) { /* already gone */ }
     });
     logSecurityOnce(`start|stream|${originOf(url)}`, `Stopped a stream page from loading ${originOf(url)}: stream cells only hold platform pages.`);
+  });
+
+  // Backstop for that deferred stop, which cannot recall a load Chromium has
+  // already handed to the renderer to commit. An off-platform document that
+  // commits in a stream surface anyway is torn down here, synchronously, so
+  // the embedder has no time to read it; the crash hands a cell to the
+  // dashboard's own recovery (C6). file: never gets this far: the stream
+  // partition refuses it outright (refuseFileLoadsOnStreamPartition).
+  // did-navigate is main-frame, cross-document and never an error page.
+  contents.on('did-navigate', (e, url) => {
+    if (!isBlockedStreamLoad(contentsRole(contents), { url, isMainFrame: true, isSameDocument: false })) return;
+    try { if (!contents.isDestroyed()) contents.forcefullyCrashRenderer(); } catch (err) { /* already gone */ }
+    logSecurityOnce(`commit|stream|${originOf(url)}`, `Closed a stream page that loaded ${originOf(url)} anyway: stream cells only hold platform pages.`);
   });
 
   // Any frame of a third-party page: web schemes only, so an iframe cannot be
@@ -875,6 +916,28 @@ function handleWillDownload(event, item, contents) {
 // Covers any session created later (a new partition, an extension's) too.
 app.on('session-created', lockDownSession);
 
+// Nothing on the stream partition has a reason to load file: (extensions are
+// served as chrome-extension:, and the dashboard and its one-time storage
+// import use the default session, which keeps file:). So every file: request
+// there is answered 403. The did-start-navigation stop cannot promise this: a
+// file: load needs no network round trip and can commit before the deferred
+// stop() runs, and a dashboard that loadURLs a cell onto
+// file:///C:/Users/<name>/... could then read the file back out of the guest.
+// Idempotent, for the startup-failure path.
+function refuseFileLoadsOnStreamPartition() {
+  const ses = session.fromPartition('persist:default');
+  // For file: (a built-in scheme) this asks whether it is intercepted.
+  if (ses.protocol.isProtocolHandled('file')) return;
+  ses.protocol.handle('file', () => new Response('', { status: 403 }));
+}
+
+// The window and tray icon. nativeImage decodes .ico only on Windows, so a
+// packaged Linux build given icon.ico got a blank tray slot and window icon;
+// both files ship in app.asar (build.files).
+function appIconPath() {
+  return path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+}
+
 // Create Main Dashboard Window
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -885,7 +948,7 @@ function createMainWindow() {
     frame: true,
     titleBarStyle: 'default',
     backgroundColor: '#09090b',
-    icon: path.join(__dirname, 'icon.ico'),
+    icon: appIconPath(),
     // Keep the player's fullscreen button contained: with the window not
     // fullscreenable, an HTML5 fullscreen request still expands the <webview>
     // to fill the app window, but Electron won't also throw the window into
@@ -952,6 +1015,12 @@ function createMainWindow() {
   // web-contents-created.)
   mainWindow.webContents.on('did-finish-load', () => {
     dashboardHealth.loaded();
+    // Go-live toasts clicked while it was down. spawnStreamContainer records
+    // each in activeWindows before it sends, so the renderer's
+    // get-active-containers restore has it whichever arrives first.
+    const clicked = pendingAlertOpens.take(Date.now());
+    for (const s of clicked.expired) addLog(`[Alerts] Not opening ${s.platform}:${s.username}: the dashboard took too long to come back after that alert was clicked.`);
+    for (const s of clicked.open) spawnStreamContainer(s.platform, s.username);
   });
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
@@ -1136,6 +1205,16 @@ function notifyGoLive(stream) {
         if (mainWindow.isMinimized()) mainWindow.restore();
         mainWindow.show();
         mainWindow.focus();
+        // Toasts keep coming while the dashboard is dead; this one would
+        // otherwise bring forward a blank window and open nothing.
+        reloadDeadDashboardOnShow();
+      }
+      // A dead dashboard refuses to open anything, and this toast is gone
+      // after the click: the stream opens once the reload has loaded.
+      if (!dashboardHealth.canOpenStreams) {
+        pendingAlertOpens.add(stream.platform, stream.username, Date.now());
+        addLog(`[Alerts] Will open ${stream.platform}:${stream.username} once the dashboard has reloaded.`);
+        return;
       }
       spawnStreamContainer(stream.platform, stream.username);
     });
@@ -1632,7 +1711,12 @@ async function doScan() {
 // Scans never overlap: an older scan finishing after a newer one used to
 // close a cell the newer one had just opened. A throw is logged instead of
 // surfacing as an unhandled rejection on every interval.
-const scanRunner = createSingleFlight(doScan, (err) => addLog(`[Scan] Scan failed: ${err && err.message}`));
+const scanRunner = createSingleFlight(doScan, (err) => {
+  addLog(`[Scan] Scan failed: ${err && err.message}`);
+  // Watch-time staleness is measured against scans that finished; this one
+  // finished confirming nothing (see stream-liveness.js).
+  streamLiveness.scanFailed(Date.now());
+});
 
 // Scheduled scans (interval, startup): join a scan already in progress.
 function performScan() {
@@ -1752,6 +1836,8 @@ app.whenReady().then(async () => {
   // here first; lockDownSession ignores a second call.
   lockDownSession(session.defaultSession);
   lockDownSession(session.fromPartition('persist:default'));
+  // Before any extension or cell can load on the stream partition.
+  refuseFileLoadsOnStreamPartition();
 
   // Spoof Sec-CH-UA client hints to match the spoofed User-Agent fingerprint.
   const clientHints = { major: SPOOF_CHROME.major, full: SPOOF_CHROME.full, platform: process.platform };
@@ -1829,6 +1915,8 @@ app.whenReady().then(async () => {
   try {
     if (!protocol.isProtocolHandled(DASHBOARD_SCHEME)) protocol.handle(DASHBOARD_SCHEME, createDashboardHandler(__dirname));
   } catch (e) { reportFatal('startup: dashboard protocol', e); }
+  // The window it opens embeds stream cells.
+  try { refuseFileLoadsOnStreamPartition(); } catch (e) { reportFatal('startup: stream partition file:', e); }
   if (!configLoadAttempted) loadConfig();
   try { installApplicationMenu(); } catch (e) { reportFatal('startup: menu', e); }
   startRuntime();
@@ -1920,19 +2008,21 @@ app.on('window-all-closed', () => {
 // System Tray
 function createTray() {
   try {
-    // icon.ico ships with the app (see build.files) and carries a real 16x16
-    // frame, which is what the Windows tray wants. This used to be
-    // createEmpty(), which is why the tray slot rendered blank while still
-    // showing the tooltip. Fall back to the PNG, then to an empty image, so a
-    // missing asset can never stop the tray (and its Quit item) from existing.
-    let icon = nativeImage.createFromPath(path.join(__dirname, 'icon.ico'));
+    // icon.ico (Windows) and icon.png (elsewhere) ship with the app (see
+    // build.files); the .ico carries a real 16x16 frame, which is what the
+    // Windows tray wants. This used to be createEmpty(), which is why the tray
+    // slot rendered blank while still showing the tooltip. Fall back to the
+    // PNG, then to an empty image, so a missing asset can never stop the tray
+    // (and its Quit item) from existing.
+    let icon = nativeImage.createFromPath(appIconPath());
     if (icon.isEmpty()) icon = nativeImage.createFromPath(path.join(__dirname, 'icon.png'));
     if (icon.isEmpty()) {
       addLog('[Tray] Could not load icon.ico/icon.png — tray icon will be blank.');
       icon = nativeImage.createEmpty();
-    } else {
+    } else if (process.platform !== 'linux') {
       // Windows picks the nearest frame, but an explicit 16x16 avoids a blurry
-      // downscale from the 256x256 frame on some DPI settings.
+      // downscale from the 256x256 frame on some DPI settings. Not on Linux:
+      // an AppIndicator wants 22-24 px and would upscale a 16 px image.
       const small = icon.resize({ width: 16, height: 16 });
       if (!small.isEmpty()) icon = small;
     }
@@ -2181,12 +2271,15 @@ async function readYouTubeAuthCookies(ses = session.fromPartition('persist:defau
 async function refreshPlaceholderAccountNames() {
   if (!config.accounts) return;
   if (config.accounts.kick && isPlaceholderName(config.accounts.kick) && config.kickEnabled !== false) {
+    // Before the first await: a Sign Out during the cookie read would
+    // otherwise be snapshotted as the starting state (no account), and any
+    // name the probe then found would bring the signed-out account back.
+    const snap = accountEpochs.snapshot('kick', config.accounts);
     // No session_token means no account to name, only a hidden kick.com load
     // on every launch (validateSavedSessions clears such a placeholder).
     let signedIn = false;
     try { signedIn = hasKickSessionToken(await readKickSessionCookies()); } catch (e) { /* treat as unknown */ }
-    if (!signedIn) return;
-    const snap = accountEpochs.snapshot('kick', config.accounts);
+    if (!signedIn || !accountEpochs.isCurrent(snap, config.accounts)) return;
     const found = await kickNameProbe.run();
     // Signed out, or connected again by an import, while the page loaded.
     if (!accountEpochs.isCurrent(snap, config.accounts)) return;
@@ -3786,7 +3879,7 @@ ipcMain.handle('set-twitch-token', async (event, rawInput) => {
       try {
         const existing = await ses.cookies.get({ name: p.name });
         for (const c of existing) {
-          if (!/twitch\.tv$/i.test(c.domain.replace(/^\./, ''))) continue;
+          if (!isCookieDomainOf(c.domain, 'twitch.tv')) continue;
           const scheme = c.secure ? 'https' : 'http';
           const host = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
           await ses.cookies.remove(`${scheme}://${host}${c.path || '/'}`, p.name);
@@ -3826,7 +3919,21 @@ ipcMain.handle('set-twitch-token', async (event, rawInput) => {
 // Parsed by cookie-import.js, then the same path as the extension's import:
 // same filter, same writer, and the answer comes from a real YouTube page
 // instead of a bare fetch (which reports signed-out for live sessions).
+//
+// A paste only turns the extension's re-sync off once it has succeeded, which
+// is after its writes and a probe page of up to 45 s. A re-sync running or
+// arriving meanwhile would write the browser's Google session over the pasted
+// one, and the card would then name the paste's account over the browser's
+// cookies. So while a paste runs, automatic YouTube imports are refused
+// (autoImportTicket), and one already running loses its ticket before the
+// paste copies or writes the jar (importGoogleSession). writeCookieList asks
+// that ticket before every cookie it removes or sets, so the re-sync stops at
+// its next cookie instead of interleaving the rest of its writes with the
+// paste's. Nothing is persisted: a paste that fails leaves re-sync as it was.
+let youtubePastesRunning = 0;
+
 ipcMain.handle('set-google-cookies', async (event, blob) => {
+  youtubePastesRunning++;
   try {
     const parsed = assignPastedYouTubeDomains(parseCookieBlob(blob));
     const result = await importGoogleSession(parsed, { paste: true });
@@ -3837,6 +3944,8 @@ ipcMain.handle('set-google-cookies', async (event, blob) => {
   } catch (err) {
     addLog(`[Auth] Google cookie import failed: ${err.message}`);
     return { success: false, error: err.message };
+  } finally {
+    youtubePastesRunning--;
   }
 });
 
@@ -3852,27 +3961,19 @@ ipcMain.handle('set-google-cookies', async (event, blob) => {
 // which existing same-named cookies go first (Chromium blocks a JS-readable
 // cookie from overwriting an httpOnly one). All clearing happens before the
 // first write, so one import never deletes a cookie it just wrote.
-async function writeCookieList(cookieList, defaultDomain) {
+// stillValid: an automatic import's ticket.valid. It is asked before every
+// cookie is removed or set (applyCookiePlan), so a re-sync ended mid-write
+// stops there instead of finishing on top of a paste or a login made in the
+// app; the importer's check right after then undoes it. Returns how many
+// cookies were set.
+async function writeCookieList(cookieList, defaultDomain, { stillValid } = {}) {
   const ses = session.fromPartition('persist:default');
   const plan = planCookieWrites(cookieList, { defaultDomain });
-  for (const name of plan.clear.keys()) {
-    try {
-      const existing = await ses.cookies.get({ name });
-      for (const ex of existing) {
-        if (shouldClearExisting(ex, plan)) await ses.cookies.remove(removalUrl(ex), name);
-      }
-    } catch (e) {}
-  }
-  let count = 0;
-  for (const details of plan.writes) {
-    try {
-      await ses.cookies.set(details);
-      count++;
-    } catch (e) {
-      addLog(`[Ext] Could not set cookie ${details.name}: ${e.message}`);
-    }
-  }
-  return count;
+  const { set } = await applyCookiePlan(plan, ses.cookies, {
+    stillValid,
+    onSetError: (details, e) => addLog(`[Ext] Could not set cookie ${details.name}: ${e.message}`),
+  });
+  return set;
 }
 
 // Every cookie on the hosts a YouTube import writes to (see youtubeJarCookies).
@@ -3941,12 +4042,24 @@ function resolveTwitchUser(token) {
   return resolveTwitchUserVia(token, { fetch: net.fetch, clientId: TWITCH_PUBLIC_CLIENT_ID, userAgent: normalizedUserAgent });
 }
 
+// How long an automatic import waits for its account-name probe before it
+// answers. The extension gives up on an automatic import after 25 s
+// (extension/connector.js AUTO_IMPORT_TIMEOUT_MS, under Chrome's 30 s service
+// worker limit), while a probe page may take HIDDEN_PAGE_DEADLINE_MS (45 s)
+// on a slow network. Past this the import answers with what it has and
+// applies the probe's answer when it arrives, so the extension never records
+// "did not answer in time" for a sync the app applied. 15 s leaves the rest
+// of the 25 s for the cookie writes before it.
+const AUTO_IMPORT_PROBE_BUDGET_MS = 15000;
+
 // Import functions used by the extension receiver. Each takes an array of cookie
 // objects (as returned by chrome.cookies.getAll) for that platform.
 async function importTwitchSession(cookieList, opts = {}) {
   const ticket = autoImportTicket('twitch', opts);
   const list = (cookieList || [])
-    .filter(c => c && c.name && /(^|\.)twitch\.tv$/.test((c.domain || '').replace(/^\./, '')))
+    // A real hostname within twitch.tv; a suffix match alone let
+    // 'evil.com?.twitch.tv' through (see isCookieDomainOf).
+    .filter(c => c && c.name && isCookieDomainOf(c.domain, 'twitch.tv'))
     .map(c => ({ ...c, httpOnly: c.name.toLowerCase() === 'auth-token' ? false : !!c.httpOnly }));
   const token = list.find(c => c.name.toLowerCase() === 'auth-token')?.value || '';
   if (!/^[a-z0-9]{20,60}$/i.test(token)) return { success: false, error: 'No Twitch auth-token found in the cookies. Are you logged in on twitch.tv?' };
@@ -3964,7 +4077,7 @@ async function importTwitchSession(cookieList, opts = {}) {
   if (!list.some(c => c.name.toLowerCase() === 'login')) {
     list.push({ name: 'login', value: username, domain: '.twitch.tv', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' });
   }
-  const setCount = await writeCookieList(list, '.twitch.tv');
+  const setCount = await writeCookieList(list, '.twitch.tv', { stillValid: ticket.valid });
   if (!ticket.valid()) return ticket.undo();
   config.accounts = config.accounts || {};
   const previous = config.accounts.twitch;
@@ -3999,6 +4112,12 @@ async function importGoogleSession(cookieList, opts = {}) {
       : 'Missing the Google sign-in session cookies (e.g. __Secure-1PSID/SID).' };
   }
   if (!ticket.valid()) return ticket.refuse();
+  // Ends an automatic re-sync already running, before this paste copies the
+  // jar or writes to it: it stops at its next cookie remove or set
+  // (writeCookieList) and returns through ticket.undo() without touching the
+  // account (see set-google-cookies). A paste's own ticket is never
+  // automatic, so it stays valid.
+  if (opts.paste) syncTickets.bump('youtube');
   // A paste YouTube then rejects must not leave the user worse off: the jar
   // it is about to change is kept here and put back (restorePastedOver).
   // null when it could not be read.
@@ -4008,7 +4127,7 @@ async function importGoogleSession(cookieList, opts = {}) {
   }
   const markerBefore = config.youtubeExpiredFingerprint;
   accountEpochs.bump('youtube');
-  const setCount = await writeCookieList(relevant, '.youtube.com');
+  const setCount = await writeCookieList(relevant, '.youtube.com', { stillValid: ticket.valid });
   if (!ticket.valid()) return ticket.undo();
   if (!setCount) {
     // The same-named cookies were cleared before the writes failed.
@@ -4026,11 +4145,16 @@ async function importGoogleSession(cookieList, opts = {}) {
   // The account name only exists inside a loaded YouTube page. Skip the page
   // load on routine re-syncs where we already have a real name. fresh(): a
   // probe that loaded before these cookies were written would describe the
-  // old session.
+  // old session. A re-sync waits for it only AUTO_IMPORT_PROBE_BUDGET_MS and
+  // then answers; a later verdict is applied by applyLateYouTubeProbe.
   let probe = null;
+  let lateProbe = null;
   if (opts.paste || !opts.auto || isPlaceholderName(config.accounts.youtube)) {
-    probe = await youtubeProbe.fresh();
+    const pending = youtubeProbe.fresh();
+    const answer = opts.auto ? await settleWithin(pending, AUTO_IMPORT_PROBE_BUDGET_MS) : { settled: true, value: await pending };
     if (!ticket.valid()) return ticket.undo();
+    if (answer.settled) probe = answer.value;
+    else lateProbe = pending;
   }
   // A real page says these cookies are signed out. A paste must not report
   // success, and a background re-sync must not bring back an account the
@@ -4057,17 +4181,72 @@ async function importGoogleSession(cookieList, opts = {}) {
   }
   const previous = config.accounts.youtube;
   if (probe) config.accounts.youtube = probe.name || config.accounts.youtube || placeholderName('youtube');
-  if (!config.accounts.youtube) config.accounts.youtube = placeholderName('youtube');
+  // No account and no verdict in time: connecting now could bring back an
+  // account YouTube reports signed out (the case above). It is connected, or
+  // left disconnected, once the verdict arrives (applyLateYouTubeProbe).
+  const awaitingVerdict = !!lateProbe && !config.accounts.youtube;
+  if (!config.accounts.youtube && !awaitingVerdict) config.accounts.youtube = placeholderName('youtube');
 
   saveConfig();
   // A routine re-sync loads no page and so cannot tell who the cookies belong
   // to; the periodic health check compares the name (runYouTubeSessionHealthCheck).
   if (!opts.auto || !sameAccountName(previous, config.accounts.youtube)) notifyLoginSuccess('youtube', config.accounts.youtube);
   const how = opts.paste ? 'Imported pasted' : (opts.auto ? 'Re-synced' : 'Imported');
-  addLog(`[${opts.paste ? 'Auth' : 'Ext'}] ${how} Google/YouTube session as ${config.accounts.youtube} (${setCount}/${relevant.length} cookies${probe ? `, YouTube reports ${probe.state}` : ''}).`);
+  if (awaitingVerdict) {
+    addLog(`[Ext] Re-synced ${setCount}/${relevant.length} Google/YouTube cookies; YouTube is still checking them, and the account connects once it reports them signed in.`);
+  } else {
+    addLog(`[${opts.paste ? 'Auth' : 'Ext'}] ${how} Google/YouTube session as ${config.accounts.youtube} (${setCount}/${relevant.length} cookies${probe ? `, YouTube reports ${probe.state}` : ''}${lateProbe ? ', account name still being looked up' : ''}).`);
+  }
+  if (lateProbe) applyLateYouTubeProbe(lateProbe, ticket, setCount);
   const result = { success: true, username: config.accounts.youtube, cookiesSet: setCount };
   if (probe) result.verified = probe.state === 'live';
   return result;
+}
+
+// The verdict of a YouTube probe that outlived an automatic import's answer
+// (AUTO_IMPORT_PROBE_BUDGET_MS), applied as the import would have applied it
+// in time: a name for the placeholder it kept; for an account it had not
+// connected, connected on 'live' or 'unknown' and left disconnected with the
+// expiry marker on 'signed-out'. Dropped if YouTube was signed in or out, or
+// re-synced again, meanwhile (the import's ticket and the account epoch).
+function applyLateYouTubeProbe(pending, ticket, setCount) {
+  const snap = accountEpochs.snapshot('youtube', config.accounts);
+  const stale = () => !ticket.valid() || !accountEpochs.isCurrent(snap, config.accounts);
+  // A probe that threw reads as inconclusive, as it does in time (settleWithin).
+  pending.catch(() => null).then(async (probe) => {
+    if (stale()) {
+      addLog('[Ext] The YouTube account changed while a re-sync was still checking it; ignoring that check.');
+      return;
+    }
+    const state = probe ? probe.state : 'unknown';
+    const name = probe && probe.name ? probe.name : null;
+    if (snap.name) {
+      if (!name || name === snap.name) return;
+      config.accounts.youtube = name;
+      saveConfig();
+      if (!sameAccountName(snap.name, name)) notifyLoginSuccess('youtube', name);
+      addLog(`[Ext] Resolved the re-synced YouTube account name: ${name}`);
+      return;
+    }
+    if (state === 'signed-out') {
+      let fingerprint = null;
+      try { fingerprint = youtubeAuthFingerprint(await readYouTubeAuthCookies()); } catch (e) { /* no marker */ }
+      if (stale()) return;
+      if (fingerprint) config.youtubeExpiredFingerprint = fingerprint;
+      saveConfig();
+      addLog(`[Ext] Wrote ${setCount} Google/YouTube cookies, but YouTube shows them signed out; not connecting the account.`);
+      // What Platform Logins shows for the last re-sync: the answer the
+      // extension got was sent before this verdict.
+      recordAutoSync({ platform: 'youtube', ok: false, error: 'YouTube shows this session as signed out in Stream Lurker, so YouTube stays disconnected. Sign in again on youtube.com, then click Connect YouTube.' });
+      return;
+    }
+    config.accounts = config.accounts || {};
+    config.accounts.youtube = name || placeholderName('youtube');
+    accountEpochs.bump('youtube');
+    saveConfig();
+    notifyLoginSuccess('youtube', config.accounts.youtube);
+    addLog(`[Ext] Re-synced Google/YouTube session connected as ${config.accounts.youtube} (YouTube reports ${state}).`);
+  }).catch((err) => addLog(`[Ext] Could not apply the YouTube check of a re-sync: ${err && err.message}`));
 }
 
 // How often a background Kick re-sync (every 30 minutes) may spend a hidden
@@ -4078,7 +4257,8 @@ let kickNameCheckedAt = 0;
 
 async function importKickSession(cookieList, opts = {}) {
   const ticket = autoImportTicket('kick', opts);
-  const relevant = (cookieList || []).filter(c => /(^|\.)kick\.com$/.test((c.domain || '').replace(/^\./, '').toLowerCase()));
+  // A real hostname within kick.com (see isCookieDomainOf).
+  const relevant = (cookieList || []).filter(c => c && isCookieDomainOf(c.domain, 'kick.com'));
   if (!relevant.length) return { success: false, error: 'No kick.com cookies found. Open kick.com (logged in) first.' };
   // Checked before anything is written. Without session_token the browser is
   // signed out of Kick (kick_session is a visitor cookie), and writing its
@@ -4092,7 +4272,7 @@ async function importKickSession(cookieList, opts = {}) {
   }
   if (!ticket.valid()) return ticket.refuse();
   accountEpochs.bump('kick');
-  const setCount = await writeCookieList(relevant, '.kick.com');
+  const setCount = await writeCookieList(relevant, '.kick.com', { stillValid: ticket.valid });
   if (!ticket.valid()) return ticket.undo();
   config.accounts = config.accounts || {};
   const previous = config.accounts.kick;
@@ -4101,16 +4281,26 @@ async function importKickSession(cookieList, opts = {}) {
   // a real connect, when we still don't have a proper name, and now and then
   // on a re-sync, which can swap in another account's session unnoticed.
   // (Comparing cookie values cannot tell: Kick rotates them on every request.)
+  // A re-sync waits for the lookup only AUTO_IMPORT_PROBE_BUDGET_MS, then
+  // answers under the name it has; a later answer is applied by
+  // applyLateKickName.
   const recheck = opts.auto && Date.now() - kickNameCheckedAt >= KICK_NAME_RECHECK_MS;
+  let lateLookup = null;
   if (!opts.auto || isPlaceholderName(config.accounts.kick) || recheck) {
-    const found = await kickNameProbe.fresh();
-    kickNameCheckedAt = Date.now();
+    const lookup = kickNameProbe.fresh();
+    const answer = opts.auto ? await settleWithin(lookup, AUTO_IMPORT_PROBE_BUDGET_MS) : { settled: true, value: await lookup };
+    if (answer.settled) kickNameCheckedAt = Date.now();
     if (!ticket.valid()) return ticket.undo();
-    // A name read off the page (not Kick's API) never replaces a real one:
-    // with a stale session it is a featured streamer's.
-    const resolved = kickNameToStore(config.accounts.kick, found);
-    if (resolved) config.accounts.kick = resolved;
-    else if (!config.accounts.kick) config.accounts.kick = placeholderName('kick');
+    if (answer.settled) {
+      const found = answer.value;
+      // A name read off the page (not Kick's API) never replaces a real one:
+      // with a stale session it is a featured streamer's.
+      const resolved = kickNameToStore(config.accounts.kick, found);
+      if (resolved) config.accounts.kick = resolved;
+      else if (!config.accounts.kick) config.accounts.kick = placeholderName('kick');
+    } else {
+      lateLookup = lookup;
+    }
   }
   if (!config.accounts.kick) config.accounts.kick = placeholderName('kick');
 
@@ -4119,8 +4309,33 @@ async function importKickSession(cookieList, opts = {}) {
   if (opts.auto && previous && !isPlaceholderName(previous) && !sameAccountName(previous, config.accounts.kick)) {
     addLog(`[Ext] The Kick account changed from ${previous} to ${config.accounts.kick} with a background re-sync from the browser extension.`);
   }
-  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Kick session as ${config.accounts.kick} (${setCount} cookies).`);
+  addLog(`[Ext] ${opts.auto ? 'Re-synced' : 'Imported'} Kick session as ${config.accounts.kick} (${setCount} cookies${lateLookup ? ', account name still being looked up' : ''}).`);
+  if (lateLookup) applyLateKickName(lateLookup, ticket);
   return { success: true, username: config.accounts.kick, cookiesSet: setCount };
+}
+
+// A Kick name lookup that outlived an automatic import's answer
+// (AUTO_IMPORT_PROBE_BUDGET_MS), applied by the same rule as one that answered
+// in time (kickNameToStore). Dropped if Kick was signed in or out, or
+// re-synced again, meanwhile (the import's ticket and the account epoch).
+function applyLateKickName(lookup, ticket) {
+  const snap = accountEpochs.snapshot('kick', config.accounts);
+  lookup.then((found) => {
+    kickNameCheckedAt = Date.now();
+    if (!ticket.valid() || !accountEpochs.isCurrent(snap, config.accounts)) {
+      addLog('[Ext] The Kick account changed while a re-sync was still looking up its name; ignoring that lookup.');
+      return;
+    }
+    const resolved = kickNameToStore(snap.name, found);
+    if (!resolved || resolved === snap.name) return;
+    config.accounts.kick = resolved;
+    saveConfig();
+    if (sameAccountName(snap.name, resolved)) return;
+    notifyLoginSuccess('kick', resolved);
+    addLog(isPlaceholderName(snap.name)
+      ? `[Ext] Resolved the re-synced Kick account name: ${resolved}`
+      : `[Ext] The Kick account changed from ${snap.name} to ${resolved} with a background re-sync from the browser extension.`);
+  }, () => { kickNameCheckedAt = Date.now(); }).catch((err) => addLog(`[Ext] Could not apply the Kick name lookup of a re-sync: ${err && err.message}`));
 }
 
 // Stable pairing code (persisted) the extension must present to import cookies,
@@ -4171,7 +4386,10 @@ const syncTickets = createSyncTickets();
 function autoImportTicket(platform, opts) {
   const ticket = syncTickets.take(platform, {
     auto: !!(opts && opts.auto),
-    isBlocked: (p) => isSignedOutIn(config.signedOutPlatforms, p),
+    // A YouTube paste in progress holds re-sync off until it has its answer
+    // (see set-google-cookies); checked on every valid(), so it also stops a
+    // re-sync that was already past its first check.
+    isBlocked: (p) => isSignedOutIn(config.signedOutPlatforms, p) || (p === 'youtube' && youtubePastesRunning > 0),
   });
   // SIGNED_OUT only while re-sync is still off: had the user already clicked
   // Connect in the extension again, it would make the extension drop the

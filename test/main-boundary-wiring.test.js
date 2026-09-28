@@ -90,21 +90,87 @@ test('F53 item 4: an automatic import checks its ticket before writing, and agai
     const src = block(fn);
     assert.match(src, new RegExp(`const ticket = autoImportTicket\\('${p}', opts\\);`), fn);
     assert.ok(before(src, 'if (!ticket.valid()) return ticket.refuse();', 'await writeCookieList('), `${fn} checks before writing`);
+    // r4-2: and before every cookie it removes or sets, so one ended mid-write
+    // stops there instead of interleaving with a paste or an in-app login.
+    assert.match(src, /await writeCookieList\([^;]*, \{ stillValid: ticket\.valid \}\);/, `${fn} hands its ticket to the writes`);
     const write = src.indexOf('await writeCookieList(');
     const after = src.indexOf('if (!ticket.valid()) return ticket.undo();', write);
     assert.ok(after > write, `${fn} checks after writing`);
     assert.ok(after < src.indexOf('config.accounts = config.accounts || {};', write) || src.indexOf('config.accounts = config.accounts || {};', write) < 0, `${fn} before touching the account`);
-    // Every await between the write and the account assignment is followed by a check.
-    for (const probe of ['await youtubeProbe.fresh();', 'await kickNameProbe.fresh();']) {
+    // Every await between the write and the account assignment is followed by
+    // a check: the account-name probe, awaited whole or within the budget.
+    for (const probe of ['await settleWithin(', 'await pending', 'await lookup', 'await youtubeProbe.fresh()', 'await kickNameProbe.fresh()']) {
       const at = src.indexOf(probe);
       if (at < 0) continue;
       assert.ok(src.indexOf('if (!ticket.valid()) return ticket.undo();', at) > at, `${fn}: ${probe}`);
     }
   }
+  // writeCookieList runs the tested loop (main-cookie-import, r4-2) with it.
+  const writer = block('async function writeCookieList(');
+  assert.match(writer, /^async function writeCookieList\(cookieList, defaultDomain, \{ stillValid \} = \{\}\) \{/);
+  assert.match(writer, /await applyCookiePlan\(plan, ses\.cookies, \{\s*stillValid,/);
+  assert.doesNotMatch(writer, /ses\.cookies\.(remove|set)\(/, 'no write outside the checked loop');
+  // The probes are awaited somewhere; a rename of the pattern must not skip the loop above.
+  assert.match(block('async function importGoogleSession('), /await settleWithin\(pending, AUTO_IMPORT_PROBE_BUDGET_MS\)/);
+  assert.match(block('async function importKickSession('), /await settleWithin\(lookup, AUTO_IMPORT_PROBE_BUDGET_MS\)/);
   const ticket = block('function autoImportTicket(');
   assert.match(ticket, /=== 'signed-out'\) \{\s*try \{\s*await purgePlatformCookies\(platform, \{ quiet: true \}\);/);
   // SIGNED_OUT (the extension drops the platform) only while re-sync is off.
   assert.match(ticket, /return reason\s*\? \{ success: false, code: 'SIGNED_OUT', error: autoSyncRefusalFor\(reason\) \}\s*: \{ success: false, error:/);
+});
+
+test('r2-7: a YouTube paste holds re-sync off while it runs, and ends one already running before it writes', () => {
+  const paste = block("ipcMain.handle('set-google-cookies'");
+  assert.ok(before(paste, 'youtubePastesRunning++;', 'await importGoogleSession('), 'held off before the import starts');
+  assert.match(paste, /\} finally \{\s*youtubePastesRunning--;\s*\}/, 'released on every path, a throw included');
+  // A successful paste turns re-sync off for good before the hold is released.
+  assert.ok(before(paste, "setSignedOut('youtube', true, 'app-login');", 'youtubePastesRunning--;'));
+  const google = block('async function importGoogleSession(');
+  const bump = google.indexOf("if (opts.paste) syncTickets.bump('youtube');");
+  assert.ok(bump > google.indexOf('if (!ticket.valid()) return ticket.refuse();'), 'once the paste has proved usable');
+  assert.ok(bump < google.indexOf('jarBefore = await readYouTubeJar()'), 'before the jar is copied');
+  assert.ok(bump < google.indexOf('await writeCookieList('), 'before the paste writes');
+  // Checked on every valid(), so a re-sync already past its first check stops too.
+  assert.match(block('function autoImportTicket('), /isBlocked: \(p\) => isSignedOutIn\(config\.signedOutPlatforms, p\) \|\| \(p === 'youtube' && youtubePastesRunning > 0\),/);
+});
+
+test('r2-17: an automatic import answers within its budget and applies a late probe under the same checks', () => {
+  // The budget sits below what the extension waits, with room for the writes.
+  const connector = fs.readFileSync(path.join(REPO, 'extension', 'connector.js'), 'utf8');
+  const extensionTimeout = Number((connector.match(/AUTO_IMPORT_TIMEOUT_MS = (\d+)/) || [])[1]);
+  const budget = Number((mainJs.match(/const AUTO_IMPORT_PROBE_BUDGET_MS = (\d+);/) || [])[1]);
+  assert.ok(extensionTimeout > 0 && budget > 0, 'both constants found');
+  assert.ok(budget + 5000 <= extensionTimeout, `a ${budget} ms budget leaves 5 s of the extension's ${extensionTimeout} ms for the cookie writes`);
+  // Only an automatic import takes the budget: a click or a paste waits for the page.
+  for (const [fn, p] of [['async function importGoogleSession(', 'pending'], ['async function importKickSession(', 'lookup']]) {
+    assert.match(block(fn), new RegExp(`const answer = opts\\.auto \\? await settleWithin\\(${p}, AUTO_IMPORT_PROBE_BUDGET_MS\\) : \\{ settled: true, value: await ${p} \\};`), fn);
+  }
+  const google = block('async function importGoogleSession(');
+  assert.match(google, /if \(answer\.settled\) probe = answer\.value;\s*else lateProbe = pending;/);
+  // No account and no verdict yet: connected only once the verdict says so.
+  assert.match(google, /const awaitingVerdict = !!lateProbe && !config\.accounts\.youtube;\s*if \(!config\.accounts\.youtube && !awaitingVerdict\) config\.accounts\.youtube = placeholderName\('youtube'\);/);
+  const handOff = google.indexOf('if (lateProbe) applyLateYouTubeProbe(lateProbe, ticket, setCount);');
+  assert.ok(handOff > google.lastIndexOf('saveConfig();'), 'handed off after the import saved its own state');
+  const kick = block('async function importKickSession(');
+  assert.match(kick, /\} else \{\s*lateLookup = lookup;\s*\}/);
+  const kickHandOff = kick.indexOf('if (lateLookup) applyLateKickName(lateLookup, ticket);');
+  assert.ok(kickHandOff > kick.lastIndexOf('saveConfig();'));
+  // A late answer is dropped after a sign-in, a sign-out or another re-sync.
+  for (const fn of ['function applyLateYouTubeProbe(', 'function applyLateKickName(']) {
+    const late = block(fn);
+    const snapAt = late.indexOf('accountEpochs.snapshot(');
+    assert.ok(snapAt > 0 && snapAt < late.indexOf('.then('), `${fn} snapshots before it waits`);
+    assert.match(late, /!ticket\.valid\(\) \|\| !accountEpochs\.isCurrent\(snap, config\.accounts\)/, fn);
+    assert.match(late, /\.catch\(\(err\) => addLog\(/, `${fn} leaves no unhandled rejection`);
+  }
+  const lateYt = block('function applyLateYouTubeProbe(');
+  // The in-time verdicts: signed out keeps it disconnected, with the marker,
+  // re-checked after its own await.
+  const signedOut = lateYt.slice(lateYt.indexOf("if (state === 'signed-out') {"));
+  assert.ok(before(signedOut, 'await readYouTubeAuthCookies()', 'if (stale()) return;'));
+  assert.ok(before(signedOut, 'if (stale()) return;', 'config.youtubeExpiredFingerprint = fingerprint;'));
+  assert.ok(signedOut.indexOf('return;') < signedOut.indexOf("config.accounts.youtube = name || placeholderName('youtube');"), 'never connected after a signed-out verdict');
+  assert.match(block('function applyLateKickName('), /const resolved = kickNameToStore\(snap\.name, found\);/);
 });
 
 test('F96: automatic re-sync results reach Platform Logins and the log, rate-limited', () => {

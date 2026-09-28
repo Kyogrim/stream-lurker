@@ -208,6 +208,12 @@ function setupAddExtensionButton() {
   });
 }
 
+// True from the moment the backend listeners exist until restoreOpenStreamTabs
+// has run. Stream opens and closes that land in between go into the grid but
+// are not synced: a sync then would send main a list without the streams still
+// to be restored, and main would end their sessions.
+let restoringStreams = true;
+
 // Re-create grid cells for containers the main process still considers open.
 // Runs on every dashboard load, so after a manual refresh or an automatic
 // crash-recovery reload the grid matches what main is tracking (and still
@@ -236,6 +242,7 @@ function restoreOpenStreamTabs() {
       }
     }
   } finally {
+    restoringStreams = false;
     syncActiveTabs();
   }
 }
@@ -265,9 +272,9 @@ function setupBackendListeners() {
     renderLiveNow();
   });
 
-  window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username));
-  window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username));
-  window.api.onCloseAllStreamTabs(() => closeAllStreamTabs());
+  window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username, { sync: !restoringStreams }));
+  window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username, { sync: !restoringStreams }));
+  window.api.onCloseAllStreamTabs(() => closeAllStreamTabs({ sync: !restoringStreams }));
   // Sent whenever the loaded extensions changed, including a folder that was
   // unreachable at startup loading late: its "Unavailable" badge goes too.
   window.api.onReloadStreamContainers(() => {
@@ -364,6 +371,34 @@ async function init() {
   // early open-stream-tab already created.
   initStep('Login portal listeners', setupLoginPortalListeners);
   initStep('Backend listeners', setupBackendListeners);
+  // Read again now that open-stream-tab has a listener. One main sent during
+  // the awaits above (a scan finishing while a crashed dashboard reloads) went
+  // to nobody, and restoring from the first answer would then report that
+  // stream closed: main ends its session and won't reopen it this broadcast.
+  // Main changes this list in the same synchronous step that sends an open or
+  // close, so events that reach the listeners before this answer are already
+  // reflected in it (and are held back from main until the restore syncs).
+  try {
+    const open = await window.api.getActiveContainers();
+    if (Array.isArray(open)) state.activeContainers = open;
+  } catch (err) {
+    reportInitFailure('Refreshing open streams', err);
+  }
+  // The same for the scan results: a scan that finished after the first read
+  // (the first one runs 3 s after startup) sent its status-update to nobody,
+  // and the cards would stay "Checking..." until the next scan, up to an hour
+  // away. Main stores the results before it sends them, so this answer is
+  // never older than a status-update the listener has already applied.
+  try {
+    const again = await window.api.getStatuses();
+    if (Array.isArray(again)) state.currentStatuses = again;
+  } catch (err) {
+    reportInitFailure('Refreshing the last scan results', err);
+  }
+  // Redrawn from both fresh reads; restored cells and Live Now follow below.
+  initStep('Monitor grid', renderStreamsGrid);
+  initStep('Stats', updateStats);
+  initStep('Stream cell details', refreshGridCellMeta);
   initStep('Restoring open streams', restoreOpenStreamTabs);
   initStep('Live Now count', renderLiveNow);
   initStep('Points poller', startPointsPoller);

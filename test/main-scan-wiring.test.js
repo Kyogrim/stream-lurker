@@ -74,6 +74,15 @@ test('F66/G2.2: every config entry point is sanitized before it is used or saved
   assert.match(block('function sanitizeIncomingConfig('), /dropped-streamers-/);
 });
 
+test('r4-3: dropped streamer entries reach the activity log through the capped helper only', () => {
+  const sanitize = block('function sanitizeIncomingConfig(');
+  assert.match(sanitize, /for \(const line of droppedStreamerLines\(dropped, salvageFile\)\) addLog\(line\);/);
+  assert.doesNotMatch(sanitize, /for \(const d of dropped\)/, 'no line per entry');
+  assert.equal((sanitize.match(/addLog\(/g) || []).length, 4, 'the clamp lines, the salvage line or its failure, and the capped list');
+  // The salvage file is only named once it was written.
+  assert.ok(sanitize.indexOf("fs.writeFileSync(salvagePath") < sanitize.indexOf('salvageFile = path.basename(salvagePath);'));
+});
+
 test('G4.6: watch time is credited only when liveness allows, and sessions end at the last confirmation', () => {
   const ticker = block('function startWatchTimeTracking(');
   const gate = ticker.indexOf('streamLiveness.credit(key');
@@ -84,6 +93,13 @@ test('G4.6: watch time is credited only when liveness allows, and sessions end a
   const tabs = block("ipcMain.handle('update-active-tabs'");
   assert.match(tabs, /streamLiveness\.forget\(key\)/);
   assert.match(tabs, /if \(!activeWindows\.has\(t\)\) streamLiveness\.start\(t/);
+});
+
+test('issue-2: a scan that throws counts as a finished scan that confirmed nothing', () => {
+  // Staleness is measured against finished scans; one that throws before
+  // applyScanResults would otherwise leave every open cell credited forever.
+  const failed = block('const scanRunner = createSingleFlight(doScan,');
+  assert.match(failed, /\(err\) => \{[\s\S]*streamLiveness\.scanFailed\(Date\.now\(\)\);/);
 });
 
 test('F65: the Helix token is keyed to the credentials and built with URLSearchParams', () => {

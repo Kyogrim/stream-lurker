@@ -1,10 +1,11 @@
 // Gate tests for main/live-alerts.js (F28): a go-live toast stays referenced
 // until it is clicked or fails, survives 'close' (the Windows timeout into
-// Action Center), and the set is bounded for weeks-long runs. Run: npm test
+// Action Center), and the set is bounded for weeks-long runs. A toast clicked
+// while the dashboard is down is opened once it loads (issue-3). Run: npm test
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { ALERT_TTL_MS, MAX_ALERTS, createAlertKeeper } = require('../main/live-alerts');
+const { ALERT_TTL_MS, MAX_ALERTS, PENDING_OPEN_TTL_MS, createAlertKeeper, createPendingOpens } = require('../main/live-alerts');
 
 class FakeNotification extends EventEmitter {
   constructor() { super(); this.closed = false; }
@@ -69,4 +70,27 @@ test('bounded by age: day-old toasts are dropped when a new one arrives', () => 
   assert.equal(k.has('kick:old'), false);
   assert.equal(old.closed, true);
   assert.ok(k.has('kick:new'));
+});
+
+test('issue-3: a toast clicked while the dashboard is dead is opened once it loads, once', () => {
+  const p = createPendingOpens();
+  p.add('kick', 'Alice', T0);
+  p.add('twitch', 'bob', T0 + 1000);
+  p.add('KICK', 'alice', T0 + 2000); // a second click on the same stream
+  assert.equal(p.size, 2);
+  const { open, expired } = p.take(T0 + 30 * 1000);
+  assert.deepEqual(open, [{ platform: 'twitch', username: 'bob' }, { platform: 'KICK', username: 'alice' }]);
+  assert.deepEqual(expired, []);
+  assert.equal(p.size, 0);
+  assert.deepEqual(p.take(T0 + 60 * 1000), { open: [], expired: [] }, 'the next load opens nothing again');
+});
+
+test('issue-3: a click the dashboard took too long to come back for is dropped, not opened', () => {
+  assert.equal(PENDING_OPEN_TTL_MS, 5 * 60 * 1000);
+  const p = createPendingOpens();
+  p.add('kick', 'old', T0);
+  p.add('kick', 'fresh', T0 + PENDING_OPEN_TTL_MS);
+  const { open, expired } = p.take(T0 + PENDING_OPEN_TTL_MS + 1);
+  assert.deepEqual(open, [{ platform: 'kick', username: 'fresh' }]);
+  assert.deepEqual(expired, [{ platform: 'kick', username: 'old' }]);
 });

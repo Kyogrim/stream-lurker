@@ -1,7 +1,8 @@
 // F95: the Settings and Logins copy says what the app actually does. Twitch
 // API keys are optional (main.js falls back to a key-free scan), and Rumble is
 // force-disabled, so the Logins page neither advertises it nor shows a working
-// looking Connect button for it.
+// looking Connect button for it. F104: the Clips tab says its clips are
+// Twitch-only.
 // Run: node --test test/renderer-static-copy.test.js
 
 'use strict';
@@ -51,4 +52,12 @@ test('F95: Twitch API credentials are described as optional, with the fallback',
   assert.match(box, /<a href="#" data-external-url="https:\/\/dev\.twitch\.tv\/console">/);
   // A raw & in text is still valid HTML, but keep the entity form used here.
   assert.match(box, /Client ID &amp; Secret/);
+});
+
+test('F104: the Clips subtitle promises Twitch clips only, and no points auto-claim', () => {
+  // src/clips.js asks Twitch GQL about Twitch streamers only, and the points
+  // auto-claim is a Settings toggle (src/points.js), not part of this tab.
+  const sub = /<div class="tab-header">[\s\S]*?<p>([\s\S]*?)<\/p>/.exec(section('tab-clips'))[1];
+  assert.match(sub, /Twitch/);
+  assert.doesNotMatch(sub, /auto-claim|channel points/i);
 });

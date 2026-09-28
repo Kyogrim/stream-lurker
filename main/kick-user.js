@@ -37,7 +37,11 @@ const KICK_USER_SCRIPT = `
         const body = await r.text();
         let j = null;
         try { j = JSON.parse(body); } catch (e) {}
-        if (r.ok) apiAnswered = true;
+        // 401 (Laravel's Unauthenticated) and 419 (session/CSRF expired) are
+        // Kick's API answering about the session just as much as a 2xx
+        // without a user. 403 and 5xx stay unanswered: those are Cloudflare
+        // challenges and outages, which say nothing about the session.
+        if (r.ok || r.status === 401 || r.status === 419) apiAnswered = true;
         const n = r.ok ? pick(j) : null;
         tried.push(path + ' -> ' + r.status + (n ? ' name=' + n : ' len=' + body.length));
         if (n) return { name: n, source: 'api', tried };
@@ -46,8 +50,9 @@ const KICK_USER_SCRIPT = `
 
     // The page-scraping fallbacks only mean something with a live session.
     // Signed out, or with a stale session_token (the API answering 2xx with
-    // no user is Kick saying so), they name a featured streamer from the home
-    // page as the account. So they run only when the API could not be asked.
+    // no user, or 401/419, is Kick saying so), they name a featured streamer
+    // from the home page as the account. So they run only when the API could
+    // not be asked.
     if (sess && apiAnswered) tried.push('API answered without a user: the session is stale');
     if (sess && !apiAnswered) {
       // Next.js page state often carries the signed-in user.

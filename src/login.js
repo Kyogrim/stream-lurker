@@ -219,6 +219,12 @@ function setExtensionNote(text, tone = 'ok') {
 // the old code back on screen.
 let pairingCodeGen = 0;
 
+// For a code shorter than connector 1.3 accepts (see refreshExtensionInfo).
+const SHORT_CODE_NOTE = "This pairing code is from an older version. First reload Stream Lurker Connector on your browser's Extensions page (it should then show version 1.3 or later), then click New code and paste the new code into it.";
+// Part of the New code confirm: a copy loaded before the app updated is
+// connector 1.2 until it is reloaded, and cannot hold a 32-character code.
+const NEW_CODE_RELOAD_CAUTION = "If Stream Lurker has updated since the extension was last reloaded, reload Stream Lurker Connector on your browser's Extensions page first: the older copy still running there cannot hold the new, longer code.";
+
 function showPairingCode(code) {
   const codeEl = document.getElementById('ext-pairing-code');
   if (!codeEl) return;
@@ -245,10 +251,13 @@ async function refreshExtensionInfo() {
     // Connector 1.3 refuses those (one /ping answer is enough to brute-force a
     // 32-bit code offline), so say how to fix it here rather than leave the
     // extension failing on its own. Never over another message.
+    // Reloading comes first: the browser keeps running the old 1.2 copy until
+    // it is reloaded or the browser restarts, and 1.2's code field holds 16
+    // characters, so a new code pasted into it is cut short and refused.
     const code = info?.pairingCode || '';
     const note = document.getElementById('ext-panel-note');
     if (code && code.length < 32 && note && !note.textContent) {
-      setExtensionNote('This pairing code is from an older version. Connector 1.3 needs a longer one: click New code, then paste it into the extension.', 'warn');
+      setExtensionNote(SHORT_CODE_NOTE, 'warn');
     }
   }
   if (connEl) {
@@ -303,7 +312,7 @@ async function setupExtensionPanel() {
   // A shared or leaked code can be replaced. The paired extension then stops
   // syncing until it is given the new one, so this asks first.
   newCodeBtn?.addEventListener('click', async () => {
-    const ok = window.confirm('Create a new pairing code?\n\nThe browser extension stops syncing your logins until you paste the new code into it.');
+    const ok = window.confirm(`Create a new pairing code?\n\nThe browser extension stops syncing your logins until you paste the new code into it.\n\n${NEW_CODE_RELOAD_CAUTION}`);
     if (!ok) return;
     newCodeBtn.disabled = true;
     try {

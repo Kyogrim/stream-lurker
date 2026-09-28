@@ -96,7 +96,11 @@ function reply(status, body) {
 //   app       real Stream Lurker with `code`; options signedOut[], signedOutError,
 //             failImport{}, dropImport[], stallImport[] (never answers),
 //             stallImportBody[] (headers, then no body), beforeImportReply()
-//   outdated  answers /ping with no proof (pre-1.3 app, or a lazy squatter)
+//   outdated  answers /ping with no proof and its version (an app from before
+//             proofs: every one sent its version)
+//   unsigned-app  a current app still holding a code under 32 characters:
+//             /ping answers { app } alone, no proof and no version, exactly as
+//             main/cookie-receiver.js pingBody does
 //   forged    answers /ping with a fixed `proof`
 //   relay     a squatter that forwards /ping to the app on port `to` and hands
 //             back its reply unchanged, genuine proof included
@@ -117,6 +121,7 @@ function makeLoopback(ports) {
       const nonce = u.searchParams.get('nonce') || '';
       if (l.kind === 'other-json') return reply(200, { app: 'something-else' });
       if (l.kind === 'outdated') return reply(200, { app: 'stream-lurker', version: '0.14.0-beta' });
+      if (l.kind === 'unsigned-app') return reply(200, { app: 'stream-lurker' });
       if (l.kind === 'forged') return reply(200, { app: 'stream-lurker', proof: l.proof });
       if (l.kind === 'relay') return fetch(`http://127.0.0.1:${l.to}${u.pathname}${u.search}`, { method: 'GET', signal: init.signal });
       return reply(200, /^[0-9a-f]{16,64}$/i.test(nonce) ? { app: 'stream-lurker', proof: proofFor(l.code, port, nonce) } : { app: 'stream-lurker' });

@@ -100,27 +100,37 @@ Requires [Node.js](https://nodejs.org/) (LTS).
 
 ```bash
 npm install
-npm start
 ```
 
-`npm start` uses the same profile as the installed app (`%APPDATA%/stream-lurker`), so if the
-installed app is running it just brings that window forward. Careful with that profile: a
-source build can run a newer Electron than your installed copy, and the newer one upgrades
-the login (cookie) database in a way the older one cannot read. The older version then
-deletes it on its next start, which signs you out everywhere. To try a source build without
-touching your real profile, quit the app, copy the profile folder, switch off `launchOnStartup`
-in the copy's `config.json`, and point the build at the copy. The copy keeps your **Launch on
-startup** setting, and a source build that sees it on registers `node_modules`' `electron.exe` as
-your Windows sign-in entry. That entry can replace the installed app's own, so every sign-in
+**If Stream Lurker is installed on this PC (or `%APPDATA%/stream-lurker` exists), do not run a
+bare `npm start`.** It uses the installed app's profile: if the installed app is running it just
+brings that window forward, and if it is closed the source build runs on your real profile. A
+source build can run a newer Electron than your installed copy, and the newer one upgrades the
+login (cookie) database in a way the older one cannot read. The older version then deletes it
+on its next start, which signs you out everywhere. Use the recipe below instead. Once you have
+quit the app, it copies the profile folder, switches off `launchOnStartup` in the copy's
+`config.json`, and points the build at the copy. The copy keeps your **Launch on Windows
+Startup** setting, and a source build that sees it on registers `node_modules`' `electron.exe`
+as your Windows sign-in entry. That entry can replace the installed app's own, so every sign-in
 opens a bare Electron window instead of Stream Lurker until you start the installed app again.
+On a PC that has never run Stream Lurker, a bare `npm start` is fine.
+
+The recipe is for **Git Bash** (it comes with Git for Windows) and does not work in PowerShell
+or cmd. Paste it as one block into one window. Electron ignores an empty `--user-data-dir`, and
+one it cannot create, and quietly uses your real profile instead, so the last line starts the
+build only once the copy is in place.
 
 ```bash
 # Quit the app first (tray > Quit Stream Lurker): a copy taken mid-write can be torn.
 COPY="C:/path/to/profile-copy"   # <- a folder that does not exist yet
 mkdir "$COPY" && cp -r "$APPDATA/stream-lurker/." "$COPY" &&
-node -e "const f=process.argv[1],fs=require('fs'),c=JSON.parse(fs.readFileSync(f,'utf8'));c.launchOnStartup=false;fs.writeFileSync(f,JSON.stringify(c,null,2))" "$COPY/config.json"
-npm start -- --user-data-dir="$COPY"
+node -e "const f=process.argv[1],fs=require('fs'),c=JSON.parse(fs.readFileSync(f,'utf8'));c.launchOnStartup=false;fs.writeFileSync(f,JSON.stringify(c,null,2))" "$COPY/config.json" &&
+[ -f "$COPY/config.json" ] && npm start -- --user-data-dir="$COPY"
 ```
+
+To start the same copy again later, run the `COPY=` line and the last two lines (they switch
+`launchOnStartup` off again). If the recipe stopped with an error before the app opened, delete
+the copy folder and run all of it again.
 
 Build your own distributable:
 
@@ -129,10 +139,8 @@ npm run dist          # Windows installer
 npm run dist-linux    # Linux AppImage / tar.gz (build from source only: untested, never published)
 ```
 
-Linux is not supported yet. No release ships a Linux build, and a packaged Linux build
-currently shows a blank tray icon and window icon, because `icon.png` is not bundled into it.
-If its window ends up hidden in that blank tray (started minimised, or closed to the tray),
-launch the app a second time to bring the window back.
+Linux is not supported yet: no release ships a Linux build, and packaged Linux builds are
+untested.
 
 ## Getting started
 

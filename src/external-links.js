@@ -5,10 +5,12 @@
 
 import { safeHttpsUrl } from './state.js';
 
-// The hosts the static links point at. Anything else (or anything not https)
-// is ignored, so markup that somehow gains the attribute can't open an
-// arbitrary page in the user's browser.
-export const EXTERNAL_LINK_HOSTS = ['github.com', 'twitch.tv'];
+// The hosts the static links point at: only the Twitch dev console link is
+// left since F57 dropped the uBlock (github.com) one. Anything else (or
+// anything not https) is ignored, so markup that somehow gains the attribute
+// can't open an arbitrary page in the user's browser. Add a host here only
+// together with the link that needs it.
+export const EXTERNAL_LINK_HOSTS = ['twitch.tv'];
 
 export function externalLinkUrl(el) {
   return safeHttpsUrl(el?.dataset?.externalUrl, EXTERNAL_LINK_HOSTS);

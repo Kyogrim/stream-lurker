@@ -138,6 +138,30 @@ function sanitizeConfig(cfg) {
   return { clamped, dropped };
 }
 
+// Entries named one by one in the activity log, per config and per save; the
+// rest are counted in one line (config-boundary.js caps its refusals with it
+// too). Each line is a console write and an IPC message on the main thread,
+// and the log keeps 200 lines: a backup holding thousands of junk entries
+// must not stall the app or push out what a bug report needs.
+const MAX_LOGGED_ENTRIES = 10;
+
+// The activity-log lines for streamer entries set aside ({ entry, reason },
+// from sanitizeConfig or an import). salvageFile is where the whole list was
+// written, or null when that failed.
+function droppedStreamerLines(dropped, salvageFile) {
+  const list = Array.isArray(dropped) ? dropped : [];
+  const lines = list.slice(0, MAX_LOGGED_ENTRIES).map((d) => {
+    let shown;
+    try { shown = JSON.stringify(d.entry); } catch (e) { shown = String(d.entry); }
+    return `[Config] Skipped streamer entry (${d.reason}): ${String(shown).slice(0, 120)}`;
+  });
+  const rest = list.length - MAX_LOGGED_ENTRIES;
+  if (rest > 0) {
+    lines.push(`[Config] Skipped ${rest} more streamer entr${rest === 1 ? 'y' : 'ies'} not listed here${salvageFile ? `; all ${list.length} are in ${salvageFile}` : ''}.`);
+  }
+  return lines;
+}
+
 // The platform of a streamer entry, lowercased, or '' when it has none. For
 // code that must not throw on an entry the normalizer has not seen yet.
 function streamerPlatform(entry) {
@@ -158,6 +182,8 @@ module.exports = {
   normalizeExtensions,
   normalizeEventList,
   sanitizeConfig,
+  MAX_LOGGED_ENTRIES,
+  droppedStreamerLines,
   streamerPlatform,
   streamerName,
 };

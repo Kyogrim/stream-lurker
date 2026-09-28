@@ -67,6 +67,16 @@ function isOAuthPopupUrl(value) {
   return isHttpsHost(value, OAUTH_POPUP_HOST);
 }
 
+// What a login window may open as an in-app popup. The sign-in hosts, and the
+// platforms themselves: a "Continue with Google" button can open its popup on
+// the platform's own redirect route (kick.com/...) before it 302s to Google,
+// and a denied popup would finish the sign-in in the user's browser, where the
+// app never sees it. Adds no reach: the login window may already navigate to
+// any platform page, and the popup inherits its 'login' allowlist.
+function isLoginPopupUrl(value) {
+  return isOAuthPopupUrl(value) || isPlatformUrl(value);
+}
+
 // Where a top-level page of each kind of surface may go. Roles:
 //   dashboard - the app's own UI: only ever itself (a reload).
 //   stream    - <webview> cells and pop-outs: the platforms plus Google consent/auth.
@@ -214,18 +224,71 @@ function createExternalOpenGate({ gestureWindowMs = 5000, minIntervalMs = 2000, 
   };
 }
 
+// Input that counts as the user asking for something (createExternalOpenGate).
+// Pointer presses and taps, and Enter or Space, the keys that activate a
+// focused link or button. Not any key: the app itself sends Alt+T to every
+// Twitch cell (src/multi-lurk.js, webview.sendInputEvent), which reaches
+// these listeners like a real key press, and would otherwise let any script in
+// that page, ad frames included, open one link in the user's browser in the
+// following seconds with nobody at the keyboard. Accepts both shapes Electron
+// uses: { key, code, alt, meta } (before-input-event, input-event) and
+// { keyCode, modifiers } (sendInputEvent).
+const POINTER_GESTURE_INPUTS = new Set(['mouseDown', 'mouseUp', 'gestureTap', 'touchEnd']);
+const KEY_DOWN_INPUTS = new Set(['keyDown', 'rawKeyDown']);
+const ACTIVATION_KEY = /^(?:enter|numpadenter|return| |space|spacebar)$/i;
+
+function isUserGestureInput(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (POINTER_GESTURE_INPUTS.has(input.type)) return true;
+  if (!KEY_DOWN_INPUTS.has(input.type)) return false;
+  const mods = Array.isArray(input.modifiers) ? input.modifiers.map(m => String(m).toLowerCase()) : [];
+  if (input.alt === true || input.meta === true) return false;
+  if (mods.some(m => m === 'alt' || m === 'meta' || m === 'command' || m === 'cmd')) return false;
+  return [input.key, input.code, input.keyCode].some(k => typeof k === 'string' && ACTIVATION_KEY.test(k));
+}
+
 // Pages retry denied permissions and popups constantly. Log each distinct thing
 // once per interval, and keep the key set bounded so weeks of uptime cannot
-// grow it without limit.
-function createLogThrottle({ intervalMs = 60 * 60 * 1000, maxKeys = 500, now = Date.now } = {}) {
+// grow it without limit. maxPerMinute also caps distinct things: a page that
+// aims window.open or downloads at random subdomains makes every key new, and
+// each line would push a real one out of the 200-line activity buffer and cost
+// an IPC send. What the cap refuses is counted and handed to onSuppressed(n)
+// once, when that minute ends.
+const THROTTLE_MINUTE_MS = 60 * 1000;
+const defaultTimers = { setTimeout, clearTimeout };
+
+function createLogThrottle({
+  intervalMs = 60 * 60 * 1000, maxKeys = 500, maxPerMinute = Infinity, onSuppressed = null, now = Date.now, timers = defaultTimers,
+} = {}) {
   const seen = new Map();
+  let minuteStart = -Infinity;
+  let loggedThisMinute = 0;
+  let suppressed = 0;
+  let flushTimer = null;
+  const flush = () => {
+    flushTimer = null;
+    const n = suppressed;
+    suppressed = 0;
+    if (n && onSuppressed) onSuppressed(n);
+  };
   return {
     shouldLog(key) {
       const t = now();
       const last = seen.get(key);
       if (last !== undefined && t - last < intervalMs) return false;
       if (seen.size >= maxKeys) seen.clear();
+      // Recorded even when the cap refuses it, so one thing is counted once.
       seen.set(key, t);
+      if (t - minuteStart >= THROTTLE_MINUTE_MS) {
+        minuteStart = t;
+        loggedThisMinute = 0;
+      }
+      if (loggedThisMinute >= maxPerMinute) {
+        suppressed++;
+        if (!flushTimer) flushTimer = timers.setTimeout(flush, Math.max(0, minuteStart + THROTTLE_MINUTE_MS - t));
+        return false;
+      }
+      loggedThisMinute++;
       return true;
     },
   };
@@ -274,6 +337,8 @@ module.exports = {
   isWebUrl,
   isPlatformUrl,
   isOAuthPopupUrl,
+  isLoginPopupUrl,
+  isUserGestureInput,
   isAllowedTopLevelUrl,
   isAllowedFrameUrl,
   mayOpenExternally,

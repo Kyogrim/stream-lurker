@@ -116,8 +116,9 @@ function createAccountEpochs() {
 // state when a request arrives, but an import then awaits Twitch's account
 // check, a probe page and every cookie write, and a Sign Out clicked meanwhile
 // used to be undone by the import finishing (F53). An automatic import takes a
-// ticket first and asks valid() before it writes and again before it saves
-// the account; a manual import (a click in the extension) is always valid.
+// ticket first and asks valid() before it writes, before every cookie it
+// removes or sets, and again before it saves the account; a manual import (a
+// click in the extension) is always valid.
 function createSyncTickets() {
   const counts = new Map();
   const current = (p) => counts.get(p) || 0;
@@ -125,7 +126,18 @@ function createSyncTickets() {
     bump(platform) { counts.set(platform, current(platform) + 1); },
     take(platform, { auto, isBlocked }) {
       const at = current(platform);
-      return { valid: () => !auto || (!isBlocked(platform) && current(platform) === at) };
+      // Once false, false for good. An import that stopped part way through
+      // its cookie writes must go on to undo; if the block that stopped it
+      // had lifted by its next check (a paste that failed), it would save
+      // the account over half a session.
+      let lost = false;
+      return {
+        valid: () => {
+          if (!auto) return true;
+          if (!lost && (isBlocked(platform) || current(platform) !== at)) lost = true;
+          return !lost;
+        },
+      };
     },
   };
 }

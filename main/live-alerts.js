@@ -55,4 +55,41 @@ function createAlertKeeper({ ttlMs = ALERT_TTL_MS, max = MAX_ALERTS } = {}) {
   };
 }
 
-module.exports = { ALERT_TTL_MS, MAX_ALERTS, createAlertKeeper };
+// Streams the user clicked a go-live toast for while the dashboard was down
+// (crashed, waiting out its slow retry). The click reloads it; these open once
+// it has loaded, since a dead dashboard cannot hold a cell and the toast is
+// gone after one click. A click older than PENDING_OPEN_TTL_MS by then is
+// dropped: the reload failed and a later one, maybe half an hour on, should
+// not open a stream nobody asked for since.
+const PENDING_OPEN_TTL_MS = 5 * 60 * 1000;
+
+function createPendingOpens({ ttlMs = PENDING_OPEN_TTL_MS } = {}) {
+  const pending = new Map(); // "platform:username" -> { platform, username, at }
+
+  return {
+    // One entry per stream; a second click just refreshes it.
+    add(platform, username, now) {
+      const key = `${String(platform).toLowerCase()}:${String(username).toLowerCase()}`;
+      pending.delete(key);
+      pending.set(key, { platform, username, at: now });
+    },
+
+    // Empties the list. Returns { open, expired }, each [{ platform, username }]
+    // in click order.
+    take(now) {
+      const open = [];
+      const expired = [];
+      for (const { platform, username, at } of pending.values()) {
+        (now - at <= ttlMs ? open : expired).push({ platform, username });
+      }
+      pending.clear();
+      return { open, expired };
+    },
+
+    get size() {
+      return pending.size;
+    },
+  };
+}
+
+module.exports = { ALERT_TTL_MS, MAX_ALERTS, PENDING_OPEN_TTL_MS, createAlertKeeper, createPendingOpens };

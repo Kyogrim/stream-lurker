@@ -257,8 +257,9 @@ export function qualityAndTheaterScript(quality) {
       // menu is open, so nothing is sent. Escape, for a toggle that did not
       // take, goes only into that concrete menu element: at the document with
       // no menu open to take it, it reaches the page's own hotkeys (on Twitch
-      // it may leave theatre mode, which is latched and never put back). A
-      // close with nothing to aim at fails; the attempt budget bounds it.
+      // it may leave theatre mode, which is latched and never put back).
+      // Returns false only when it had nothing to aim at and did nothing, so a
+      // caller holding other evidence of the menu can still close it.
       const closeMenu = async (cog, node, click) => {
         const attr = (name) => (cog && cog.getAttribute ? cog.getAttribute(name) : null);
         if (!node || !node.isConnected) {
@@ -267,20 +268,21 @@ export function qualityAndTheaterScript(quality) {
           if (named && named.isConnected) node = named;
         }
         const exp = attr('aria-expanded');
-        if (exp !== 'true' && exp !== 'false' && !node) return;
+        if (exp !== 'true' && exp !== 'false' && !node) return false;
         const open = () => {
           const e = attr('aria-expanded');
           if (e === 'true') return true;
           if (e === 'false') return false;
           return isShown(node);
         };
-        if (!open()) return;
+        if (!open()) return true;
         click(cog);
         await sleep(300);
-        if (!open() || !node || !node.isConnected) return;
+        if (!open() || !node || !node.isConnected) return true;
         ['keydown', 'keyup'].forEach(type => node.dispatchEvent(new KeyboardEvent(type, {
           key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true
         })));
+        return true;
       };
 
       // One attempt budget per channel for Twitch and Kick: resolve once, or
@@ -388,6 +390,10 @@ export function qualityAndTheaterScript(quality) {
           const cog = document.querySelector('[data-a-target="player-settings-button"]');
           if (!cog) return { fail: 'settings button not found' };
           const before = shownMenus();
+          // What the player holds before the click: the last evidence of a
+          // menu that no hook, row or aria attribute points at.
+          const player = cog.closest('[data-a-target="video-player"], .video-player');
+          const inPlayer = player ? new Set(player.querySelectorAll('*')) : null;
           cog.click();
           let seen = null;
           try {
@@ -415,7 +421,18 @@ export function qualityAndTheaterScript(quality) {
             // Neither hook matched: a menu-role element the cog click brought
             // up is the only concrete node left to close.
             const fresh = shownMenus().filter(n => before.indexOf(n) < 0);
-            await closeMenu(cog, [seen, menuNode].find(isShown) || menuNode || seen || fresh[fresh.length - 1] || null, el => el.click());
+            const aimed = await closeMenu(cog, [seen, menuNode].find(isShown) || menuNode || seen || fresh[fresh.length - 1] || null, el => el.click());
+            // Nothing to aim at. Left open, the menu turned each later
+            // attempt's click into a close, and an odd attempt count stranded
+            // it for good. Nodes the click added to the player that are still
+            // on screen stand in for it: one click closes it. None left means
+            // the page shut it itself, where a click would reopen it. The
+            // cog's own subtree is not evidence (an icon that re-renders on
+            // click), and no Escape: these nodes are a guess.
+            if (!aimed && inPlayer && player.isConnected && cog.isConnected &&
+                Array.from(player.querySelectorAll('*')).some(n => !inPlayer.has(n) && !cog.contains(n) && isShown(n))) {
+              cog.click();
+            }
           }
         };
 

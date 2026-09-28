@@ -136,10 +136,28 @@ function createProbeGate(task) {
   };
 }
 
+// Waits for `promise` at most budgetMs, for a caller that must answer someone
+// sooner than a probe page can take: the browser extension gives up on an
+// automatic import after 25 s, a probe may run for HIDDEN_PAGE_DEADLINE_MS.
+// Resolves { settled: true, value } when it settled in time (a rejection reads
+// as value null, a failed probe), else { settled: false }, leaving `promise`
+// running for the caller to finish with later.
+function settleWithin(promise, budgetMs, timers = defaultTimers) {
+  return new Promise((resolve) => {
+    const timer = timers.setTimeout(() => resolve({ settled: false }), budgetMs);
+    const done = (value) => {
+      timers.clearTimeout(timer);
+      resolve({ settled: true, value });
+    };
+    Promise.resolve(promise).then(done, () => done(null));
+  });
+}
+
 module.exports = {
   HIDDEN_PAGE_DEADLINE_MS,
   isCrossDocumentMainFrameNavigation,
   runPageScript,
   runScriptWithin,
   createProbeGate,
+  settleWithin,
 };

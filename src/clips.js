@@ -1,5 +1,6 @@
 import {
-  appendLogMessage, escapeHtml, safeHttpsUrl, TWITCH_PAGE_HOSTS, TWITCH_MEDIA_HOSTS, monitoredStreamers,
+  appendLogMessage, escapeHtml, safeHttpsUrl, TWITCH_PAGE_HOSTS, TWITCH_MEDIA_HOSTS, TWITCH_CLIP_FILE_HOSTS,
+  monitoredStreamers,
 } from './state.js';
 
 const TWITCH_GQL_URL = 'https://gql.twitch.tv/gql';
@@ -80,22 +81,24 @@ export function clipPageUrl(clip) {
 
 export function clipSourceUrl(clip) {
   const qualities = Array.isArray(clip?.videoQualities) ? clip.videoQualities : [];
-  return safeHttpsUrl(qualities[0]?.sourceURL, TWITCH_MEDIA_HOSTS);
+  return safeHttpsUrl(qualities[0]?.sourceURL, TWITCH_CLIP_FILE_HOSTS);
 }
 
 // The source MP4 with the playback token Twitch's CDN wants. Falls back to the
 // unsigned URL when there is no token.
 export function signedClipUrl(rawUrl, tokenData) {
-  const base = safeHttpsUrl(rawUrl, TWITCH_MEDIA_HOSTS);
+  const base = safeHttpsUrl(rawUrl, TWITCH_CLIP_FILE_HOSTS);
   if (!base || !tokenData?.signature || !tokenData?.value) return base;
   return safeHttpsUrl(
     `${base}?sig=${encodeURIComponent(tokenData.signature)}&token=${encodeURIComponent(tokenData.value)}`,
-    TWITCH_MEDIA_HOSTS,
+    TWITCH_CLIP_FILE_HOSTS,
   );
 }
 
 // Older saved clips have no videoQualities; their MP4 sits next to the
-// thumbnail on the same CDN.
+// thumbnail on the same CDN. Current clips do not follow that pattern (their
+// thumb-...-1920x1080.jpg maps to a .mp4 that 404s), so this is only for a
+// clip that carries no source at all.
 export function legacyClipMp4Url(clip) {
   const thumb = clipThumbUrl(clip);
   if (!thumb) return '';
@@ -366,7 +369,16 @@ function createClipCard(clip) {
   downloadBtn.addEventListener('click', async () => {
     let mp4Url = '';
     const sourceUrl = clipSourceUrl(clip);
-    
+    const hasSource = Array.isArray(clip.videoQualities) && clip.videoQualities.length > 0;
+
+    // A clip with a source that is not a Twitch clip file is refused, never
+    // swapped for a guess from the thumbnail: for current clips that guess
+    // is a URL that 404s.
+    if (hasSource && !sourceUrl) {
+      appendLogMessage(`[Clips] Not downloading ${view.title}: its video is not a Twitch clip file.`);
+      return;
+    }
+
     // First, try to sign the download if it's a modern AWS cloudfront MP4
     if (sourceUrl) {
       try {

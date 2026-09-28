@@ -94,6 +94,16 @@ test('F94: help links carry an allowlisted data-external-url', async () => {
   for (const url of urls) assert.equal(externalLinkUrl({ dataset: { externalUrl: url } }), url);
 });
 
+test('r2-3: every allowlisted external host is used by a static link', async () => {
+  // A host with no link behind it only widens what a stray data-external-url
+  // can open (github.com outlived the uBlock link it was added for).
+  const { EXTERNAL_LINK_HOSTS } = await load('src/external-links.js');
+  const hosts = [...HTML.matchAll(/data-external-url="([^"]*)"/g)].map(m => new URL(m[1]).hostname);
+  for (const h of EXTERNAL_LINK_HOSTS) {
+    assert.ok(hosts.some(x => x === h || x.endsWith(`.${h}`)), `${h} is allowlisted but no link uses it`);
+  }
+});
+
 test('F94: one delegated listener opens allowlisted links and ignores the rest', async () => {
   const { setupExternalLinks, externalLinkUrl } = await load('src/external-links.js');
   let handler = null;
@@ -111,6 +121,7 @@ test('F94: one delegated listener opens allowlisted links and ignores the rest',
   const warn = console.warn;
   console.warn = () => {};
   try {
+    // github.com left the allowlist with the uBlock link (r2-3): refused now.
     assert.equal(click({ dataset: { externalUrl: 'https://github.com/gorhill/uBlock/releases' } }), true);
     assert.equal(click({ dataset: { externalUrl: 'https://dev.twitch.tv/console' } }), true);
     assert.equal(click({ dataset: { externalUrl: 'https://evil.tld/' } }), true, 'still stops the # jump');
@@ -120,7 +131,8 @@ test('F94: one delegated listener opens allowlisted links and ignores the rest',
   } finally {
     console.warn = warn;
   }
-  assert.deepEqual(opened, ['https://github.com/gorhill/uBlock/releases', 'https://dev.twitch.tv/console']);
+  assert.deepEqual(opened, ['https://dev.twitch.tv/console']);
+  assert.equal(externalLinkUrl({ dataset: { externalUrl: 'https://github.com/' } }), '');
   assert.equal(externalLinkUrl({ dataset: { externalUrl: 'https://github.com.evil.tld/' } }), '');
   assert.equal(externalLinkUrl({}), '');
 });

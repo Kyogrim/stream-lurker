@@ -5,6 +5,8 @@ const {
   STREAM_PARTITION,
   isPlatformUrl,
   isOAuthPopupUrl,
+  isLoginPopupUrl,
+  isUserGestureInput,
   isAllowedTopLevelUrl,
   isAllowedFrameUrl,
   mayOpenExternally,
@@ -16,6 +18,7 @@ const {
   createLogThrottle,
   createDownloadAllowlist,
 } = require('../main/web-security');
+const { createClock } = require('./main-auth-fakes');
 
 test('platform URLs: https on the platform hosts and their subdomains only', () => {
   for (const ok of [
@@ -119,6 +122,18 @@ test('OAuth popups: exactly Google and Apple sign-in hosts over https', () => {
   assert.equal(isOAuthPopupUrl('https://accounts.google.com.evil.net/'), false);
   assert.equal(isOAuthPopupUrl('https://www.google.com/'), false);
   assert.equal(isOAuthPopupUrl('https://ads.example/'), false);
+});
+
+test("login popups (r2-24): the sign-in hosts and the platforms' own redirect routes, nothing else", () => {
+  for (const ok of [
+    'https://accounts.google.com/o/oauth2/v2/auth?x=1', 'https://appleid.apple.com/auth/authorize',
+    // Kick's "Continue with Google" may open on its own route first, then 302 to Google.
+    'https://kick.com/redirect/google', 'https://www.kick.com/social/apple', 'https://id.twitch.tv/oauth2/authorize',
+  ]) assert.equal(isLoginPopupUrl(ok), true, ok);
+  for (const bad of [
+    'http://kick.com/redirect/google', 'https://kick.com.evil.net/', 'https://www.google.com/', 'https://sites.google.com/view/phish',
+    'https://ads.example/', 'javascript:alert(1)', 'file:///C:/x', '', null,
+  ]) assert.equal(isLoginPopupUrl(bad), false, String(bad));
 });
 
 test('webview attach: hostile markup is stripped and forced safe', () => {
@@ -239,6 +254,47 @@ function clock(start = 1000000) {
   return { now: () => t, advance: (ms) => { t += ms; } };
 }
 
+test("r2-21: only clicks, taps, Enter and Space count as a gesture; the app's own Alt+T does not", () => {
+  // The exact event src/multi-lurk.js sends every Twitch cell (sendInputEvent shape).
+  assert.equal(isUserGestureInput({ type: 'keyDown', keyCode: 't', modifiers: ['alt'] }), false);
+  assert.equal(isUserGestureInput({ type: 'keyUp', keyCode: 't', modifiers: ['alt'] }), false);
+  // The same key as before-input-event / input-event report it.
+  assert.equal(isUserGestureInput({ type: 'keyDown', key: 't', code: 'KeyT', alt: true, meta: false, modifiers: ['alt'] }), false);
+  assert.equal(isUserGestureInput({ type: 'rawKeyDown', key: 't', code: 'KeyT', alt: false, modifiers: [] }), false, 'any other key: typing in chat is not asking to open a link');
+  assert.equal(isUserGestureInput({ type: 'char', key: 'Enter' }), false, 'char follows the keyDown that already counted');
+
+  for (const ok of [
+    { type: 'mouseDown', button: 'left', x: 1, y: 1 }, { type: 'mouseUp', button: 'left' }, { type: 'gestureTap' }, { type: 'touchEnd' },
+    { type: 'keyDown', key: 'Enter', code: 'Enter', alt: false, meta: false, modifiers: [] },
+    { type: 'rawKeyDown', key: 'Enter', code: 'NumpadEnter', modifiers: [] },
+    { type: 'keyDown', key: ' ', code: 'Space', modifiers: [] },
+    { type: 'keyDown', key: 'Enter', control: true, modifiers: ['control'] }, // Ctrl+Enter opens a link in a new tab
+    { type: 'keyDown', keyCode: 'Return' }, { type: 'keyDown', keyCode: 'Space' },
+  ]) assert.equal(isUserGestureInput(ok), true, JSON.stringify(ok));
+
+  for (const bad of [
+    { type: 'keyDown', key: 'Enter', alt: true, modifiers: ['alt'] },
+    { type: 'keyDown', key: 'Enter', meta: true, modifiers: ['meta'] },
+    { type: 'keyDown', keyCode: 'Return', modifiers: ['command'] },
+    { type: 'keyUp', key: 'Enter' },
+    { type: 'mouseMove' }, { type: 'mouseWheel' }, { type: 'mouseEnter' }, { type: 'contextMenu' }, { type: 'gestureScrollBegin' },
+    { type: 'undefined' }, {}, null, undefined, 'mouseDown',
+  ]) assert.equal(isUserGestureInput(bad), false, JSON.stringify(bad));
+});
+
+test("r2-21 regression: a page cannot ride the synthesized Alt+T to the user's browser", () => {
+  const c = clock();
+  const gate = createExternalOpenGate({ now: c.now });
+  const cell = {};
+  const note = (input) => { if (isUserGestureInput(input)) gate.noteGesture(cell); };
+  note({ type: 'keyDown', keyCode: 't', modifiers: ['alt'] });
+  note({ type: 'keyUp', keyCode: 't', modifiers: ['alt'] });
+  c.advance(1000);
+  assert.equal(gate.decide(cell, 'https://ads.example/landing', { focused: true }).open, false);
+  note({ type: 'mouseDown', button: 'left' });
+  assert.equal(gate.decide(cell, 'https://example.com/chat-link', { focused: true }).open, true, 'a real click still works');
+});
+
 test('external opens need a recent gesture and a focused window', () => {
   const c = clock();
   const gate = createExternalOpenGate({ now: c.now });
@@ -304,6 +360,34 @@ test('log throttle: once per key per interval, bounded memory', () => {
   // Past maxKeys the map is reset rather than growing.
   t.shouldLog('c'); t.shouldLog('d'); t.shouldLog('e');
   assert.equal(t.shouldLog('b'), true, 'forgotten after the reset');
+});
+
+test('r2-22: a burst of distinct origins logs at most maxPerMinute lines, then one summary when the minute ends', async () => {
+  const c = createClock();
+  const summaries = [];
+  const t = createLogThrottle({ maxPerMinute: 20, onSuppressed: (n) => summaries.push(n), now: () => c.now, timers: c });
+  let logged = 0;
+  // A page cycling window.open through random subdomains: every key is new.
+  for (let i = 0; i < 100; i++) if (t.shouldLog(`a popup|stream|https://r${i}.ads.example`)) logged++;
+  assert.equal(logged, 20);
+  assert.deepEqual(summaries, [], 'nothing until the minute is over');
+  assert.equal(c.pending(), 1, 'one summary timer, however many were refused');
+  // A repeat of a refused key is not counted twice.
+  t.shouldLog('a popup|stream|https://r50.ads.example');
+  await c.advance(60 * 1000);
+  assert.deepEqual(summaries, [80]);
+  assert.equal(c.pending(), 0);
+  // The next minute logs again.
+  assert.equal(t.shouldLog('a popup|stream|https://fresh.example'), true);
+  await c.advance(60 * 1000);
+  assert.deepEqual(summaries, [80], 'no summary for a minute that refused nothing');
+});
+
+test('log throttle: without maxPerMinute there is no cap and no timer (the auto-sync throttle)', () => {
+  const c = createClock();
+  const t = createLogThrottle({ maxKeys: 1000, now: () => c.now, timers: c });
+  for (let i = 0; i < 200; i++) assert.equal(t.shouldLog(`k${i}`), true);
+  assert.equal(c.pending(), 0);
 });
 
 test('download allowlist: only what the dashboard asked for, once, before it expires', () => {

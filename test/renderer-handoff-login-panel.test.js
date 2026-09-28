@@ -8,6 +8,8 @@
 //         platform's latest attempt failed or a wrong pairing code was refused
 //         (get-extension-info's autoSync and codeRejectedAt; lastAutoSync alone
 //         hid a failure behind the next platform's success)
+//   C1    a code from before 32 characters gets a note whose first step is
+//         reloading the extension (the old copy's field cuts a new code short)
 // Run: node --test test/renderer-handoff-login-panel.test.js
 
 'use strict';
@@ -263,4 +265,71 @@ test('F17: with no code to show, Copy copies nothing', async () => {
   clipboard.length = 0;
   await copyBtn.dispatch('click');
   assert.deepEqual(clipboard, []);
+});
+
+// ── C1: codes from before 32 characters ──────────────────────────────────────
+// Connector 1.3 refuses a code under 32 characters. The copy of the extension
+// a browser still runs after the app updated is 1.2 until it is reloaded, and
+// 1.2's code field keeps 16 characters: a new code pasted there is cut short
+// and refused ("Invalid pairing code"), so the advice must start with the reload.
+
+function clearNote() {
+  note.textContent = '';
+  note.className = 'ext-note hidden';
+}
+async function openLogins(pairingCode) {
+  info = { pairingCode, port: 47100 };
+  await loginsNav.dispatch('click');
+  await flush();
+}
+
+test('C1: an 8-character code shows a note that starts with reloading the extension', async () => {
+  clearNote();
+  await openLogins('ABCD1234');
+  assert.equal(code.textContent, 'ABCD1234');
+  assert.ok(!note.classList.contains('hidden'));
+  assert.ok(note.classList.contains('warn'));
+  const text = note.textContent;
+  assert.match(text, /from an older version/);
+  assert.match(text, /reload Stream Lurker Connector on your browser's Extensions page/);
+  assert.match(text, /version 1\.3 or later/);
+  assert.ok(text.indexOf('reload') < text.indexOf('New code'), `reload comes before New code: ${text}`);
+
+  // Any code short of 32 characters is one connector 1.3 refuses.
+  clearNote();
+  await openLogins('A'.repeat(31));
+  assert.match(note.textContent, /reload Stream Lurker Connector/);
+});
+
+test('C1: a 32-character code shows no note', async () => {
+  clearNote();
+  await openLogins(CODE);
+  assert.equal(code.textContent, CODE);
+  assert.equal(note.textContent, '');
+  assert.ok(note.classList.contains('hidden'));
+  await openLogins('F'.repeat(64));
+  assert.equal(note.textContent, '');
+});
+
+test('C1: the short-code note never replaces a message already shown', async () => {
+  clearNote();
+  api.openExtensionFolder = () => Promise.resolve({ success: false, error: 'The extension folder is missing.', path: 'C:\\SL\\resources\\extension' });
+  await folderBtn.dispatch('click');
+  const shown = note.textContent;
+  assert.match(shown, /^Could not open the extension folder/);
+  await openLogins('ABCD1234');
+  assert.equal(note.textContent, shown);
+  assert.ok(note.classList.contains('error'), 'tone kept too');
+});
+
+test('C1: the New code confirm says to reload an extension that predates the update first', async () => {
+  calls.length = 0;
+  confirmAnswer = false;
+  api.rotatePairingCode = () => { calls.push('rotate'); return Promise.resolve({ pairingCode: 'NEVER' }); };
+  await newBtn.dispatch('click');
+  const msg = calls.find(c => Array.isArray(c) && c[0] === 'confirm')[1];
+  assert.match(msg, /stops syncing your logins until you paste the new code/);
+  assert.match(msg, /reload Stream Lurker Connector on your browser's Extensions page first/);
+  assert.match(msg, /cannot hold the new, longer code/);
+  assert.equal(calls.filter(c => c === 'rotate').length, 0);
 });

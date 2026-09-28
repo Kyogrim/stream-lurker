@@ -9,9 +9,10 @@ const net = require('net');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const {
-  pingProof, isAllowedHost, isAllowedOrigin, isJsonContentType, codesMatch, maskCode,
+  pingProof, pingBody, isAllowedHost, isAllowedOrigin, isJsonContentType, codesMatch, maskCode,
   createPairingGuard, createReceiverHandler, createReceiverServer, listenOnFirstPort,
   MAX_IMPORT_BODY_BYTES, PING_PROOF_PREFIX, SIGNED_OUT_ERROR, APP_LOGIN_ERROR, autoSyncRefusalFor,
+  MIN_PROOF_CODE_LENGTH, TRUNCATED_CODE_ERROR,
 } = require('../main/cookie-receiver');
 const connector = require('../extension/connector.js');
 
@@ -109,6 +110,30 @@ test('C1 /ping: a 16-64 hex nonce gets the HMAC proof; anything else gets none',
   assert.notEqual(pingProof(CODE, r.port + 1, nonce), expected);
   const unbound = crypto.createHmac('sha256', CODE).update(`stream-lurker-ping:${nonce}`).digest('hex');
   assert.notEqual(expected, unbound, 'the pre-amendment message is no longer what is signed');
+});
+
+test('F17/issue-6: a code shorter than 32 characters signs no proof (one would give it away offline)', async (t) => {
+  assert.equal(MIN_PROOF_CODE_LENGTH, connector.MIN_CODE_LENGTH, 'the app and the extension agree on the floor');
+  const r = await startReceiver({ code: 'DEADBEEF' });
+  t.after(r.close);
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const res = await request(r.port, { path: `/ping?nonce=${nonce}` });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.json, { app: 'stream-lurker' });
+  // Just under the floor is still refused; the floor itself signs (the
+  // 32-character proof test above covers the full answer).
+  const url = new URL(`http://127.0.0.1/ping?nonce=${nonce}`);
+  assert.equal(pingBody(url.searchParams, 'A'.repeat(31), r.port).proof, undefined);
+  assert.equal(pingBody(url.searchParams, ` ${'A'.repeat(31)} `, r.port).proof, undefined, 'padding does not count');
+  assert.match(pingBody(url.searchParams, 'A'.repeat(32), r.port).proof, /^[0-9a-f]{64}$/);
+  for (const code of ['', null, undefined, 12345678]) {
+    assert.deepEqual(pingBody(url.searchParams, code, r.port), { app: 'stream-lurker' }, String(code));
+  }
+  // A short-code install still imports from connector 1.2, which never pings
+  // for a proof: only the proof is withheld.
+  const ok = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: 'deadbeef' }) });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.success, true);
 });
 
 test('C1 interop: the extension client verifies the proof and imports with the header code', async (t) => {
@@ -239,6 +264,59 @@ test('C1: an old extension (code in the body only) still imports; a wrong body c
   // A correct header wins over a wrong body field.
   const both = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ pairingCode: 'WRONG' }) });
   assert.equal(both.status, 200);
+});
+
+test('issue-8: connector 1.2 with a code cut to 16 characters is told to reload the extension', async (t) => {
+  // More attempts than the lockout allows; the lockout itself is tested below.
+  const r = await startReceiver({ guard: createPairingGuard({ maxFailures: 100 }) });
+  t.after(r.close);
+  const generic = 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.';
+  // 1.2's maxlength="16" field keeps the first 16 characters of the 32.
+  const cut = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: CODE.slice(0, 16) }) });
+  assert.equal(cut.status, 403);
+  assert.equal(cut.json.error, TRUNCATED_CODE_ERROR);
+  assert.match(cut.json.error, /Reload Stream Lurker Connector on your browser's Extensions page, then paste the code again\./);
+  assert.equal(r.codeRejections(), 1, 'counted like any wrong code');
+  assert.match(r.logs[0], /out-of-date copy of the browser extension that cut the pairing code to 16 characters/);
+  assert.ok(!r.logs[0].includes(CODE.slice(0, 16)), 'the log line stays masked');
+  // Header absence and length decide, not how much matches: any 16 characters
+  // get the same answer, so it is no partial-match oracle.
+  const other = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: 'Z'.repeat(16) }) });
+  assert.equal(other.json.error, TRUNCATED_CODE_ERROR);
+  // A 16-character code in the header (1.3 or later), a wrong full-length
+  // body code, or any other length keeps the generic text.
+  const header = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE.slice(0, 16) }), body: importBody() });
+  assert.equal(header.status, 403);
+  assert.equal(header.json.error, generic);
+  for (const pairingCode of ['F'.repeat(32), CODE.slice(0, 15), CODE.slice(0, 17), '']) {
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode }) });
+    assert.equal(res.status, 403, pairingCode);
+    assert.equal(res.json.error, generic, pairingCode);
+  }
+  assert.equal(r.codeRejections(), 7);
+  assert.equal(r.calls.length, 0);
+  // The whole code still imports through the same path.
+  const ok = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: CODE }) });
+  assert.equal(ok.status, 200);
+});
+
+test('issue-8: the reload hint still counts toward the lockout', async (t) => {
+  const r = await startReceiver();
+  t.after(r.close);
+  const cut = () => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: CODE.slice(0, 16) }) });
+  for (let i = 0; i < 5; i++) assert.equal((await cut()).status, 403);
+  assert.equal((await cut()).status, 429);
+  assert.equal(r.logs.filter(l => /refusing imports for 60 s/.test(l)).length, 1);
+});
+
+test('issue-8: an install still on an 8- or 16-character code never gets the reload hint', async (t) => {
+  for (const code of ['DEADBEEF', 'DEADBEEFDEADBEEF']) {
+    const r = await startReceiver({ code });
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: 'Q'.repeat(16) }) });
+    await r.close();
+    assert.equal(res.status, 403, code);
+    assert.notEqual(res.json.error, TRUNCATED_CODE_ERROR, `${code}: its own field held the whole code`);
+  }
 });
 
 test('F17: five wrong codes in a row lock /import for the lockout period, even for the right code', async (t) => {

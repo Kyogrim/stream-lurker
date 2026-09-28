@@ -15,7 +15,7 @@
 // add an extension folder), and Import merged every key of a file. Pure
 // functions, tested in test/main-config-boundary.test.js.
 
-const { SETTING_RANGES, clampSetting } = require('./config-sanitize');
+const { SETTING_RANGES, clampSetting, MAX_LOGGED_ENTRIES } = require('./config-sanitize');
 
 const KNOWN_PLATFORMS = ['twitch', 'kick', 'youtube', 'rumble'];
 const STREAMER_MODES = ['auto', 'notify', 'ignore'];
@@ -68,8 +68,9 @@ const MAX_USERNAME = 100;
 // Entries the dashboard may add to the monitored list in one save. Far above
 // any real lineup; it bounds what a compromised page can make main write.
 const MAX_STREAMERS = 2000;
-// Refusals logged one by one per save; the rest are counted in one line.
-const MAX_LOGGED_REFUSALS = 10;
+// Refusals logged one by one per save; the rest are counted in one line. The
+// same cap as for streamer entries a load or an import sets aside.
+const MAX_LOGGED_REFUSALS = MAX_LOGGED_ENTRIES;
 
 // typeof [] and typeof null are 'object' too.
 function isPlainObject(v) {

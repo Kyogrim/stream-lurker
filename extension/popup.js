@@ -67,10 +67,10 @@ async function refreshConnection() {
 }
 
 // A stored auto-sync failure that this check shows is fixed (the right code
-// pasted, the app updated) would otherwise stay in red until the next alarm,
-// up to 30 min, telling the user to do what they just did. Run the pass now,
-// once the worker can read the code that was just verified.
-const FIXABLE_STATUSES = ['code-mismatch', 'code-too-short', 'not-paired', 'app-outdated'];
+// pasted, a new code made in the app, the app updated) would otherwise stay in
+// red until the next alarm, up to 30 min, telling the user to do what they just
+// did. Run the pass now, once the worker can read the code that was just verified.
+const FIXABLE_STATUSES = ['code-mismatch', 'code-too-short', 'not-paired', 'app-code-too-short', 'app-outdated'];
 async function resyncIfFixed(code) {
   await codeSaved;
   const s = await chrome.storage.local.get({ pairingCode: '', lastResyncStatus: '' });

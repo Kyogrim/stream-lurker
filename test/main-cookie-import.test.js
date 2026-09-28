@@ -8,8 +8,9 @@ const assert = require('node:assert/strict');
 const {
   parseCookieBlob, normalizeExpiry, isHostOnlyCookie, cookieSetDetails, planCookieWrites,
   shouldClearExisting, removalUrl, isYouTubeCookieDomain, assignPastedYouTubeDomains, hasGoogleSessionCookies,
-  youtubeJarCookies,
+  youtubeJarCookies, isCookieHost, isCookieDomainOf, applyCookiePlan,
 } = require('../main/cookie-import');
+const { createSyncTickets } = require('../main/account-state');
 
 const NOW_S = 1_800_000_000;
 const ONE_YEAR_S = 60 * 60 * 24 * 365;
@@ -240,6 +241,137 @@ test('issue-19: a pasted session YouTube rejects is undone exactly, the probe pa
   assert.equal(writes.get('YSC|.youtube.com').expirationDate, NOW_S + ONE_YEAR_S, 'a session cookie comes back for a year, as imports always did');
 });
 
+// r4-2: writeCookieList's loop (applyCookiePlan), asked about the import's
+// ticket before every remove and set.
+
+// The jar above behind Electron's async ses.cookies, logging each call. Every
+// call waits a turn of the event loop, as a real one waits on the network
+// service, so two imports running at once interleave call by call.
+function asyncCookies(jar, { onCall = () => {} } = {}) {
+  const calls = [];
+  const turn = () => new Promise(r => setImmediate(r));
+  return {
+    calls,
+    async get(q) { await turn(); return jar.get(q); },
+    async remove(url, name) { calls.push(`remove ${name}`); onCall(calls); await turn(); jar.remove(url, name); },
+    async set(d) { calls.push(`set ${d.name}`); onCall(calls); await turn(); jar.set(d); },
+  };
+}
+
+const GOOGLE_NAMES = ['SID', 'HSID', 'SSID', '__Secure-1PSID', '__Secure-3PSID'];
+const googleSession = (value, extra = []) => [
+  ...GOOGLE_NAMES.map(name => ({ name, value, domain: '.google.com', path: '/', httpOnly: true })),
+  ...extra,
+];
+
+test('r4-2: without a ticket the plan runs whole, the same as the loop it replaced', async () => {
+  const initial = [
+    { name: 'VISITOR', value: 'stale', domain: '.youtube.com', path: '/' },
+    { name: 'PREF', value: 'legacy', domain: '.www.youtube.com', path: '/' },
+    { name: 'SID', value: 'other-site', domain: '.twitch.tv', path: '/' },
+  ];
+  const list = [
+    { name: 'VISITOR', value: 'a', domain: '.youtube.com', path: '/' },
+    { name: 'VISITOR', value: 'b', domain: 'm.youtube.com', path: '/' },
+    { name: 'PREF', value: 'new', domain: 'www.youtube.com', path: '/' },
+    { name: '__Host-GAPS', value: 'g', domain: 'accounts.google.com', path: '/' },
+    { name: 'SID', value: 's', domain: '.google.com', path: '/' },
+  ];
+  const oldLoop = createJar(initial);
+  const viaPlan = createJar(initial);
+  const count = applyPlan(oldLoop, list, '.youtube.com');
+  const r = await applyCookiePlan(planCookieWrites(list, { defaultDomain: '.youtube.com', nowS: NOW_S }), asyncCookies(viaPlan));
+  assert.deepEqual(r, { set: count, stopped: false });
+  assert.deepEqual(viaPlan.cookies, oldLoop.cookies);
+
+  // A cookie Chromium refuses is reported and the rest are still written.
+  const errors = [];
+  const refusing = { ...asyncCookies(createJar()), async set(d) { if (d.name === 'HSID') throw new Error('refused'); } };
+  const r2 = await applyCookiePlan(planCookieWrites(googleSession('v'), { nowS: NOW_S }), refusing, {
+    onSetError: (d, e) => errors.push(`${d.name}: ${e.message}`),
+  });
+  assert.deepEqual(r2, { set: GOOGLE_NAMES.length - 1, stopped: false });
+  assert.deepEqual(errors, ['HSID: refused']);
+});
+
+test('r4-2 regression: a re-sync whose ticket is taken between two writes removes and sets nothing more', async () => {
+  const tickets = createSyncTickets();
+  const ticket = tickets.take('youtube', { auto: true, isBlocked: () => false });
+  const jar = createJar(googleSession('app').map(c => ({ ...c })));
+  // A paste (or a Sign Out, or a login in the app) lands while the second
+  // set is on its way.
+  const cookies = asyncCookies(jar, {
+    onCall: (calls) => { if (calls.filter(c => c.startsWith('set ')).length === 2) tickets.bump('youtube'); },
+  });
+  const plan = planCookieWrites(googleSession('browser'), { nowS: NOW_S });
+  const r = await applyCookiePlan(plan, cookies, { stillValid: ticket.valid });
+  assert.deepEqual(r, { set: 2, stopped: true });
+  assert.deepEqual(cookies.calls, [
+    ...GOOGLE_NAMES.map(n => `remove ${n}`),
+    'set SID', 'set HSID', // the one already sent when the ticket went lands; nothing after it
+  ]);
+  assert.equal(ticket.valid(), false, 'so the importer undoes instead of saving the account');
+});
+
+test('r4-2 regression: a ticket taken during the clear phase stops the next remove, and nothing is set', async () => {
+  const tickets = createSyncTickets();
+  const ticket = tickets.take('twitch', { auto: true, isBlocked: () => false });
+  const jar = createJar([
+    { name: 'auth-token', value: 'app', domain: '.twitch.tv', path: '/' },
+    { name: 'unique_id', value: 'app', domain: '.twitch.tv', path: '/' },
+    { name: 'persistent', value: 'app', domain: '.twitch.tv', path: '/' },
+  ]);
+  const cookies = asyncCookies(jar, { onCall: (calls) => { if (calls.length === 1) tickets.bump('twitch'); } });
+  const list = ['auth-token', 'unique_id', 'persistent'].map(name => ({ name, value: 'browser', domain: '.twitch.tv', path: '/' }));
+  const r = await applyCookiePlan(planCookieWrites(list, { nowS: NOW_S }), cookies, { stillValid: ticket.valid });
+  assert.deepEqual(r, { set: 0, stopped: true });
+  assert.deepEqual(cookies.calls, ['remove auth-token']);
+  assert.deepEqual(jar.cookies.map(c => `${c.name}=${c.value}`), ['unique_id=app', 'persistent=app'], 'the rest of the jar is untouched');
+});
+
+// The failure the reviewer described: the extension's YouTube re-sync is part
+// way through ~60 cookies when a paste is submitted. The paste ends the
+// re-sync's ticket (importGoogleSession's bump) and runs its own clear and
+// write. Both loops then ran interleaved at every await.
+async function pasteDuringResync({ resyncStops }) {
+  const tickets = createSyncTickets();
+  const ticket = tickets.take('youtube', { auto: true, isBlocked: () => false });
+  const jar = createJar(googleSession('app').map(c => ({ ...c })));
+  const filler = Array.from({ length: 50 }, (_, i) => ({ name: `Y${i}`, value: 'browser', domain: '.youtube.com', path: '/' }));
+  let paste = null;
+  const resyncCookies = asyncCookies(jar, {
+    onCall: (calls) => {
+      if (calls.length !== 3 || paste) return;
+      tickets.bump('youtube'); // set-google-cookies -> importGoogleSession
+      paste = applyCookiePlan(planCookieWrites(googleSession('paste'), { nowS: NOW_S }), asyncCookies(jar));
+    },
+  });
+  const resync = applyCookiePlan(
+    planCookieWrites(googleSession('browser', filler), { nowS: NOW_S }),
+    resyncCookies,
+    resyncStops ? { stillValid: ticket.valid } : {},
+  );
+  const r = await resync;
+  assert.ok(paste, 'the paste started part way through the re-sync');
+  const pasted = await paste;
+  const google = jar.cookies.filter(c => GOOGLE_NAMES.includes(c.name)).map(c => `${c.name}=${c.value}`).sort();
+  return { r, pasted, google, all: jar.cookies };
+}
+
+test('r4-2 regression: a paste submitted during a YouTube re-sync ends up as the whole Google session', async () => {
+  const { r, pasted, google, all } = await pasteDuringResync({ resyncStops: true });
+  assert.equal(r.stopped, true);
+  assert.deepEqual(pasted, { set: GOOGLE_NAMES.length, stopped: false });
+  assert.deepEqual(google, GOOGLE_NAMES.map(n => `${n}=paste`).sort(), 'every Google sign-in cookie is the paste\'s');
+  assert.equal(all.filter(c => c.value === 'browser').length, 0, 'the re-sync wrote nothing after the paste began');
+
+  // The same run with the loop that ignored the ticket leaves browser
+  // cookies over the paste: the test catches the bug it guards.
+  const unguarded = await pasteDuringResync({ resyncStops: false });
+  assert.equal(unguarded.r.stopped, false);
+  assert.notDeepEqual(unguarded.google, GOOGLE_NAMES.map(n => `${n}=paste`).sort());
+});
+
 test('C1: YouTube imports keep youtube.com (any subdomain) and exactly google.com / accounts.google.com', () => {
   for (const d of ['youtube.com', '.youtube.com', 'www.youtube.com', '.www.youtube.com', 'm.youtube.com', 'google.com', '.google.com', 'accounts.google.com', '.accounts.google.com']) {
     assert.equal(isYouTubeCookieDomain(d), true, d);
@@ -247,6 +379,57 @@ test('C1: YouTube imports keep youtube.com (any subdomain) and exactly google.co
   for (const d of ['', 'mail.google.com', '.myaccount.google.com', 'youtube-nocookie.com', 'ytimg.com', 'gstatic.com', 'googleapis.com', 'evilyoutube.com', 'google.com.evil.com', 'google.co.uk']) {
     assert.equal(isYouTubeCookieDomain(d), false, d);
   }
+});
+
+test('issue-4: a domain that is not a bare hostname is refused by every platform filter and never written', () => {
+  // Each passes a plain suffix match and, being dotless, used to count as
+  // host-only: written to https://<everything before the path>/, a cookie
+  // on attacker.example or www.twitch.tv.
+  const crafted = [
+    ['attacker.example/.youtube.com', 'youtube.com'],
+    ['evil.com?.twitch.tv', 'twitch.tv'],
+    ['www.twitch.tv/.kick.com', 'kick.com'],
+    ['.attacker.example/.youtube.com', 'youtube.com'],
+    ['evil.com#.kick.com', 'kick.com'],
+    ['evil.com\\.twitch.tv', 'twitch.tv'],
+    ['user@evil.com.youtube.com', 'youtube.com'],
+    ['evil.com:443.kick.com', 'kick.com'],
+    ['evil.com .twitch.tv', 'twitch.tv'],
+    ['..youtube.com', 'youtube.com'],
+    ['youtube.com.', 'youtube.com'],
+  ];
+  for (const [domain, site] of crafted) {
+    assert.equal(isCookieHost(domain), false, domain);
+    assert.equal(isCookieDomainOf(domain, site), false, domain);
+    assert.equal(cookieSetDetails({ name: 'SID', value: 'v', domain }, { nowS: NOW_S }), null, domain);
+    assert.equal(cookieSetDetails({ name: 'SID', value: 'v', domain, hostOnly: false }, { nowS: NOW_S }), null, domain);
+  }
+  for (const domain of ['attacker.example/.youtube.com', 'evil.com?.google.com', 'x/.accounts.google.com']) {
+    assert.equal(isYouTubeCookieDomain(domain), false, domain);
+  }
+  // Nothing crafted reaches a write, and nothing is cleared on its account.
+  const plan = planCookieWrites(crafted.map(([domain]) => ({ name: 'auth-token', value: 'v', domain })), { nowS: NOW_S });
+  assert.deepEqual(plan.writes, []);
+  assert.equal(plan.clear.size, 0);
+  // Real domains still pass, host-only and domain cookies alike.
+  for (const [domain, site] of [['kick.com', 'kick.com'], ['.kick.com', 'kick.com'], ['www.twitch.tv', 'twitch.tv'], ['.twitch.tv', 'twitch.tv'], ['gql.twitch.tv', 'twitch.tv'], ['WWW.YouTube.com', 'youtube.com']]) {
+    assert.equal(isCookieDomainOf(domain, site), true, domain);
+    assert.ok(cookieSetDetails({ name: 'n', value: 'v', domain }, { nowS: NOW_S }), domain);
+  }
+  for (const [domain, site] of [['notkick.com', 'kick.com'], ['kick.com.evil.com', 'kick.com'], ['twitch.tv.evil', 'twitch.tv'], ['', 'kick.com']]) {
+    assert.equal(isCookieDomainOf(domain, site), false, domain);
+  }
+  // A cookie with no domain of its own still takes the import's default.
+  assert.equal(cookieSetDetails({ name: 'n', value: 'v' }, { defaultDomain: '.kick.com', nowS: NOW_S }).url, 'https://kick.com/');
+});
+
+test('issue-4: the Kick and Twitch imports filter through isCookieDomainOf', () => {
+  const mainJs = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8');
+  const body = (marker) => mainJs.slice(mainJs.indexOf(marker), mainJs.indexOf('\n}\n', mainJs.indexOf(marker)));
+  assert.match(body('async function importTwitchSession('), /\.filter\(c => c && c\.name && isCookieDomainOf\(c\.domain, 'twitch\.tv'\)\)/);
+  assert.match(body('async function importKickSession('), /\.filter\(c => c && isCookieDomainOf\(c\.domain, 'kick\.com'\)\)/);
+  // No suffix-only regex is left on an import path.
+  assert.doesNotMatch(mainJs, /\/\(\^\|\\\.\)(kick\\\.com|twitch\\\.tv)\$\//);
 });
 
 test('F40: a DevTools Cookie header becomes .youtube.com domain cookies and is accepted', () => {

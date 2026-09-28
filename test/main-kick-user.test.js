@@ -89,6 +89,30 @@ test('F36 regression: a stale session whose API answers {} names nobody, even if
   assert.equal(kickNameFrom(mixed), null);
 });
 
+test('issue-5: a revoked session the API answers 401 names nobody, even on the home page', async () => {
+  const { res } = await runOnPage({
+    cookie: 'session_token=revoked',
+    api: {
+      '/api/v1/user': { status: 401, body: '{"message":"Unauthenticated."}' },
+      '/api/v2/user': { status: 401, body: '{"message":"Unauthenticated."}' },
+    },
+    nextData: FEATURED,
+    userLink: '/bigstreamer',
+  });
+  assert.equal(res.source, null);
+  assert.equal(res.name, null);
+  assert.equal(kickNameToStore('Kick User', res), null, 'the featured streamer never becomes the account');
+  assert.ok(res.tried.includes('API answered without a user: the session is stale'));
+  // 419 (Laravel's expired session) is the same answer; one is enough.
+  const expired = (await runOnPage({
+    cookie: 'session_token=revoked',
+    api: { '/api/v1/user': { status: 419, body: '{"message":"CSRF token mismatch."}' }, '/api/v2/user': { status: 503, body: '' } },
+    nextData: FEATURED,
+  })).res;
+  assert.equal(expired.source, null);
+  assert.equal(kickNameToStore('Kick User', expired), null);
+});
+
 test('the page fallbacks still run when the API could not be asked at all', async () => {
   const { res } = await runOnPage({
     cookie: 'session_token=t',

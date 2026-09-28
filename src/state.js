@@ -61,6 +61,12 @@ export function escapeHtml(value) {
 // handed to a clip/download IPC. A match is the host itself or a subdomain.
 export const TWITCH_PAGE_HOSTS = ['twitch.tv'];
 export const TWITCH_MEDIA_HOSTS = ['twitch.tv', 'jtvnw.net', 'twitchcdn.net'];
+// Clip video files (videoQualities[].sourceURL, handed to download-clip).
+// Twitch serves current clips from this one CloudFront distribution; it is
+// named exactly because anyone can host on bare cloudfront.net. Kept apart
+// from TWITCH_MEDIA_HOSTS, which the CSP's img-src mirrors for thumbnails.
+// main/clip-download.js holds the same list.
+export const TWITCH_CLIP_FILE_HOSTS = [...TWITCH_MEDIA_HOSTS, 'd1ndex63qxojbr.cloudfront.net'];
 export const STREAM_HOSTS = ['twitch.tv', 'kick.com', 'youtube.com', 'rumble.com'];
 
 // Returns the normalized URL when it is https: on one of `allowedHosts`, else

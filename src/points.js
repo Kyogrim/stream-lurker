@@ -20,20 +20,39 @@ const inFlight = new WeakSet();
 // replaced, is never answered. multi-lurk.js recovers a crashed cell by
 // reloading the same <webview>, so holding it until that call settles would
 // skip the recovered cell for good. The bound is one pending call per page.
-const RELEASE_ON = ['render-process-gone', 'did-start-loading', 'destroyed'];
+// Each event maps to whether this occurrence ends the page the call went into.
+// Not did-start-loading: it fires when any frame starts loading, so in a hung
+// guest every ad or embed load would release the hold and let one more
+// never-answered call through. A navigation event carries its own frame and
+// document flags, where a read of isLoadingMainFrame() in the handler would
+// race the load it is asking about. A field that is missing reads as "release":
+// a hold that is never released skips the cell for good, an early release
+// costs one pending call.
+const RELEASE_ON = {
+  'render-process-gone': () => true,
+  'destroyed': () => true,
+  // Subframe and same-document (history API, as Twitch uses between channels)
+  // navigations leave the page, and the call into it, where they were.
+  'did-start-navigation': (e) => !e || (e.isMainFrame !== false && e.isInPlace !== true),
+};
 
 function holdWhilePending(webview, call) {
   let held = true;
+  const listeners = [];
   const release = () => {
     // Once only: after a reload has released it, a late answer from the old
     // page must not clear the hold of a call made into the new one.
     if (!held) return;
     held = false;
-    for (const type of RELEASE_ON) webview.removeEventListener(type, release);
+    for (const [type, fn] of listeners) webview.removeEventListener(type, fn);
     inFlight.delete(webview);
   };
   inFlight.add(webview);
-  for (const type of RELEASE_ON) webview.addEventListener(type, release);
+  for (const [type, endsPage] of Object.entries(RELEASE_ON)) {
+    const fn = (e) => { if (endsPage(e)) release(); };
+    listeners.push([type, fn]);
+    webview.addEventListener(type, fn);
+  }
   call.then(release, release);
 }
 

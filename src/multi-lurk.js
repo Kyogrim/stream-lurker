@@ -43,6 +43,10 @@ function lifeOf(cell) {
       onlineListener: null,
       loadFailed: false,   // the current main-frame load failed
       givingUp: false,
+      lastFailure: '',     // log phrase of the latest failure (describeCellFailure)
+      // Restarts recovery with a fresh budget (bound in bindCellActions);
+      // setCellPoppedOut calls it when the pop-out that held it off closes.
+      restartRecovery: null,
       ghostTimers: [],
       altTSent: 0,         // native Alt+T presses sent to the current page
       guestLog: createLineDeduper(), // forwarded page lines (guest-console.js)
@@ -61,12 +65,15 @@ function disposeCell(cell) {
   cellLife.delete(cell);
 }
 
-// Whether the user can currently see this cell's page.
+// Whether the user can currently see this cell's page. Mirrors style.css: in
+// single view only the maximized cell shows, and it shows even when it is
+// excluded from the grid (its sidebar tab is how such a stream is watched;
+// the single-view rule outranks .excluded-from-grid).
 function isCellOnScreen(cell) {
   if (!document.getElementById('tab-multi-lurk')?.classList.contains('active')) return false;
-  if (cell.classList.contains('excluded-from-grid') || cell.dataset.ghostMode === 'true') return false;
-  const g = cell.parentNode;
-  return !(g?.classList?.contains('single-view') && !cell.classList.contains('maximized'));
+  if (cell.dataset.ghostMode === 'true') return false;
+  if (cell.parentNode?.classList?.contains('single-view')) return cell.classList.contains('maximized');
+  return !cell.classList.contains('excluded-from-grid');
 }
 
 // Where keyboard focus sits relative to `webview` (see theater-key.js).
@@ -468,7 +475,10 @@ function bindCellActions(cell, platform, username) {
       life.onlineListener = () => {
         window.removeEventListener('online', life.onlineListener);
         life.onlineListener = null;
-        if (cell.isConnected) scheduleRecovery(what);
+        // navigator.onLine lags the real network, so the page may already be
+        // back (a manual reload, a late load). Reloading it then would only
+        // interrupt a working stream and spend one of the allowed reloads.
+        if (cell.isConnected && cell.dataset.crashed === 'true') scheduleRecovery(what);
       };
       window.addEventListener('online', life.onlineListener);
       return;
@@ -478,6 +488,13 @@ function bindCellActions(cell, platform, username) {
     life.reloadTimes = plan.recent;
     if (plan.action === 'give-up') {
       life.givingUp = true;
+      // Popped out, this cell is only the suspended grid copy, and the close
+      // path would also close the pop-out window the user is watching. Stop
+      // retrying the copy instead; closing the pop-out restarts recovery.
+      if (cell.dataset.poppedOut === 'true') {
+        appendLogMessage(`[Lurk] ${username} (${PLAT}): ${what}. ${MAX_RELOADS} reloads in ${RELOAD_WINDOW_MS / 60000} minutes did not fix the grid copy; leaving the pop-out window open and retrying when it closes.`);
+        return;
+      }
       appendLogMessage(`[Lurk] ${username} (${PLAT}): ${what}. ${MAX_RELOADS} reloads in ${RELOAD_WINDOW_MS / 60000} minutes did not fix it; closing the stream.`);
       // The close button's path: main finalizes the session and stops
       // crediting watch time, and won't reopen it for this broadcast.
@@ -501,7 +518,13 @@ function bindCellActions(cell, platform, username) {
     if (!what) return;
     if (type === 'did-fail-load') life.loadFailed = true;
     cell.dataset.crashed = 'true';
+    life.lastFailure = what;
     scheduleRecovery(what);
+  };
+  life.restartRecovery = () => {
+    life.givingUp = false;
+    life.reloadTimes = [];
+    if (cell.isConnected && cell.dataset.crashed === 'true') scheduleRecovery(life.lastFailure || 'page still down');
   };
   webview.addEventListener('render-process-gone', onPageFailure('render-process-gone'));
   webview.addEventListener('did-fail-load', onPageFailure('did-fail-load'));
@@ -518,6 +541,12 @@ function bindCellActions(cell, platform, username) {
   const markHealthy = () => {
     if (life.loadFailed || cell.dataset.crashed !== 'true') return;
     delete cell.dataset.crashed;
+    // The page came back by another route (the reload button, an extension
+    // change reloading every cell, a moved cell re-attaching). A recovery
+    // reload still pending would interrupt the working stream and spend one
+    // of the allowed reloads, closing the cell early on the next real failure.
+    clearTimeout(life.reloadTimer);
+    life.reloadTimer = null;
     if (safeHttpsUrl(currentUrl(), STREAM_HOSTS)) appendLogMessage(`[Lurk] ${username} (${PLAT}) recovered.`);
   };
   webview.addEventListener('did-finish-load', markHealthy);
@@ -573,6 +602,10 @@ function bindCellActions(cell, platform, username) {
     // interrupt the page they just asked for.
     clearTimeout(life.reloadTimer);
     life.reloadTimer = null;
+    // Same for an armed wait for the network: if this load fails too, its
+    // own did-fail-load arms a fresh one.
+    if (life.onlineListener) window.removeEventListener('online', life.onlineListener);
+    life.onlineListener = null;
     webview.reload();
   });
 
@@ -778,10 +811,16 @@ export function setCellPoppedOut(platform, username, on) {
       delete cell.dataset.autoGhostedByPopout;
       if (cell.dataset.ghostMode === 'true') cell.querySelector('.ghost-mode-btn')?.click();
     }
+    // The grid copy is the stream again. If recovery stood down while the
+    // pop-out was open, a dead copy would otherwise sit blank for good while
+    // main keeps crediting it; give it a fresh round, and the normal close.
+    cellLife.get(cell)?.restartRecovery?.();
   }
 }
 
-export function removeStreamTab(platform, username) {
+// sync: false, as for createStreamTab: the dashboard's boot applies stream
+// events that land before its restore without telling main a partial list.
+export function removeStreamTab(platform, username, { sync = true } = {}) {
   const tabId = streamTabId(platform, username);
   const cellId = gridCellId(platform, username);
 
@@ -821,7 +860,7 @@ export function removeStreamTab(platform, username) {
     switchTab('multi-lurk');
   }
 
-  syncActiveTabs();
+  if (sync) syncActiveTabs();
 }
 
 // Reload every open stream webview. Main asks for it whenever the loaded
@@ -837,8 +876,8 @@ export function reloadAllStreamContainers() {
   }
 }
 
-export function closeAllStreamTabs() {
+export function closeAllStreamTabs({ sync = true } = {}) {
   document.querySelectorAll('#multi-lurk-grid .stream-grid-cell').forEach(cell => {
-    removeStreamTab(cell.dataset.platform, cell.dataset.username);
+    removeStreamTab(cell.dataset.platform, cell.dataset.username, { sync });
   });
 }
