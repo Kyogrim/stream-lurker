@@ -1,7 +1,7 @@
 // "Live right now" glance — a top-bar pill showing how many monitored streamers
 // are currently live, with a popover to open any of them in one click.
 
-import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled, platformColorVar } from './state.js';
+import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled, platformColorVar, escapeHtml } from './state.js';
 
 function liveStreamers() {
   return state.currentStatuses
@@ -53,14 +53,14 @@ export function renderLiveNow() {
     const row = document.createElement('div');
     row.className = 'live-now-item';
     row.innerHTML = `
-      <span class="platform-badge ${p}" style="width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
+      <span class="platform-badge ${escapeHtml(p)}" style="width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
         ${getPlatformSVG(p)}
       </span>
       <div class="live-now-item-main">
-        <span class="live-now-item-name">${s.username}</span>
+        <span class="live-now-item-name">${escapeHtml(s.username)}</span>
         <span class="live-now-item-meta">
           <span class="live-now-viewers"><span class="live-now-vdot"></span>${formatViewerCount(s.viewerCount || 0)}</span>
-          ${s.category ? `<span class="live-now-cat">${s.category}</span>` : ''}
+          ${s.category ? `<span class="live-now-cat">${escapeHtml(s.category)}</span>` : ''}
         </span>
       </div>
       <button class="live-now-open ${isOpen ? 'is-open' : ''}" ${isOpen ? 'disabled' : ''}>${isOpen ? 'Open' : 'Watch'}</button>

@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('api', {
   setTwitchToken: (token) => ipcRenderer.invoke('set-twitch-token', token),
   setGoogleCookies: (blob) => ipcRenderer.invoke('set-google-cookies', blob),
   getExtensionInfo: () => ipcRenderer.invoke('get-extension-info'),
+  // Replaces the extension pairing code; resolves { pairingCode }.
+  rotatePairingCode: () => ipcRenderer.invoke('rotate-pairing-code'),
   openExtensionFolder: () => ipcRenderer.invoke('open-extension-folder'),
   logoutPlatform: (platform) => ipcRenderer.invoke('logout-platform', { platform }),
   onLoginSuccess: (callback) => safeOn('login-success', (event, data) => callback(data)),
@@ -29,17 +31,18 @@ contextBridge.exposeInMainWorld('api', {
   
   // Extension management
   selectExtensionFolder: () => ipcRenderer.invoke('select-extension-folder'),
+  // { unavailable: [path] }: folders not reachable at the last load (a drive
+  // not mounted yet). They stay in the list until the user removes them.
+  getExtensionStatus: () => ipcRenderer.invoke('get-extension-status'),
   
   // Actions
   forceScan: () => ipcRenderer.invoke('force-scan'),
   openStreamContainer: (platform, username) => ipcRenderer.invoke('open-stream-container', { platform, username }),
-  prioritizeStreamer: (platform, username) => ipcRenderer.invoke('prioritize-streamer', { platform, username }),
   closeStreamContainer: (platform, username) => ipcRenderer.invoke('close-stream-container', { platform, username }),
   popoutStream: (platform, username, url) => ipcRenderer.invoke('popout-stream', { platform, username, url }),
   updateActiveTabs: (tabsList) => ipcRenderer.invoke('update-active-tabs', tabsList),
   syncPlatformSchedules: () => ipcRenderer.invoke('sync-platform-schedules'),
 
-  getTwitchAuthToken: () => ipcRenderer.invoke('get-twitch-auth-token'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   downloadClip: (url, filename) => ipcRenderer.invoke('download-clip', url, filename),
   openClipWindow: (url) => ipcRenderer.invoke('open-clip-window', url),
@@ -51,7 +54,9 @@ contextBridge.exposeInMainWorld('api', {
   // Queries
   getRecentLogs: () => ipcRenderer.invoke('get-recent-logs'),
   getActiveContainers: () => ipcRenderer.invoke('get-active-containers'),
-  
+  // Last scan's statuses, so a reloaded dashboard need not wait a full interval.
+  getStatuses: () => ipcRenderer.invoke('get-statuses'),
+
   // Event listeners (Main -> Renderer) — using safeOn to prevent listener stacking
   onLogMessage: (callback) => {
     safeOn('log-message', (event, message) => callback(message));

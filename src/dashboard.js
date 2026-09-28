@@ -1,6 +1,6 @@
 // Monitor Panel grid of streamer cards, plus stats counters.
 
-import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled } from './state.js';
+import { state, getPlatformSVG, formatViewerCount, isPlatformEnabled, escapeHtml } from './state.js';
 
 function streamersGridEl() { return document.getElementById('streams-grid'); }
 
@@ -22,8 +22,8 @@ function createStreamerCardPlaceholder(platform, username) {
   card.innerHTML = `
     <div class="card-header-row">
       <div class="streamer-identity">
-        <div class="platform-badge ${platform.toLowerCase()}">${getPlatformSVG(platform)}</div>
-        <span class="streamer-username">${username}</span>
+        <div class="platform-badge ${escapeHtml(platform.toLowerCase())}">${getPlatformSVG(platform)}</div>
+        <span class="streamer-username">${escapeHtml(username)}</span>
       </div>
       <span class="live-badge offline">Checking...</span>
     </div>
@@ -52,8 +52,8 @@ function createStreamerCard(stream) {
   const detailsHTML = isLive
     ? `<div class="detail-item"><span class="viewers-dot"></span>${formatViewerCount(stream.viewerCount)} Lurkers</div>
        <div class="detail-item">|</div>
-       <div class="detail-item">${stream.category}</div>`
-    : `<div class="detail-item">${stream.error ? `Error: ${stream.error}` : 'Offline'}</div>`;
+       <div class="detail-item">${escapeHtml(stream.category)}</div>`
+    : `<div class="detail-item">${stream.error ? `Error: ${escapeHtml(stream.error)}` : 'Offline'}</div>`;
 
   const actionButtonText = isContainerOpen ? 'Close Container' : 'Open Container';
   const actionButtonClass = isContainerOpen
@@ -64,13 +64,13 @@ function createStreamerCard(stream) {
   card.innerHTML = `
     <div class="card-header-row">
       <div class="streamer-identity">
-        <div class="platform-badge ${platformLower}">${getPlatformSVG(platformLower)}</div>
-        <span class="streamer-username">${stream.username}</span>
+        <div class="platform-badge ${escapeHtml(platformLower)}">${getPlatformSVG(platformLower)}</div>
+        <span class="streamer-username">${escapeHtml(stream.username)}</span>
       </div>
       ${liveBadgeHTML}
     </div>
     <div class="card-body">
-      <p class="stream-title">${isLive ? stream.title : 'Stream is currently offline.'}</p>
+      <p class="stream-title">${isLive ? escapeHtml(stream.title) : 'Stream is currently offline.'}</p>
       <div class="stream-details">${detailsHTML}</div>
     </div>
     <div class="card-actions">

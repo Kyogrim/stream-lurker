@@ -2,27 +2,280 @@
 // They run in the guest context, not the renderer — keep them as plain strings
 // or string-producing functions.
 
+// ---------------------------------------------------------------------------
+// Page-side helpers. Each is serialized into the page script with toString(),
+// so the guest runs exactly the code test/page-*.test.js exercises. Keep them
+// self-contained: no imports, no module-level names, nothing captured.
+// ---------------------------------------------------------------------------
+
+// "1080p60 (Source)" -> { height: 1080, fps: 60 }. Anchored at the start so
+// YouTube's "Auto (720p)" and a parent row like "Quality 1080p" never parse.
+export function parseRendition(label) {
+  const m = /^(\d{3,4})p(\d{2,3})?/i.exec(String(label == null ? '' : label).trim());
+  return m ? { height: parseInt(m[1], 10), fps: m[2] ? parseInt(m[2], 10) : 0 } : null;
+}
+
+// Index of the menu row to click for a quality setting, or -1.
+// 'source' takes a row that names itself Source/Original, else the highest
+// rendition (labels are localized, "(Quelle)", "(Fuente)", so the ranking is
+// what makes it work everywhere). A 'NNNp' cap takes the best rendition at or
+// under it, else the lowest offered, so a source-only channel still resolves.
+// Auto rows never parse. Premium rows are skipped: for accounts without
+// Premium they open an upsell instead of switching quality.
+export function pickRendition(labels, quality) {
+  const want = String(quality == null ? '' : quality).trim().toLowerCase();
+  let named = -1;
+  const rows = [];
+  for (let i = 0; i < labels.length; i++) {
+    const text = String(labels[i] == null ? '' : labels[i]).trim();
+    if (!text || /premium/i.test(text)) continue;
+    if (named < 0 && /\b(source|original)\b/i.test(text) && !/^auto/i.test(text)) named = i;
+    const r = parseRendition(text);
+    if (r) rows.push({ i: i, h: r.height, f: r.fps });
+  }
+  if (want === 'source') {
+    if (named >= 0) return named;
+    let top = null;
+    for (const r of rows) if (!top || r.h > top.h || (r.h === top.h && r.f > top.f)) top = r;
+    return top ? top.i : -1;
+  }
+  const cap = parseInt(want, 10);
+  if (!(cap > 0)) return -1;
+  let under = null;
+  let lowest = null;
+  for (const r of rows) {
+    if (r.h <= cap && (!under || r.h > under.h || (r.h === under.h && r.f > under.f))) under = r;
+    if (!lowest || r.h < lowest.h || (r.h === lowest.h && r.f < lowest.f)) lowest = r;
+  }
+  return under ? under.i : (lowest ? lowest.i : -1);
+}
+
+// The "Quality" row of a player settings menu, in the UI languages the
+// platforms ship. Words for "quality" only: resolutions or "Auto" would also
+// match the rendition rows.
+export function isQualityLabel(text) {
+  return /quality|calidad|qualité|qualità|qualität|qualidade|kvalit|kwaliteit|kalite|jakość|laatu|minőség|calitate|качество|якість|ποιότητα|品質|画質|画质|畫質|质量|품질|화질|คุณภาพ|chất lượng|kualitas|الجودة/i
+    .test(String(text == null ? '' : text));
+}
+
+// Per-channel attempt budget for the menu-driven quality pickers (Twitch,
+// Kick). st is the previous state or null; obs is { key, quality, now,
+// videoHeight }. Keyed on the pathname, not the document: raids and in-page
+// channel switches keep the document, and a document-wide latch would skip
+// the next channel. Once a channel resolves or gives up, videoHeight is
+// ignored: ads and stream restarts report other heights and must not restart
+// the menu loop. Returns { st, action: idle|attempt|resolved|gaveup, log }.
+export function qualityStep(st, obs) {
+  // Wait before attempt 2, 3, ...: four quick tries, then minutes apart so a
+  // long pre-roll ad cannot use up the whole budget, then give up (~18 min).
+  const RETRY_MS = [15000, 15000, 15000, 120000, 300000, 600000];
+  const MAX_ATTEMPTS = RETRY_MS.length + 1;
+  const VERIFY_MS = 20000;
+  if (!st || st.key !== obs.key || st.quality !== obs.quality) {
+    st = { key: obs.key, quality: obs.quality, attempts: 0, lastAt: 0, pending: null,
+      resolved: false, gaveUp: false, failLogged: false, lastFail: '' };
+  } else {
+    st = Object.assign({}, st);
+  }
+  if (st.resolved || st.gaveUp) return { st: st, action: 'idle', log: '' };
+  // Nothing decoded yet (offline page, mature-content gate): the menu has no
+  // real renditions to pick from, so an attempt now would only burn budget.
+  if (!(obs.videoHeight > 0)) return { st: st, action: 'idle', log: '' };
+  let log = '';
+  if (st.pending) {
+    const p = st.pending;
+    if (p.height == null || obs.videoHeight <= p.height * 1.25) {
+      st.pending = null;
+      st.resolved = true;
+      return { st: st, action: 'resolved', log: 'Quality set to ' + p.label + ' on ' + st.key + '.' };
+    }
+    if (obs.now - p.at < VERIFY_MS) return { st: st, action: 'idle', log: '' };
+    st.pending = null;
+    st.lastFail = 'the player stayed at ' + obs.videoHeight + 'p after picking ' + p.label;
+    if (!st.failLogged) {
+      st.failLogged = true;
+      log = 'Could not confirm ' + st.quality + ' on ' + st.key + ' (' + st.lastFail + '); will retry a few times.';
+    }
+  }
+  if (st.attempts >= MAX_ATTEMPTS) {
+    st.gaveUp = true;
+    return { st: st, action: 'gaveup',
+      log: 'Giving up on ' + st.quality + ' for ' + st.key + ' after ' + st.attempts + ' attempts (' + (st.lastFail || 'no reason recorded') + ').' };
+  }
+  if (st.attempts > 0 && obs.now - st.lastAt < RETRY_MS[st.attempts - 1]) return { st: st, action: 'idle', log: log };
+  st.attempts += 1;
+  st.lastAt = obs.now;
+  return { st: st, action: 'attempt', log: log };
+}
+
+// Folds one menu walk into the state from qualityStep. outcome is
+// { picked: { label, height, checked } } or { fail: 'reason' }.
+export function qualityRecord(st, outcome, now) {
+  st = Object.assign({}, st);
+  const picked = outcome && outcome.picked;
+  if (picked) {
+    // Already the selected row: nothing to switch and nothing to wait for.
+    if (picked.checked) {
+      st.pending = null;
+      st.resolved = true;
+      return { st: st, log: 'Quality set to ' + picked.label + ' on ' + st.key + '.' };
+    }
+    st.pending = { label: picked.label, height: picked.height == null ? null : picked.height, at: now };
+    return { st: st, log: '' };
+  }
+  st.lastFail = (outcome && outcome.fail) || 'unknown error';
+  if (st.failLogged) return { st: st, log: '' };
+  st.failLogged = true;
+  return { st: st, log: 'Could not set ' + st.quality + ' on ' + st.key + ' (' + st.lastFail + '); will retry a few times.' };
+}
+
+// The theater button (Kick, and Twitch's button path). Click only while
+// theater is off (Kick's selector also matches "Exit theater mode"), latch
+// once a later tick shows the click changed something (label, icon, player
+// width), and stop after a few clicks, so a renamed label or an unrecognised
+// locale cannot keep the page toggling every tick. obs is { found, on, sig }.
+export function theaterStep(st, obs) {
+  const MAX_CLICKS = 5;
+  st = st ? Object.assign({}, st) : { clicks: 0, sig: null, done: false };
+  if (st.done || !obs.found) return { st: st, action: 'idle' };
+  if (obs.on || (st.sig !== null && obs.sig !== st.sig)) {
+    st.done = true;
+    return { st: st, action: 'latched' };
+  }
+  if (st.clicks >= MAX_CLICKS) {
+    st.done = true;
+    return { st: st, action: 'gaveup' };
+  }
+  st.clicks += 1;
+  st.sig = obs.sig;
+  return { st: st, action: 'click' };
+}
+
+// A synthetic click that behaves like one real click: pointer and mouse
+// down/up at the element's centre, then exactly one click. The old version
+// also called el.click() afterwards, so every toggle (theater, the settings
+// cog) fired twice and cancelled itself out. Retarget only to a real control:
+// class-name guesses like [class*="pointer"] hit Tailwind's cursor-pointer and
+// pointer-events-none and moved clicks off an option onto its list wrapper.
+// Events bubble, so a handler on a plain ancestor still sees the click.
+export function directClick(el) {
+  if (!el) return;
+  if (el.closest) {
+    const control = el.closest('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="option"], a[href]');
+    if (control) el = control;
+  }
+  let clicked = false;
+  try {
+    const r = el.getBoundingClientRect();
+    const at = { view: window, bubbles: true, cancelable: true, composed: true, button: 0,
+      clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2) };
+    const ptr = Object.assign({ pointerId: 1, isPrimary: true, pointerType: 'mouse' }, at);
+    el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ buttons: 1 }, ptr)));
+    el.dispatchEvent(new MouseEvent('mousedown', Object.assign({ buttons: 1 }, at)));
+    el.dispatchEvent(new PointerEvent('pointerup', ptr));
+    el.dispatchEvent(new MouseEvent('mouseup', at));
+    el.dispatchEvent(new MouseEvent('click', at));
+    clicked = true;
+  } catch (e) {
+    if (!clicked) { try { el.click(); } catch (err) {} }
+  }
+}
+
 export function qualityAndTheaterScript(quality) {
   return `
     (function() {
       const quality = ${JSON.stringify(quality)};
 
-      const directClick = (el) => {
-        if (!el) return;
-        try {
-          if (el.closest) {
-            const wrapper = el.closest('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [class*="clickable"], [class*="button"], [class*="btn"], [class*="betterhover"], [class*="pointer"]');
-            if (wrapper) el = wrapper;
-          }
-          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, button: 0 }));
-          el.dispatchEvent(new MouseEvent('mousedown', { view: window, bubbles: true, cancelable: true, button: 0 }));
-          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, button: 0 }));
-          el.dispatchEvent(new MouseEvent('mouseup', { view: window, bubbles: true, cancelable: true, button: 0 }));
-          el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true, button: 0 }));
-          el.click();
-        } catch(e) {
-          try { el.click(); } catch(err) {}
+      const parseRendition = ${parseRendition.toString()};
+      const pickRendition = ${pickRendition.toString()};
+      const isQualityLabel = ${isQualityLabel.toString()};
+      const qualityStep = ${qualityStep.toString()};
+      const qualityRecord = ${qualityRecord.toString()};
+      const theaterStep = ${theaterStep.toString()};
+      const directClick = ${directClick.toString()};
+
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      // Poll instead of a flat delay: on a slow frame a fixed 100ms read the
+      // menu before it rendered and counted that as a failed attempt.
+      const waitFor = async (fn, timeoutMs) => {
+        const until = Date.now() + timeoutMs;
+        for (;;) {
+          const v = fn();
+          if (v) return v;
+          if (Date.now() >= until) return null;
+          await sleep(100);
         }
+      };
+
+      const isShown = (node) => {
+        if (!node || !node.isConnected) return false;
+        if (node.getAttribute && node.getAttribute('data-state') === 'closed') return false;
+        const r = node.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+
+      // Close a settings menu this script opened, and only while it is still
+      // open: a blind toggle on the cog reopens a menu the page already shut.
+      // node is a concrete element seen inside the menu, never a re-run of a
+      // loose text heuristic, which can match ordinary text near the cog.
+      // With neither node nor aria-expanded there is no way to tell, so only
+      // Escape is sent: it can close the menu but never reopen it.
+      const closeMenu = async (cog, node, click) => {
+        const exp = cog && cog.getAttribute ? cog.getAttribute('aria-expanded') : null;
+        const known = exp === 'true' || exp === 'false' || !!node;
+        const open = () => {
+          const e = cog && cog.getAttribute ? cog.getAttribute('aria-expanded') : null;
+          if (e === 'true') return true;
+          if (e === 'false') return false;
+          return isShown(node);
+        };
+        if (known) {
+          if (!open()) return;
+          click(cog);
+          await sleep(300);
+          if (!open()) return;
+        }
+        const target = (node && node.isConnected) ? node : document;
+        ['keydown', 'keyup'].forEach(type => target.dispatchEvent(new KeyboardEvent(type, {
+          key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true
+        })));
+      };
+
+      // One attempt budget per channel for Twitch and Kick: resolve once, or
+      // give up after a few failed rounds, instead of reopening the settings
+      // menu every 15s for the life of the cell. Logs only on state changes.
+      const runQuality = async (tag, walk) => {
+        if (window.__autoQualityDisabled) {
+          // Re-enabling auto quality later should cap again from scratch.
+          window.__qualityState = null;
+          return;
+        }
+        if (window.__qualityBusy) return;
+        const video = document.querySelector('video');
+        const step = qualityStep(window.__qualityState, {
+          key: window.location.pathname, quality: quality, now: Date.now(),
+          videoHeight: video ? video.videoHeight : 0
+        });
+        window.__qualityState = step.st;
+        if (step.log) console.log('[' + tag + '] ' + step.log);
+        if (step.action === 'resolved') window.__qualitySet = quality;
+        if (step.action !== 'attempt') return;
+        window.__qualityBusy = true;
+        let outcome;
+        try {
+          outcome = await walk(step.st, video);
+        } catch (e) {
+          console.error('[' + tag + '] Error in quality setting loop: ' + e.message);
+          outcome = { fail: 'error: ' + e.message };
+        } finally {
+          window.__qualityBusy = false;
+        }
+        // Auto quality was switched off mid-walk and the state reset: drop it.
+        if (window.__qualityState !== step.st) return;
+        const rec = qualityRecord(window.__qualityState, outcome, Date.now());
+        window.__qualityState = rec.st;
+        if (rec.log) console.log('[' + tag + '] ' + rec.log);
+        if (rec.st.resolved) window.__qualitySet = quality;
       };
 
       const isChatElement = (el) => {
@@ -62,6 +315,66 @@ export function qualityAndTheaterScript(quality) {
       };
 
       if (window.location.host.includes('twitch.tv')) {
+        // The data-a-target hook is locale-independent; the text match is only
+        // a fallback. Filtering on English/French text made every other UI
+        // language flash the menu forever without ever capping quality.
+        const findTwitchQualityRow = () =>
+          document.querySelector('[data-a-target="player-settings-menu-item-quality"]') ||
+          Array.from(document.querySelectorAll('.player-menu__item, [role="menuitem"]'))
+            .find(el => isQualityLabel(el.textContent)) || null;
+
+        const readTwitchOptions = () => {
+          let rows = Array.from(document.querySelectorAll('[data-a-target="player-settings-submenu-quality-option"]'));
+          if (!rows.length) rows = Array.from(document.querySelectorAll('.tw-radio__label, .player-menu__item, [data-a-target="player-settings-menu-item"]'));
+          return rows.map(el => {
+            const input = el.control || el.querySelector('input[type="radio"]');
+            return {
+              el: el,
+              label: (el.textContent || '').trim(),
+              target: el.tagName === 'LABEL' ? el : (el.querySelector('label') || input || el),
+              checked: !!(input && input.checked) || el.getAttribute('aria-checked') === 'true'
+            };
+          });
+        };
+
+        const twitchMenuNode = (cog) => {
+          const menu = document.querySelector('[data-a-target="player-settings-menu"]');
+          if (menu) return menu;
+          const root = cog.closest('[data-a-target="video-player"], .video-player');
+          return root ? root.querySelector('[role="menu"]') : null;
+        };
+
+        const twitchQualityWalk = async () => {
+          const cog = document.querySelector('[data-a-target="player-settings-button"]');
+          if (!cog) return { fail: 'settings button not found' };
+          cog.click();
+          let seen = null;
+          try {
+            const row = await waitFor(findTwitchQualityRow, 3000);
+            if (!row) return { fail: 'Quality row not found in the settings menu' };
+            seen = row;
+            row.click();
+            // Wait for real rendition rows: until the submenu renders, the
+            // fallback selectors still see the parent menu's items.
+            const opts = await waitFor(() => {
+              const o = readTwitchOptions();
+              return o.some(x => parseRendition(x.label)) ? o : null;
+            }, 3000);
+            if (!opts) return { fail: 'the quality submenu listed no renditions' };
+            seen = opts[0].el;
+            const idx = pickRendition(opts.map(o => o.label), quality);
+            if (idx < 0) return { fail: 'no rendition fits ' + quality };
+            const o = opts[idx];
+            if (!o.checked) o.target.click();
+            const r = parseRendition(o.label);
+            return { picked: { label: o.label, height: quality === 'source' || !r ? null : r.height, checked: o.checked } };
+          } finally {
+            await sleep(150);
+            const menuNode = twitchMenuNode(cog);
+            await closeMenu(cog, [seen, menuNode].find(isShown) || menuNode || seen, el => el.click());
+          }
+        };
+
         setInterval(() => {
           try {
             // Auto-theater runs only until we observe theater mode active once.
@@ -74,6 +387,10 @@ export function qualityAndTheaterScript(quality) {
                           document.querySelector('button[aria-label*="Theater Mode"]');
 
               const isTheater = !!(
+                // Locale-independent hooks on the current Twitch layout (the
+                // older ones below no longer match anything).
+                document.querySelector('.persistent-player--theatre') ||
+                document.querySelector('.channel-page__video-player--theatre-mode') ||
                 document.querySelector('.video-player--theatre') ||
                 document.querySelector('.tw-html--theatre') ||
                 document.querySelector('[data-a-target="player-theatre-mode-button"][aria-checked="true"]') ||
@@ -91,7 +408,19 @@ export function qualityAndTheaterScript(quality) {
               if (isTheater) {
                 window.__twitchTheaterLatched = true;
               } else if (btn) {
-                directClick(btn);
+                // directClick now really toggles (it used to click twice), so
+                // confirm the click took and cap the tries: in a locale whose
+                // "exit" label is not listed above, isTheater stays false and
+                // an unchecked click would flip theatre every 3s for days.
+                const pc = playerContainer ? playerContainer.getBoundingClientRect() : null;
+                const tstep = theaterStep(window.__twitchTheaterState, {
+                  found: true,
+                  on: false,
+                  sig: [btn.getAttribute('aria-label'), btn.getAttribute('aria-checked'), pc ? Math.round(pc.width / 10) : 0].join('|')
+                });
+                window.__twitchTheaterState = tstep.st;
+                if (tstep.action === 'click') directClick(btn);
+                else if (tstep.action !== 'idle') window.__twitchTheaterLatched = true;
               } else {
                 if (playerContainer) {
                   playerContainer.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
@@ -114,95 +443,33 @@ export function qualityAndTheaterScript(quality) {
               }
             }
 
-            if (window.__autoQualityDisabled) return;
-
-            const video = document.querySelector('video');
-            const currentHeight = video ? video.videoHeight : 0;
-
-            let needChange = false;
-            if (currentHeight > 0) {
-              if (quality === '160p' && currentHeight > 200) needChange = true;
-              else if (quality === '360p' && currentHeight > 400) needChange = true;
-              else if (quality === '480p' && currentHeight > 540) needChange = true;
-              else if (quality === '720p' && currentHeight > 800) needChange = true;
-            } else if (window.__qualitySet !== quality) {
-              needChange = true;
-            }
-
-            if (needChange) {
-              const now = Date.now();
-              if (!window.__lastQualityAttemptTime || (now - window.__lastQualityAttemptTime > 15000)) {
-                window.__lastQualityAttemptTime = now;
-
-                const cog = document.querySelector('[data-a-target="player-settings-button"]');
-                if (cog) {
-                  cog.click();
-                  setTimeout(() => {
-                    const items = Array.from(document.querySelectorAll('[data-a-target="player-settings-menu-item-quality"], .player-menu__item'));
-                    const qualityItem = items.find(el => el.textContent.toLowerCase().includes('quality') || el.textContent.toLowerCase().includes('qualité'));
-                    if (qualityItem) {
-                      qualityItem.click();
-                      setTimeout(() => {
-                        const options = Array.from(document.querySelectorAll('.tw-radio__label, .player-menu__item, [data-a-target="player-settings-menu-item"]'));
-                        const targetOpt = options.find(el => el.textContent.toLowerCase().includes(quality === 'source' ? 'source' : quality));
-                        if (targetOpt) {
-                          targetOpt.click();
-                          window.__qualitySet = quality;
-                        } else if (quality !== '160p') {
-                          const lowestOpt = options.find(el => el.textContent.toLowerCase().includes('160p') || el.textContent.toLowerCase().includes('140p') || el.textContent.toLowerCase().includes('360p'));
-                          if (lowestOpt) {
-                            lowestOpt.click();
-                            window.__qualitySet = quality;
-                          }
-                        }
-                        cog.click();
-                      }, 100);
-                    } else {
-                      cog.click();
-                    }
-                  }, 100);
-                }
-              }
-            }
+            runQuality('Twitch Quality', twitchQualityWalk);
           } catch(e){}
         }, 3000);
       } else if (window.location.host.includes('kick.com')) {
-        setInterval(async () => {
+        setInterval(() => {
           try {
-            if (!window.__kickTheaterSet) {
-              const tbtn = document.querySelector('button[aria-label*="Theater"], button[title*="Theater"], button[aria-label*="theater"], button[title*="theater"]');
-              if (tbtn) {
-                directClick(tbtn);
-                window.__kickTheaterSet = true;
-              }
+            const tstate = window.__kickTheaterState;
+            if (!tstate || !tstate.done) {
+              const tbtn = document.querySelector('button[aria-label*="theater" i], button[title*="theater" i], button[aria-label*="theatre" i], button[title*="theatre" i]');
+              const tlabel = tbtn ? ((tbtn.getAttribute('aria-label') || '') + ' ' + (tbtn.getAttribute('title') || '')).toLowerCase() : '';
+              const ticon = tbtn ? tbtn.querySelector('path') : null;
+              const tvideo = document.querySelector('video');
+              const tstep = theaterStep(tstate, {
+                found: !!tbtn,
+                on: !!tbtn && (tbtn.getAttribute('aria-pressed') === 'true' || /exit|leave|normal|default|close|quit|disable/.test(tlabel)),
+                // Whatever a real toggle changes: label, pressed state, icon, player width.
+                sig: tbtn ? [tlabel, tbtn.getAttribute('aria-pressed'), ticon ? ticon.getAttribute('d') : '',
+                  tvideo ? Math.round(tvideo.getBoundingClientRect().width / 10) : 0].join('|') : ''
+              });
+              window.__kickTheaterState = tstep.st;
+              if (tstep.action === 'click') directClick(tbtn);
+              else if (tstep.action === 'gaveup') console.log('[Kick Theater] Theater button did not respond after ' + tstep.st.clicks + ' clicks; leaving the layout alone.');
             }
+          } catch(e){}
 
-            if (window.__autoQualityDisabled) return;
+          runQuality('Kick Quality', async (st, player) => {
             const targetQuality = quality;
-
-            const player = document.querySelector('video');
-            if (!player) {
-              console.log("[Kick Quality] Video element not found yet.");
-              return;
-            }
-
-            const currentHeight = player.videoHeight;
-            let needChange = false;
-            if (currentHeight > 0) {
-              if (targetQuality === '160p' && currentHeight > 200) needChange = true;
-              else if (targetQuality === '360p' && currentHeight > 400) needChange = true;
-              else if (targetQuality === '480p' && currentHeight > 540) needChange = true;
-              else if (targetQuality === '720p' && currentHeight > 800) needChange = true;
-            } else if (window.__qualitySet !== targetQuality) {
-              needChange = true;
-            }
-
-            if (!needChange) return;
-
-            const now = Date.now();
-            if (window.__lastQualityAttemptTime && (now - window.__lastQualityAttemptTime <= 15000)) return;
-            window.__lastQualityAttemptTime = now;
-            console.log("[Kick Quality] Starting quality check loop. Current Height: " + currentHeight + ", Target: " + targetQuality);
 
             const playerContainer = player.parentElement.closest('[id*="player"], [class*="player"], [class*="Player"]') || player.parentElement;
 
@@ -316,8 +583,9 @@ export function qualityAndTheaterScript(quality) {
             };
 
             let cog = findSettingsCog();
-            if (!cog) {
-              console.log("[Kick Quality] Settings cog not found directly. Clicking player container & player to mount controls overlay...");
+            // Clicking the player can pause it or fire player shortcuts, so only
+            // the first attempt on a channel uses it to reveal the controls.
+            if (!cog && st.attempts === 1) {
               const wasPaused = player.paused;
               if (playerContainer) directClick(playerContainer);
               directClick(player);
@@ -328,15 +596,11 @@ export function qualityAndTheaterScript(quality) {
               cog = findSettingsCog();
             }
 
-            if (!cog) {
-              console.log("[Kick Quality] Settings cog button still not found in DOM after click fallback.");
-              return;
-            }
+            if (!cog) return { fail: 'settings button not found' };
 
-            console.log("[Kick Quality] Found settings cog. Clicking to open menu...");
-            directClick(cog);
-            await new Promise(r => setTimeout(r, 400));
-
+            // Returns the visible rows and the menu element they came from, so
+            // closing can check that exact element instead of re-running this
+            // loose match, whose last fallback hits ordinary text near the cog.
             const findActiveMenu = (clickTarget) => {
               const playerRect = player.getBoundingClientRect();
               const viewportHeight = window.innerHeight;
@@ -357,10 +621,10 @@ export function qualityAndTheaterScript(quality) {
                   const text = (container.textContent || '').toLowerCase();
                   if (/quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質|720|1080|160|360|480|auto|source/i.test(text)) {
                     const items = Array.from(container.querySelectorAll('button, [role="menuitem"], [role="menuitemradio"], [role="button"], a, li, div, span'));
-                    return items.filter(el => {
+                    return { node: container, items: items.filter(el => {
                       const r = el.getBoundingClientRect();
                       return r.width > 0 && r.height > 0 && el.textContent.trim().length > 0;
-                    });
+                    }) };
                   }
                 }
               }
@@ -389,15 +653,15 @@ export function qualityAndTheaterScript(quality) {
 
                 if (bestContainer) {
                   const items = Array.from(bestContainer.querySelectorAll('button, [role="menuitem"], [role="menuitemradio"], [role="button"], a, li, div, span'));
-                  return items.filter(el => {
+                  return { node: bestContainer, items: items.filter(el => {
                     const r = el.getBoundingClientRect();
                     return r.width > 0 && r.height > 0 && el.textContent.trim().length > 0;
-                  });
+                  }) };
                 }
               }
 
               const allVisible = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], div, span'));
-              return allVisible.filter(el => {
+              return { node: null, items: allVisible.filter(el => {
                 if (isChatElement(el)) return false;
                 if (clickTarget && (el === clickTarget || clickTarget.contains(el))) return false;
                 const rect = el.getBoundingClientRect();
@@ -412,74 +676,83 @@ export function qualityAndTheaterScript(quality) {
 
                 const txt = el.textContent.toLowerCase().trim();
                 return /quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質|720p|1080p|480p|360p|160p/i.test(txt);
-              });
+              }) };
             };
-
-            const findMenuItems = () => findActiveMenu(cog);
-
-            const menuItems = findMenuItems();
 
             const isContainerElement = (el) => !!el.querySelector('button, [role="button"], [role="menuitem"], [role="menuitemradio"]');
 
-            const matchesTarget = (txt, pref) => {
-              if (txt.length >= 12) return false;
-              if (pref === 'source') {
-                return txt.includes('source') || txt.includes('auto') || txt.includes('original') || txt.includes('1080');
-              }
-              return txt === pref || txt === pref + '60' || txt.includes(pref) || txt.includes(pref.replace('p', ''));
-            };
-            const matchesFallback = (txt) => {
-              if (txt.length >= 12) return false;
-              return txt.includes('160') || txt.includes('360') || txt.includes('480') || txt.includes('720');
+            const isChecked = (el) => {
+              const on = (n) => !!n && (n.getAttribute('aria-checked') === 'true' || n.getAttribute('aria-selected') === 'true' || n.getAttribute('data-state') === 'checked');
+              if (on(el) || on(el.closest('[role="menuitemradio"], [role="option"]'))) return true;
+              const input = el.querySelector('input[type="radio"]');
+              return !!(input && input.checked);
             };
 
-            const pref = targetQuality.toLowerCase().trim();
+            // Ranks what the menu actually offers (see pickRendition): the old
+            // text match took the first row containing "auto" for Source, and
+            // had nothing to pick on a channel without the target rendition.
             const pickFrom = (items) => {
-              const targetOpt = items.find(el => !isContainerElement(el) && matchesTarget(el.textContent.toLowerCase().trim(), pref));
-              if (targetOpt) {
-                directClick(targetOpt);
-                window.__qualitySet = targetQuality;
-                return true;
-              }
-              const fallbackOpt = items.find(el => !isContainerElement(el) && matchesFallback(el.textContent.toLowerCase().trim()));
-              if (fallbackOpt) {
-                directClick(fallbackOpt);
-                window.__qualitySet = targetQuality;
-                return true;
-              }
-              return false;
+              const rows = items.filter(el => !isContainerElement(el));
+              const labels = rows.map(el => {
+                const txt = el.textContent.trim();
+                return txt.length < 12 ? txt : '';
+              });
+              const idx = pickRendition(labels, targetQuality);
+              if (idx < 0) return null;
+              const row = rows[idx];
+              const r = parseRendition(labels[idx]);
+              const checked = isChecked(row);
+              if (!checked) directClick(row);
+              return { label: labels[idx], height: targetQuality === 'source' || !r ? null : r.height, checked: checked };
             };
 
-            const hasResolutionsDirectly = menuItems.some(el => {
-              if (isContainerElement(el)) return false;
-              const txt = el.textContent.toLowerCase().trim();
-              if (txt.length >= 12) return false;
-              return /^(auto|source|\\d{3,4}p(\\d{2})?)$/i.test(txt) || (/\\d{3,4}/.test(txt) && (txt.includes('p') || txt.includes('auto') || txt.includes('source')));
-            });
+            // Whatever the loose match finds while the menu is still shut is
+            // page furniture (a control bar with "Auto" in it), visible either
+            // way, so it can never prove the menu is open.
+            const furniture = findActiveMenu(cog).node;
+            directClick(cog);
+            await new Promise(r => setTimeout(r, 400));
 
-            if (hasResolutionsDirectly) {
-              pickFrom(menuItems);
-            } else {
-              const qualityMenuItem = menuItems.find(el => {
+            const opened = [];
+            let picked = null;
+            try {
+              const menu = findActiveMenu(cog);
+              opened.push(menu.node);
+              const menuItems = menu.items;
+
+              const hasResolutionsDirectly = menuItems.some(el => {
                 if (isContainerElement(el)) return false;
                 const txt = el.textContent.toLowerCase().trim();
                 if (txt.length >= 12) return false;
-                return /quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質/i.test(txt) && txt.length < 30;
+                return /^(auto|source|\\d{3,4}p(\\d{2})?)$/i.test(txt) || (/\\d{3,4}/.test(txt) && (txt.includes('p') || txt.includes('auto') || txt.includes('source')));
               });
-              if (qualityMenuItem) {
-                directClick(qualityMenuItem);
-                await new Promise(r => setTimeout(r, 400));
-                pickFrom(findActiveMenu(qualityMenuItem));
-              } else {
-                pickFrom(menuItems);
-              }
-            }
 
-            await new Promise(r => setTimeout(r, 250));
-            if (findMenuItems().length > 0) directClick(cog);
-          } catch(e){
-            console.error("[Kick Quality] Error in quality setting loop: " + e.message);
-          }
+              if (hasResolutionsDirectly) {
+                picked = pickFrom(menuItems);
+              } else {
+                const qualityMenuItem = menuItems.find(el => {
+                  if (isContainerElement(el)) return false;
+                  const txt = el.textContent.toLowerCase().trim();
+                  if (txt.length >= 12) return false;
+                  return /quality|calidad|qualité|qualität|qualidade|qualità|качество|质量|品質/i.test(txt) && txt.length < 30;
+                });
+                if (qualityMenuItem) {
+                  directClick(qualityMenuItem);
+                  await new Promise(r => setTimeout(r, 400));
+                  const sub = findActiveMenu(qualityMenuItem);
+                  opened.push(sub.node);
+                  picked = pickFrom(sub.items);
+                } else {
+                  picked = pickFrom(menuItems);
+                }
+              }
+            } finally {
+              await new Promise(r => setTimeout(r, 250));
+              const real = opened.filter(n => n && n !== furniture);
+              await closeMenu(cog, real.slice().reverse().find(isShown) || real[real.length - 1] || null, directClick);
+            }
+            return picked ? { picked: picked } : { fail: 'no quality option fits ' + targetQuality };
+          });
         }, 3000);
       } else if (window.location.host.includes('youtube.com')) {
         setInterval(() => {
@@ -495,7 +768,7 @@ export function qualityAndTheaterScript(quality) {
             if (window.__autoQualityDisabled) return;
 
             try {
-              const ytQuality = quality === '160p' ? 'tiny' : (quality === '360p' ? 'small' : (quality === '480p' ? 'large' : 'hd1080'));
+              const ytQuality = quality === '160p' ? 'tiny' : (quality === '360p' ? 'small' : (quality === '480p' ? 'large' : (quality === 'source' ? 'highres' : 'hd1080')));
               localStorage.setItem('yt-player-quality', JSON.stringify({
                 creation: Date.now(),
                 data: ytQuality,
@@ -559,19 +832,15 @@ export function qualityAndTheaterScript(quality) {
                 if (!options.length) return;
                 clearInterval(pickOption);
 
-                const want = quality === '160p' ? '144' : (quality === 'source' ? 'auto' : quality.replace('p', ''));
-                let target = options.find(el => {
-                  const txt = (el.textContent || '').toLowerCase();
-                  return want === 'auto' ? /auto|自动|自動/i.test(txt) : txt.indexOf(want) !== -1;
-                });
-                if (!target && want !== 'auto') {
-                  // Fall back to the lowest resolution this stream actually
-                  // offers, rather than whatever sits last in the menu.
-                  const ranked = options
-                    .map(el => ({ el: el, h: parseInt(((el.textContent || '').match(/(\\d{3,4})p/) || [])[1], 10) }))
-                    .filter(o => !isNaN(o.h))
-                    .sort((a, b) => a.h - b.h);
-                  target = ranked.length ? ranked[0].el : null;
+                // Rank the rows the stream actually offers (see pickRendition).
+                // Source used to map to Auto, which in a scaled-down webview
+                // adapts below the best rendition; 160p lands on 144p, and a
+                // missing target falls back to the best rendition under it.
+                const idx = pickRendition(options.map(el => (el.textContent || '').trim()), quality);
+                let target = idx >= 0 ? options[idx] : null;
+                // Auto only when no row carries a resolution at all.
+                if (!target && quality === 'source') {
+                  target = options.find(el => /auto|自动|自動/i.test(el.textContent || '')) || null;
                 }
                 if (!target) { finish(true); return; }
 
@@ -615,16 +884,26 @@ export const ghostResumeScript = `
   })();
 `;
 
-export function autoClaimPointsScript(username) {
+// Clicks the channel-points chest if one is waiting and evaluates to true when
+// it did, so the poller can log the claim itself (the guest console never
+// reached the activity log). Only ever the chest's own button: a selector list
+// returns the first match in document order, and the generic secondary-button
+// class it used to include clicked whatever button came first on the page.
+// The class hook is locale-independent; the aria-label fallback is English
+// only, so it is restricted to buttons.
+export function autoClaimPointsScript() {
   return `
     (function() {
       try {
-        const bonusBtn = document.querySelector('.claimable-bonus__icon, [aria-label="Claim Bonus"], .tw-button-restyle--secondary');
-        if (bonusBtn) {
-          bonusBtn.click();
-          console.log('[Rewards - ${username}] Claimed channel points chest!');
+        const scope = document.querySelector('.community-points-summary, [data-test-selector="community-points-summary"]') || document;
+        const icon = scope.querySelector('.claimable-bonus__icon');
+        const btn = (icon && icon.closest('button')) || scope.querySelector('button[aria-label="Claim Bonus"]');
+        if (btn && !btn.disabled) {
+          btn.click();
+          return true;
         }
       } catch(e) {}
+      return false;
     })();
   `;
 }

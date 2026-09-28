@@ -3,12 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: https: wss:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; connect-src 'self' https: wss:; object-src 'none';">
+  <!--
+    Scripts: only this app's own files ('self' also covers a custom app scheme).
+    No inline scripts or on*= handlers anywhere; renderer code wires events in JS.
+    style-src keeps 'unsafe-inline' for the style="" attributes in the templates.
+    img-src matches TWITCH_MEDIA_HOSTS in src/state.js (clip thumbnails).
+    frame-src keeps https: so <webview> guests behave exactly as before.
+    Web fonts are attached by src/fonts.js, not a blocking <link> here.
+    test/renderer-csp.test.js pins this policy.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https://*.jtvnw.net https://*.twitch.tv https://*.twitchcdn.net; connect-src 'self' https://gql.twitch.tv; frame-src 'self' https:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Stream Lurker</title>
   <link rel="stylesheet" href="style.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="app-container">
@@ -194,7 +200,7 @@
       <section id="tab-logins" class="tab-content">
         <div class="tab-header">
           <h2>Platform Logins</h2>
-          <p>Log in securely to Twitch, Kick, YouTube, and Rumble inside Stream Lurker. All active streams will automatically share these credentials.</p>
+          <p>Connect your Twitch, Kick and YouTube accounts. The Stream Lurker Connector extension below brings over the session you are already signed into in your browser, and every lurk tab shares it.</p>
         </div>
 
         <!-- 1-click login via the companion browser extension -->
@@ -345,8 +351,10 @@
             </div>
           </div>
 
-          <!-- Rumble Login Panel -->
-          <div class="glass-panel login-card rumble-login-card">
+          <!-- Rumble Login Panel. Rumble is force-disabled (main.js), so the card
+               starts hidden; applyServiceToggles only ever reveals it for an
+               enabled platform. The markup stays for login.js's rumble-* lookups. -->
+          <div class="glass-panel login-card rumble-login-card hidden">
             <div class="login-card-header">
               <div class="platform-title-group">
                 <span class="platform-icon-lime"></span>
@@ -492,10 +500,13 @@
           <div class="calendar-days-container glass-panel" style="display: flex; flex-direction: column; gap: 16px; overflow: hidden; min-height: 500px;">
             <div class="calendar-header-row" style="display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--panel-border); padding-bottom: 12px; margin-bottom: 8px;">
               <h3 style="font-size: 1.15rem; font-weight: 700;">Weekly Schedule</h3>
-              <button id="sync-calendar-btn" class="btn btn-cyan btn-sm">
-                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                Sync Platform Schedules
-              </button>
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <span id="calendar-sync-status" aria-live="polite" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+                <button id="sync-calendar-btn" class="btn btn-cyan btn-sm">
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  Sync Platform Schedules
+                </button>
+              </div>
             </div>
             <div class="days-columns" style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; flex-grow: 1; overflow-x: auto; overflow-y: hidden; min-width: 800px; padding-bottom: 10px;">
               <!-- Dynamically populated rolling calendar columns -->
@@ -628,7 +639,7 @@
             <div class="quick-guide">
               <h4>Quick Guide to Install uBlock Origin (Adblock):</h4>
               <ol>
-                <li>Download the unpacked uBlock Origin source zip from <a href="#" onclick="require('electron').shell.openExternal('https://github.com/gorhill/uBlock/releases')">uBlock Origin Releases</a> (e.g., <code>uBlock0_x.x.x.chromium.zip</code>).</li>
+                <li>Download the unpacked uBlock Origin source zip from <a href="#" data-external-url="https://github.com/gorhill/uBlock/releases">uBlock Origin Releases</a> (e.g., <code>uBlock0_x.x.x.chromium.zip</code>).</li>
                 <li>Extract the ZIP file into a permanent folder on your computer.</li>
                 <li>Click the <strong>Add Unpacked Extension</strong> button below and select that extracted folder!</li>
               </ol>
@@ -909,8 +920,8 @@
             </div>
             
             <div class="help-info-box">
-              <strong>Why is this required?</strong> Official Twitch status checking requires registering a free developer application to get a Client ID & Secret. Without these, Twitch streamers cannot be checked.
-              <a href="#" onclick="require('electron').shell.openExternal('https://dev.twitch.tv/console')">Register on Twitch Dev Console</a>
+              <strong>Optional.</strong> Stream Lurker checks Twitch without any keys. If you add a Client ID &amp; Secret from a free Twitch developer application, it uses the official Helix API instead, and falls back to the key-free check for any channel Helix can't answer.
+              <a href="#" data-external-url="https://dev.twitch.tv/console">Register on Twitch Dev Console</a>
             </div>
 
             <div class="form-group">

@@ -1,6 +1,6 @@
 // Custom Chrome extensions loaded into webview containers.
 
-import { state, appendLogMessage } from './state.js';
+import { state, appendLogMessage, escapeHtml, safeHttpsUrl } from './state.js';
 
 function listEl() { return document.getElementById('extensions-list'); }
 function catalogEl() { return document.getElementById('ext-catalog-grid'); }
@@ -14,7 +14,7 @@ export async function renderExtensionCatalog() {
   try {
     items = await window.api.listCatalogExtensions();
   } catch (err) {
-    host.innerHTML = `<div style="grid-column: 1 / -1; color: var(--text-muted); font-size: 0.85rem;">Failed to load catalog: ${err.message}</div>`;
+    host.innerHTML = `<div style="grid-column: 1 / -1; color: var(--text-muted); font-size: 0.85rem;">Failed to load catalog: ${escapeHtml(err?.message)}</div>`;
     return;
   }
 
@@ -31,21 +31,25 @@ export async function renderExtensionCatalog() {
       flex-direction: column;
       gap: 10px;
     `;
+    // The installed version is read from a third-party release zip's manifest,
+    // so it is escaped like everything else here. The repo link is only shown
+    // for an https GitHub URL.
     const installedBadge = item.installed
-      ? `<span style="font-size: 0.7rem; color: var(--text-secondary); background: var(--panel-border); padding: 2px 8px; border-radius: 10px;">Installed v${item.installed.version}</span>`
+      ? `<span style="font-size: 0.7rem; color: var(--text-secondary); background: var(--panel-border); padding: 2px 8px; border-radius: 10px;">Installed v${escapeHtml(item.installed.version)}</span>`
       : '';
+    const repoUrl = safeHttpsUrl(item.repoUrl, ['github.com']);
     card.innerHTML = `
       <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-        <strong style="font-size: 0.95rem;">${item.name}</strong>
+        <strong style="font-size: 0.95rem;">${escapeHtml(item.name)}</strong>
         ${installedBadge}
       </div>
-      <p style="font-size: 0.78rem; color: var(--text-muted); margin: 0; line-height: 1.4; flex-grow: 1;">${item.description}</p>
-      <a href="#" data-repo-url="${item.repoUrl}" style="font-size: 0.7rem; color: var(--cyan-color); text-decoration: none;">${item.repo} ↗</a>
+      <p style="font-size: 0.78rem; color: var(--text-muted); margin: 0; line-height: 1.4; flex-grow: 1;">${escapeHtml(item.description)}</p>
+      ${repoUrl ? `<a href="#" data-repo-url="${escapeHtml(repoUrl)}" style="font-size: 0.7rem; color: var(--cyan-color); text-decoration: none;">${escapeHtml(item.repo)} ↗</a>` : ''}
       <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-        <button class="btn btn-sm btn-cyan catalog-install-btn" data-id="${item.id}" style="flex-grow: 1;">
+        <button class="btn btn-sm btn-cyan catalog-install-btn" data-id="${escapeHtml(item.id)}" style="flex-grow: 1;">
           ${item.installed ? 'Update' : 'Install'}
         </button>
-        ${item.installed ? `<button class="btn btn-sm catalog-uninstall-btn" data-id="${item.id}" style="background: transparent; border: 1px solid var(--panel-border); color: var(--text-secondary);">Remove</button>` : ''}
+        ${item.installed ? `<button class="btn btn-sm catalog-uninstall-btn" data-id="${escapeHtml(item.id)}" style="background: transparent; border: 1px solid var(--panel-border); color: var(--text-secondary);">Remove</button>` : ''}
       </div>
       <div class="catalog-status" style="font-size: 0.72rem; color: var(--text-muted); min-height: 14px;"></div>
     `;
@@ -105,7 +109,10 @@ export function renderExtensionsList() {
   host.innerHTML = '';
 
   const cfg = state.currentConfig;
-  if (!cfg || cfg.extensions.length === 0) {
+  // An imported config can carry null or a non-list here (F93); show it as
+  // empty rather than throwing out of startup.
+  const exts = Array.isArray(cfg?.extensions) ? cfg.extensions : [];
+  if (exts.length === 0) {
     host.innerHTML = `
       <div class="no-extensions-message">
         <p>No custom extensions added yet. Add an unpacked folder above to load extensions inside the browser containers.</p>
@@ -114,14 +121,15 @@ export function renderExtensionsList() {
     return;
   }
 
-  cfg.extensions.forEach((extPath, index) => {
+  exts.forEach((extPath, index) => {
+    if (typeof extPath !== 'string') return;
     const extName = extPath.split(/[\\/]/).pop() || 'Chrome Extension';
 
     const row = document.createElement('div');
     row.className = 'ext-item';
     row.innerHTML = `
       <div class="ext-item-header">
-        <span class="ext-item-title">${extName}</span>
+        <span class="ext-item-title">${escapeHtml(extName)}</span>
         <div style="display: flex; align-items: center; gap: 8px;">
           <span class="ext-item-ver">Active</span>
           <button class="delete-btn remove-ext-btn" title="Remove Extension">
@@ -129,7 +137,7 @@ export function renderExtensionsList() {
           </button>
         </div>
       </div>
-      <div class="ext-item-path">${extPath}</div>
+      <div class="ext-item-path">${escapeHtml(extPath)}</div>
     `;
 
     row.querySelector('.remove-ext-btn').addEventListener('click', async () => {

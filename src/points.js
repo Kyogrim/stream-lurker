@@ -5,35 +5,94 @@ import { state, appendLogMessage } from './state.js';
 import { autoClaimPointsScript } from './inject.js';
 
 const POLL_INTERVAL_MS = 30_000;
+// executeJavaScript has no timeout of its own, and against a crashed or hung
+// guest it never settles. Past this a cell stops holding up the cells after it
+// and the next poll.
+const CLAIM_TIMEOUT_MS = 5_000;
 
-async function pollOnce() {
+let polling = false;
+// Webviews whose last claim call has not settled. A timeout frees the poll but
+// not the call: it stays pending, with a reply listener in main, until the
+// guest answers. So a stuck guest gets no second call until the first one
+// returns: at most one pending call per cell, never one more every 30 s.
+const inFlight = new WeakSet();
+
+// Worth calling into: attached, renderer alive, not mid-navigation. Main holds
+// executeJavaScript until a loading page stops loading and never answers for a
+// dead renderer, so calling into either only piles up pending calls.
+function guestReady(cell, webview) {
+  if (!cell.isConnected || !webview.isConnected) return false;
+  try {
+    // Both throw until the webview is attached, which is also "not ready".
+    return !webview.isCrashed() && !webview.isLoadingMainFrame();
+  } catch {
+    return false;
+  }
+}
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer from the page after ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function claimOne(webview, username, timeoutMs, log) {
+  try {
+    // One round trip: the claim script is its own readiness probe, it does
+    // nothing on a page without a chest.
+    const call = webview.executeJavaScript(autoClaimPointsScript());
+    inFlight.add(webview);
+    const release = () => inFlight.delete(webview);
+    call.then(release, release);
+    if (await withTimeout(call, timeoutMs) === true) {
+      log(`[Rewards - ${username}] Claimed channel points chest!`);
+    }
+  } catch (err) {
+    log(`[Points - ${username}] Polling process error: ${err.message || err}`);
+  }
+}
+
+// One pass over the Twitch cells. Options exist for the tests; the app calls it
+// with none.
+export async function pollOnce({
+  cells = Array.from(document.querySelectorAll('.stream-grid-cell[data-platform="twitch"]')),
+  timeoutMs = CLAIM_TIMEOUT_MS,
+  log = appendLogMessage,
+} = {}) {
   const cfg = state.currentConfig;
   if (!cfg) return;
 
   const wantPoints = cfg.autoClaimPoints !== false;
   if (!wantPoints) return;
 
-  const twitchCells = Array.from(document.querySelectorAll('.stream-grid-cell[data-platform="twitch"]'));
-  if (twitchCells.length === 0) return;
-
-  for (const cell of twitchCells) {
+  const jobs = [];
+  for (const cell of cells) {
     const webview = cell.querySelector('webview');
-    const username = cell.dataset.username;
-    if (!webview) continue;
-
-    try {
-      const isReady = await webview.executeJavaScript('!!document.cookie');
-      if (!isReady) continue;
-
-      await webview.executeJavaScript(autoClaimPointsScript(username)).catch(err => console.error(err));
-    } catch (err) {
-      appendLogMessage(`[Points - ${username}] Polling process error: ${err.message || err}`);
-    }
+    if (!webview || inFlight.has(webview) || !guestReady(cell, webview)) continue;
+    jobs.push(claimOne(webview, cell.dataset.username, timeoutMs, log));
   }
+  // In parallel and settled, so one slow or broken cell never skips the rest.
+  await Promise.allSettled(jobs);
+}
+
+// One poll at a time. Safe only because every call inside is bounded by
+// CLAIM_TIMEOUT_MS: a busy flag over an unbounded await would stop claiming
+// for good after the first hang.
+export async function pollTick(options) {
+  if (polling) return false;
+  polling = true;
+  try {
+    await pollOnce(options);
+  } finally {
+    polling = false;
+  }
+  return true;
 }
 
 export function startPointsPoller() {
   setInterval(() => {
-    pollOnce().catch(err => console.error('Error in Points poller:', err?.message || err));
+    pollTick().catch(err => console.error('Error in Points poller:', err?.message || err));
   }, POLL_INTERVAL_MS);
 }

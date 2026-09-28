@@ -1,7 +1,7 @@
 // Sync live followed channels from Twitch (via main-process GQL). Kick scan
 // was removed — Cloudflare/Kasada protection made the scrape unreliable.
 
-import { state, appendLogMessage } from './state.js';
+import { state, appendLogMessage, escapeHtml } from './state.js';
 import { renderMonitoredList } from './streamers.js';
 import { updateStats } from './dashboard.js';
 
@@ -14,7 +14,7 @@ export function renderFollowsList() {
   if (list.length === 0) {
     host.innerHTML = `
       <div class="no-follows-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 15px 0; width: 100%;">
-        No live channels discovered for ${state.activeFollowsTab.toUpperCase()}. Click Scan Live or ensure you are logged in.
+        No live channels discovered for ${escapeHtml(state.activeFollowsTab.toUpperCase())}. Click Scan Live or ensure you are logged in.
       </div>
     `;
     return;
@@ -40,7 +40,7 @@ export function renderFollowsList() {
     item.innerHTML = `
       <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
         <span class="live-pulse-dot" style="width: 8px; height: 8px; background-color: var(--danger-color); border-radius: 50%; display: inline-block; box-shadow: 0 0 5px var(--danger-color);"></span>
-        ${username}
+        ${escapeHtml(username)}
       </span>
       <button class="btn btn-sm ${isMonitored ? 'btn-monitored' : 'btn-cyan'}" style="font-size: 0.65rem; padding: 4px 8px; border-radius: var(--radius-sm);" ${isMonitored ? 'disabled' : ''}>
         ${isMonitored ? 'Monitored' : '[+] Add to Lurk'}

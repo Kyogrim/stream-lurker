@@ -2,13 +2,81 @@
 // Each lurked stream has (1) a sidebar tab button and (2) a webview cell in
 // the grid. createStreamTab builds both; removeStreamTab tears them down.
 
-import { state, getPlatformSVG, streamUrl, appendLogMessage, fmtDuration, formatViewerCount } from './state.js';
+import {
+  state, getPlatformSVG, appendLogMessage, fmtDuration, formatViewerCount, escapeHtml,
+  safeHttpsUrl, STREAM_HOSTS, streamTabId, gridCellId,
+} from './state.js';
 import { switchTab } from './tabs.js';
+import { createStreamWebview } from './stream-webview.js';
+import { describeCellFailure, planCellRecovery, MAX_RELOADS, RELOAD_WINDOW_MS } from './cell-recovery.js';
+import { theaterKeyDecision } from './theater-key.js';
 import {
   qualityAndTheaterScript,
   ghostSuspendScript,
   ghostResumeScript,
 } from './inject.js';
+
+// Pages the quality/theatre script is injected into. Matched on the exact host
+// or a subdomain: a substring test let twitch.tv.example.net through.
+const INJECT_HOSTS = ['twitch.tv', 'kick.com', 'youtube.com'];
+
+// At dom-ready the platform has usually not inserted its <video> yet, and the
+// ghost script does nothing without one, so a reloaded ghosted cell re-applies
+// it a few times while the player comes up.
+const GHOST_REAPPLY_DELAYS_MS = [0, 3000, 10000, 25000];
+
+// How long a cell keeps the keyboard focus it took for a native Alt+T. The key
+// travels renderer -> main -> guest, so it needs a moment to land first.
+const ALT_T_FOCUS_RETURN_MS = 500;
+
+// Timers and listeners a cell owns outside its DOM. removeStreamTab disposes
+// them, so nothing fires against a removed webview (reload() on one throws).
+const cellLife = new WeakMap();
+
+function lifeOf(cell) {
+  let life = cellLife.get(cell);
+  if (!life) {
+    life = {
+      reloadTimes: [],     // when recovery reloads ran (see cell-recovery.js)
+      reloadTimer: null,
+      onlineListener: null,
+      loadFailed: false,   // the current main-frame load failed
+      givingUp: false,
+      ghostTimers: [],
+      altTSent: 0,         // native Alt+T presses sent to the current page
+    };
+    cellLife.set(cell, life);
+  }
+  return life;
+}
+
+function disposeCell(cell) {
+  const life = cellLife.get(cell);
+  if (!life) return;
+  clearTimeout(life.reloadTimer);
+  life.ghostTimers.forEach(clearTimeout);
+  if (life.onlineListener) window.removeEventListener('online', life.onlineListener);
+  cellLife.delete(cell);
+}
+
+// Whether the user can currently see this cell's page.
+function isCellOnScreen(cell) {
+  if (!document.getElementById('tab-multi-lurk')?.classList.contains('active')) return false;
+  if (cell.classList.contains('excluded-from-grid') || cell.dataset.ghostMode === 'true') return false;
+  const g = cell.parentNode;
+  return !(g?.classList?.contains('single-view') && !cell.classList.contains('maximized'));
+}
+
+// Where keyboard focus sits relative to `webview` (see theater-key.js).
+function focusOwnerFor(webview) {
+  const el = document.activeElement;
+  if (!el || el === document.body || el === document.documentElement) return 'none';
+  if (el === webview) return 'self';
+  const tag = el.tagName;
+  if (tag === 'WEBVIEW' || tag === 'IFRAME') return 'webview';
+  if (el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return 'editable';
+  return 'other';
+}
 
 // Render the webview at a fixed 1280x720 so platform sites keep their desktop
 // layout, then uniformly scale + center it in the cell to preserve 16:9.
@@ -175,7 +243,7 @@ function cellMetaHTML(platform, username) {
 
   // Watch time is the headline figure and is pinned so it never truncates.
   const watched = minutes > 0
-    ? `<span class="cell-meta-watched" title="Your all-time watch time for ${username}">${fmtDuration(minutes)} watched</span>`
+    ? `<span class="cell-meta-watched" title="Your all-time watch time for ${escapeHtml(username)}">${fmtDuration(minutes)} watched</span>`
     : '';
 
   // Viewers and uptime are secondary — labels stay terse (a dot for viewers,
@@ -205,8 +273,8 @@ function buildCellHTML(platform, username, isQualityDisabled) {
   return `
     <div class="stream-cell-header">
       <div class="stream-cell-identity">
-        <div class="platform-badge ${p}">${getPlatformSVG(p)}</div>
-        <span class="stream-cell-name">${username}</span>
+        <div class="platform-badge ${escapeHtml(p)}">${getPlatformSVG(p)}</div>
+        <span class="stream-cell-name">${escapeHtml(username)}</span>
         <span class="stream-cell-meta">${cellMetaHTML(platform, username)}</span>
       </div>
       <div class="stream-cell-actions">
@@ -262,9 +330,7 @@ function buildCellHTML(platform, username, isQualityDisabled) {
         </button>
       </div>
     </div>
-    <div class="stream-cell-webview-container">
-      <webview src="${streamUrl(platform, username, state.currentStatuses.find(s => s.platform.toLowerCase() === p && s.username.toLowerCase() === username.toLowerCase()))}" partition="persist:default" allowpopups muted></webview>
-    </div>
+    <div class="stream-cell-webview-container"></div>
   `;
 }
 
@@ -321,32 +387,139 @@ function bindCellActions(cell, platform, username) {
   const container = cell.querySelector('.stream-cell-webview-container');
   if (container) webviewResizeObserver.observe(container);
 
+  const life = lifeOf(cell);
+  const currentUrl = () => {
+    try { return webview.getURL() || ''; } catch (err) { return ''; }
+  };
+
+  // The webContents mute follows the mute button, and a ghosted cell is always
+  // silent. Re-applied on every dom-ready: a reload (the button, a recovery,
+  // an extension install) brings back a page whose <video> is not muted.
+  const applyAudio = () => {
+    try {
+      webview.setAudioMuted(muteBtn.classList.contains('muted') || cell.dataset.ghostMode === 'true');
+    } catch (err) { /* not attached yet; dom-ready applies it */ }
+  };
+
+  const reapplyGhost = () => {
+    life.ghostTimers.forEach(clearTimeout);
+    life.ghostTimers = GHOST_REAPPLY_DELAYS_MS.map(ms => setTimeout(() => {
+      if (!cell.isConnected || cell.dataset.ghostMode !== 'true') return;
+      webview.executeJavaScript(ghostSuspendScript).catch(() => { /* page navigating */ });
+    }, ms));
+  };
+
   webview.addEventListener('console-message', (e) => {
     if (e.message.includes('[Kick Quality]')) {
       appendLogMessage(`[Quality - ${username}] ${e.message.replace('[Kick Quality] ', '')}`);
     }
     if (e.message.includes('[Twitch Theater] Need Alt+T')) {
+      const decision = theaterKeyDecision(life.altTSent, {
+        url: currentUrl(),
+        windowFocused: document.hasFocus(),
+        cellVisible: isCellOnScreen(cell),
+        focusOwner: focusOwnerFor(webview),
+      });
+      if (!decision.send) return;
+      life.altTSent++;
+      const previous = document.activeElement;
       try {
-        webview.focus();
+        if (decision.focus) webview.focus();
         webview.sendInputEvent({ type: 'keyDown', keyCode: 't', modifiers: ['alt'] });
         webview.sendInputEvent({ type: 'keyUp', keyCode: 't', modifiers: ['alt'] });
-
-        const now = Date.now();
-        if (!webview.__lastAltTLog || now - webview.__lastAltTLog > 15000) {
-          webview.__lastAltTLog = now;
-          appendLogMessage(`[Lurk] Sent native Alt+T keyboard shortcut to maximize Twitch player for ${username}.`);
-        }
+        appendLogMessage(`[Lurk] Sent native Alt+T keyboard shortcut to maximize Twitch player for ${username}.`);
       } catch (err) {
         console.error('Failed to send native Alt+T keypress:', err);
+      }
+      // Hand focus back once the key has reached the page. Left on this
+      // cell, it would read as "the user is in another cell" to every other
+      // cell's request, and only the first cell would ever get theatre mode.
+      if (decision.focus) {
+        setTimeout(() => {
+          if (document.activeElement !== webview) return; // moved on already
+          if (previous?.isConnected && previous !== document.body && typeof previous.focus === 'function') previous.focus();
+          else webview.blur();
+        }, ALT_T_FOCUS_RETURN_MS);
       }
     }
   });
 
-  webview.addEventListener('dom-ready', () => {
-    webview.setAudioMuted(true);
+  // A new document gets its own Alt+T allowance; in-page (SPA) navigations
+  // keep the same page and fire did-navigate-in-page instead.
+  webview.addEventListener('did-navigate', () => { life.altTSent = 0; });
 
-    const url = webview.getURL();
-    if (!url || (!url.includes('twitch.tv') && !url.includes('kick.com') && !url.includes('youtube.com'))) return;
+  // ── Dead page recovery (contract C6, policy in cell-recovery.js) ──
+  const PLAT = platform.toUpperCase();
+  const scheduleRecovery = (what) => {
+    // One outage often fires several events; the first one drives recovery.
+    if (life.reloadTimer || life.onlineListener || life.givingUp) return;
+
+    // Offline, a reload can only fail again and burn an attempt. Wait for the
+    // network instead (sleep/resume and Wi-Fi drops land here).
+    if (navigator.onLine === false) {
+      appendLogMessage(`[Lurk] ${username} (${PLAT}): ${what}. Offline; will reload when the network is back.`);
+      life.onlineListener = () => {
+        window.removeEventListener('online', life.onlineListener);
+        life.onlineListener = null;
+        if (cell.isConnected) scheduleRecovery(what);
+      };
+      window.addEventListener('online', life.onlineListener);
+      return;
+    }
+
+    const plan = planCellRecovery(life.reloadTimes, Date.now());
+    life.reloadTimes = plan.recent;
+    if (plan.action === 'give-up') {
+      life.givingUp = true;
+      appendLogMessage(`[Lurk] ${username} (${PLAT}): ${what}. ${MAX_RELOADS} reloads in ${RELOAD_WINDOW_MS / 60000} minutes did not fix it; closing the stream.`);
+      // The close button's path: main finalizes the session and stops
+      // crediting watch time, and won't reopen it for this broadcast.
+      Promise.resolve(window.api.closeStreamContainer(platform, username))
+        .catch(err => console.error('Failed to close dead stream cell:', err));
+      return;
+    }
+    appendLogMessage(`[Lurk] ${username} (${PLAT}): ${what}. Reloading in ${Math.round(plan.delayMs / 1000)}s (attempt ${plan.attempt}/${MAX_RELOADS}).`);
+    life.reloadTimer = setTimeout(() => {
+      life.reloadTimer = null;
+      if (!cell.isConnected) return;
+      life.reloadTimes.push(Date.now());
+      try { webview.reload(); } catch (err) { console.error('Stream cell reload failed:', err); }
+    }, plan.delayMs);
+  };
+
+  const onPageFailure = (type) => (e) => {
+    // Closing a cell tears its guest down, which can report as a failure.
+    if (!cell.isConnected) return;
+    const what = describeCellFailure(type, e);
+    if (!what) return;
+    if (type === 'did-fail-load') life.loadFailed = true;
+    cell.dataset.crashed = 'true';
+    scheduleRecovery(what);
+  };
+  webview.addEventListener('render-process-gone', onPageFailure('render-process-gone'));
+  webview.addEventListener('did-fail-load', onPageFailure('did-fail-load'));
+  webview.addEventListener('did-start-loading', () => { life.loadFailed = false; });
+
+  // Healthy again once a platform page comes up from a load that did not fail.
+  // Chromium's error page also fires dom-ready and did-finish-load, but
+  // did-fail-load reaches us first and sets loadFailed until the next load
+  // starts. Either event clears it, so a page that never fires `load` can't
+  // leave the overlay over a working stream.
+  const markHealthy = () => {
+    if (life.loadFailed || cell.dataset.crashed !== 'true') return;
+    if (!safeHttpsUrl(currentUrl(), STREAM_HOSTS)) return;
+    delete cell.dataset.crashed;
+    appendLogMessage(`[Lurk] ${username} (${PLAT}) recovered.`);
+  };
+  webview.addEventListener('did-finish-load', markHealthy);
+
+  webview.addEventListener('dom-ready', () => {
+    markHealthy();
+    applyAudio();
+    if (cell.dataset.ghostMode === 'true') reapplyGhost();
+
+    const url = currentUrl();
+    if (!safeHttpsUrl(url, INJECT_HOSTS)) return;
 
     const disabled = cell.dataset.autoQualityDisabled === 'true';
     webview.executeJavaScript(`window.__autoQualityDisabled = ${disabled};`).catch(err => console.error(err));
@@ -376,15 +549,21 @@ function bindCellActions(cell, platform, username) {
     appendLogMessage(`[Quality] ${newActive ? 'Re-enabled' : 'Disabled'} auto-quality adjustment for ${username}.`);
   });
 
+  // The button is the user's choice; the webContents state can also be muted
+  // by ghost mode, so it is not read back to decide the toggle.
   muteBtn.addEventListener('click', () => {
-    const newMuted = !webview.isAudioMuted();
-    webview.setAudioMuted(newMuted);
+    const newMuted = !muteBtn.classList.contains('muted');
     muteBtn.classList.toggle('muted', newMuted);
     muteBtn.title = newMuted ? 'Unmute Audio' : 'Mute Audio';
+    applyAudio();
   });
 
   reloadBtn.addEventListener('click', () => {
     appendLogMessage(`[Lurk] Reloading active container: ${username} on ${platform.toUpperCase()}`);
+    // The user is retrying now; an automatic reload still pending would only
+    // interrupt the page they just asked for.
+    clearTimeout(life.reloadTimer);
+    life.reloadTimer = null;
     webview.reload();
   });
 
@@ -449,6 +628,7 @@ function bindCellActions(cell, platform, username) {
       : 'Enable Ghost Mode (Suspend Video Decoding to Save CPU)';
     if (newGhostState) cell.setAttribute('data-ghost-mode', 'true');
     else cell.removeAttribute('data-ghost-mode');
+    applyAudio();
 
     webview.executeJavaScript(newGhostState ? ghostSuspendScript : ghostResumeScript).catch(err => console.error(err));
     appendLogMessage(`[Ghost Mode] ${newGhostState ? 'Activated background decoder suspension' : 'Deactivated suspension'} for ${username}.`);
@@ -475,8 +655,8 @@ function buildSidebarTabButton(platform, username, tabId, cellId) {
         <rect x="3" y="16" width="7" height="5"/>
       </svg>
     </button>
-    <div class="platform-badge ${p}">${getPlatformSVG(p)}</div>
-    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px; font-weight: 500;">${username}</span>
+    <div class="platform-badge ${escapeHtml(p)}">${getPlatformSVG(p)}</div>
+    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px; font-weight: 500;">${escapeHtml(username)}</span>
     <button class="stream-tab-close" title="Close Lurk Stream">
       <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
@@ -510,8 +690,8 @@ function buildSidebarTabButton(platform, username, tabId, cellId) {
 export function createStreamTab(platform, username) {
   const p = platform.toLowerCase();
   const u = username.toLowerCase();
-  const tabId = `stream-${p}-${u}`;
-  const cellId = `grid-cell-${p}-${u}`;
+  const tabId = streamTabId(p, u);
+  const cellId = gridCellId(p, u);
   const key = `${p}:${u}`;
 
   appendLogMessage(`[Lurk] Initializing active container: ${username} on ${platform.toUpperCase()}`);
@@ -534,12 +714,18 @@ export function createStreamTab(platform, username) {
     cell.dataset.username = username;
     cell.dataset.autoQualityDisabled = isQualityDisabled ? 'true' : 'false';
     cell.innerHTML = buildCellHTML(platform, username, isQualityDisabled);
+    // The webview is created separately (src/stream-webview.js) so the
+    // username never reaches its attributes as markup.
+    cell.querySelector('.stream-cell-webview-container')
+      .appendChild(createStreamWebview(platform, username, statusFor(platform, username)));
 
     bindCellActions(cell, platform, username);
     gridContainer.appendChild(cell);
   }
 
-  if (!document.querySelector(`[data-tab="${tabId}"]`)) {
+  // CSS.escape: the id embeds the username, and a quote in it would otherwise
+  // throw here and leave the stream without a sidebar tab.
+  if (!document.querySelector(`[data-tab="${CSS.escape(tabId)}"]`)) {
     sidebarTabsContainer.appendChild(buildSidebarTabButton(platform, username, tabId, cellId));
   }
 
@@ -558,8 +744,7 @@ export function createStreamTab(platform, username) {
 // Reflect pop-out window state on the cell's pop-out button. Called when the
 // floating window is closed (from main) so the button returns to its idle look.
 export function setCellPoppedOut(platform, username, on) {
-  const cellId = `grid-cell-${platform.toLowerCase()}-${username.toLowerCase()}`;
-  const cell = document.getElementById(cellId);
+  const cell = document.getElementById(gridCellId(platform, username));
   if (!cell) return;
 
   const btn = cell.querySelector('.popout-btn');
@@ -584,17 +769,21 @@ export function setCellPoppedOut(platform, username, on) {
 }
 
 export function removeStreamTab(platform, username) {
-  const p = platform.toLowerCase();
-  const u = username.toLowerCase();
-  const tabId = `stream-${p}-${u}`;
-  const cellId = `grid-cell-${p}-${u}`;
+  const tabId = streamTabId(platform, username);
+  const cellId = gridCellId(platform, username);
 
   appendLogMessage(`[Lurk] Terminating active container: ${username} on ${platform.toUpperCase()}`);
 
-  document.querySelector(`[data-tab="${tabId}"]`)?.remove();
+  // Read before the button goes: only closing the stream the user is looking
+  // at should move them. Main closes streams on its own (offline, preempted),
+  // and that must not drag someone out of Settings or the Calendar.
+  const tabBtn = document.querySelector(`[data-tab="${CSS.escape(tabId)}"]`);
+  const wasActive = !!tabBtn?.classList.contains('active');
+  tabBtn?.remove();
 
   const cell = document.getElementById(cellId);
   if (cell) {
+    disposeCell(cell);
     const container = cell.querySelector('.stream-cell-webview-container');
     if (container) webviewResizeObserver.unobserve(container);
     cell.remove();
@@ -615,7 +804,7 @@ export function removeStreamTab(platform, username) {
 
     const currentActiveTab = document.querySelector('.tab-content.active');
     if (currentActiveTab?.id === 'tab-multi-lurk') switchTab('dashboard');
-  } else if (!document.querySelector('.stream-tab-btn.active')) {
+  } else if (wasActive) {
     switchTab('multi-lurk');
   }
 

@@ -1,6 +1,6 @@
 // Manage Streamers panel: monitored list per platform, with drag & arrow reorder.
 
-import { PLATFORMS, state, appendLogMessage, getPlatformSVG, platformColorVar, isPlatformEnabled } from './state.js';
+import { PLATFORMS, state, appendLogMessage, getPlatformSVG, platformColorVar, isPlatformEnabled, escapeHtml } from './state.js';
 import { renderStreamsGrid, updateStats } from './dashboard.js';
 
 function monitoredListEl() { return document.getElementById('monitored-channels-list'); }
@@ -82,11 +82,11 @@ function buildRow(streamer, index, listLength) {
 
   row.innerHTML = `
     <div class="list-item-identity">
-      <div class="platform-badge ${streamer.platform}">${getPlatformSVG(streamer.platform)}</div>
-      <span class="list-item-name">${streamer.username}</span>
+      <div class="platform-badge ${escapeHtml(streamer.platform)}">${getPlatformSVG(streamer.platform)}</div>
+      <span class="list-item-name">${escapeHtml(streamer.username)}</span>
     </div>
     <div class="priority-controls">
-      <button class="mode-btn mode-${mode}" title="${MODE_META[mode].title}">
+      <button class="mode-btn mode-${escapeHtml(mode)}" title="${escapeHtml(MODE_META[mode].title)}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MODE_META[mode].icon}</svg>
       </button>
       <button class="priority-btn up-btn" title="Move Up" ${isFirst ? 'disabled' : ''}>▲</button>
@@ -187,8 +187,8 @@ function renderPlatformGroup(platformKey, list) {
     justify-content: space-between;
   `;
   groupHeader.innerHTML = `
-    <span style="color: ${accentColor}; font-weight: 700;">${platformName.toUpperCase()} CHANNELS</span>
-    <span style="font-size: 0.75rem; opacity: 0.6;">${list.length} Monitored</span>
+    <span style="color: ${accentColor}; font-weight: 700;">${escapeHtml(platformName.toUpperCase())} CHANNELS</span>
+    <span style="font-size: 0.75rem; opacity: 0.6;">${escapeHtml(list.length)} Monitored</span>
   `;
   host.appendChild(groupHeader);
 

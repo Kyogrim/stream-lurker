@@ -2405,6 +2405,25 @@ webview:-webkit-full-screen {
   z-index: 5;
 }
 
+/* A cell whose page crashed or failed to load while multi-lurk.js reloads it
+   (see cell-recovery.js). Covers Chromium's blank or error page, which would
+   otherwise look like a stream that is simply black. Ghost mode's own overlay
+   wins when both apply. */
+.stream-grid-cell[data-crashed="true"]:not([data-ghost-mode="true"]) .stream-cell-webview-container::after {
+  content: 'Stream page stopped. Reconnecting…';
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 10, 12, 0.85);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 1px;
+  z-index: 5;
+}
+
 /* Specialized styling for reload and move actions in cell headers */
 .cell-action-btn.reload-btn:hover {
   color: var(--cyan-color) !important;

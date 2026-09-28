@@ -645,14 +645,25 @@ try {
   // Chromium version and userAgentData exposed to the page (a mismatch with the
   // spoofed UA/Sec-CH-UA that trips "browser not supported"). Retry as soon as the
   // <html> root appears, which is still before the platform's bot-detection scripts.
-  if (!injectIntoMainWorld()) {
-    const obs = new MutationObserver(() => {
-      if (injectIntoMainWorld()) obs.disconnect();
-    });
+  //
+  // Exactly once per document. Each extra run redefines the spoofed getters over
+  // fresh objects, so a page that captured navigator.plugins or userAgentData
+  // early later sees a different, inconsistent fingerprint (and every run adds
+  // its own observer, interval and listeners). The old readystatechange listener
+  // was never removed and re-injected at 'interactive' and again at 'complete'.
+  // The flag lives here in the preload's world, not on the page, where
+  // fingerprinting could find a marker or a page could pre-set it.
+  let injected = injectIntoMainWorld();
+  if (!injected) {
+    const tryInject = () => {
+      if (injected || !injectIntoMainWorld()) return;
+      injected = true;
+      obs.disconnect();
+      document.removeEventListener('readystatechange', tryInject);
+    };
+    const obs = new MutationObserver(tryInject);
     obs.observe(document, { childList: true, subtree: true });
-    document.addEventListener('readystatechange', () => {
-      if (injectIntoMainWorld()) obs.disconnect();
-    });
+    document.addEventListener('readystatechange', tryInject);
   }
 } catch (e) {
   console.error('[Preload] Failed to inject stealth script:', e);

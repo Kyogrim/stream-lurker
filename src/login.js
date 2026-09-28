@@ -56,7 +56,8 @@ export function setupLoginPortalListeners() {
       if (platform === 'twitch') { openTwitchImportModal(); return; }
       if (platform === 'youtube') { openYoutubeImportModal(); return; }
       btn.disabled = true;
-      const originalHtml = btn.innerHTML;
+      // Keep the original nodes rather than re-parsing serialized markup.
+      const originalNodes = [...btn.childNodes];
       btn.innerHTML = `<span class="pulse-dot"></span> Re-auth...`;
       appendLogMessage(`[System] Opening re-authentication modal for ${platform.toUpperCase()}...`);
       try {
@@ -66,7 +67,7 @@ export function setupLoginPortalListeners() {
         appendLogMessage(`[ERROR] Re-authentication failed: ${err.message}`);
       } finally {
         btn.disabled = false;
-        btn.innerHTML = originalHtml;
+        btn.replaceChildren(...originalNodes);
       }
     });
   });
