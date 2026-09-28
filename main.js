@@ -1246,6 +1246,10 @@ function notifyGoLive(stream) {
 function applyStartupSettings() {
   try {
     if (process.platform === 'linux') return; // setLoginItemSettings is a no-op there
+    // A development run (npm start) is node_modules' electron.exe: writing a
+    // login item from it registers bare Electron to start at every sign-in
+    // (a real "electron.app.Electron --hidden" entry was found this way).
+    if (!app.isPackaged) return;
     // Running on defaults because config.json could not be read: the user's
     // real choice is unknown, so the OS entry is left as it is.
     if (configWriteLocked) return;

@@ -135,6 +135,13 @@ test('G4.2: DevTools cannot open in a packaged build on the dashboard or a strea
   assert.match(wcc.slice(0, wcc.indexOf('\n});')), /if \(app\.isPackaged\) webPreferences\.devTools = false;/);
 });
 
+test('a development run never writes a login item (it would register bare electron.exe)', () => {
+  const fn = block('function applyStartupSettings()');
+  const guard = fn.indexOf('if (!app.isPackaged) return;');
+  assert.ok(guard > 0, 'isPackaged guard present');
+  assert.ok(guard < fn.indexOf('syncLoginItem('), 'checked before any login item is read or written');
+});
+
 test('F27: the startup setting goes through syncLoginItem', () => {
   assert.match(block('function applyStartupSettings('), /syncLoginItem\(app, !!config\.launchOnStartup\)/);
   assert.doesNotMatch(mainJs, /getLoginItemSettings\(\)/);
