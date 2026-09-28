@@ -369,3 +369,154 @@ test('evictStale and clearSessionsFor', () => {
   clearSessionsFor(m, 'twitch:a');
   assert.deepEqual([...m.keys()], ['twitch:ab:1'], 'prefix match stops at the colon');
 });
+
+// ── Gaps a mutation run found (Stryker on main/scan-planner.js) ────────────
+// Each test below fails on at least one mutant the tests above let through.
+// The comment on each says which decision it pins.
+
+// TAB_LIMIT_KEYS: every platform reads its own setting (not the fallback of
+// 2), and only that platform's open cells count against it. A cell on another
+// platform must never be preempted to make room.
+test('tab limits: each platform reads its own setting and counts only its own open cells', () => {
+  assert.equal(tabLimitFor({ maxTwitchTabs: 3 }, 'twitch'), 3);
+  assert.equal(tabLimitFor({ maxKickTabs: 4 }, 'kick'), 4);
+  assert.equal(tabLimitFor({ maxYoutubeTabs: 5 }, 'youtube'), 5);
+  assert.equal(tabLimitFor({ maxRumbleTabs: 7 }, 'rumble'), 7);
+
+  const yt = makeWorld([
+    { platform: 'youtube', username: '@a' }, { platform: 'youtube', username: '@b' }, { platform: 'youtube', username: '@c' },
+  ], { maxYoutubeTabs: 3 });
+  yt.scan([
+    youtubeLiveResult('@a', 'aaaaaaaaaaa', '2026-09-27T06:00:00Z'),
+    youtubeLiveResult('@b', 'bbbbbbbbbbb', '2026-09-27T06:00:00Z'),
+    youtubeLiveResult('@c', 'ccccccccccc', '2026-09-27T06:00:00Z'),
+  ], T0);
+  assert.deepEqual(yt.spawned, ['youtube:@a', 'youtube:@b', 'youtube:@c'], 'maxYoutubeTabs 3 opens a third cell');
+
+  // One Kick cell open (hand-opened and unmonitored, so it ranks below
+  // everything) and a Twitch limit of 1: the Twitch stream still has its slot.
+  const w = makeWorld([{ platform: 'twitch', username: 'top' }], { maxTwitchTabs: 1, maxKickTabs: 1 });
+  w.userOpen('kick:other', T0);
+  w.scan([live('twitch', 'top', { liveSince: 's' })], T0);
+  assert.deepEqual(w.spawned, ['twitch:top']);
+  assert.deepEqual(w.closed, [], 'the Kick cell is not preempted for a Twitch stream');
+  assert.ok(w.activeWindows.has('kick:other'));
+  assert.ok(!w.logs.some(l => l.includes('Limit reached') || l.includes('Preempting')));
+});
+
+// evictStale drops entries strictly older than the TTL: one last seen exactly
+// 24h ago stays, one a millisecond older goes. The optional ttlMs is honoured.
+test('evictStale: an entry exactly the TTL old is kept, one ms older is dropped', () => {
+  const m = new Map([['twitch:a:1', T0 - SESSION_TTL_MS], ['twitch:b:1', T0 - SESSION_TTL_MS - 1]]);
+  evictStale(m, T0);
+  assert.deepEqual([...m.keys()], ['twitch:a:1']);
+  const n = new Map([['kick:x:1', T0 - 1000], ['kick:y:1', T0 - 1001]]);
+  evictStale(n, T0, 1000);
+  assert.deepEqual([...n.keys()], ['kick:x:1']);
+});
+
+// openedSessions is evicted on the same clock as notifiedSessions. Without
+// it, a cell the user closed stays closed for good once its broadcast key
+// comes back after more than a day unseen (an outage over a 24/7 stream),
+// and the map only ever grows.
+test('F68: opened-session entries expire too, so a stream back after a day unseen opens again', () => {
+  const w = makeWorld([{ platform: 'twitch', username: 'radio' }]);
+  const result = live('twitch', 'radio', { liveSince: '2026-09-20T00:00:00Z' });
+  w.scan([result], T0);
+  w.userClose('twitch:radio');
+  w.scan([result], T0 + INTERVAL);
+  assert.deepEqual(w.spawned, ['twitch:radio'], 'closed by the user: stays closed for the broadcast');
+
+  // A day of errored checks: nothing refreshes either entry.
+  const back = T0 + INTERVAL + SESSION_TTL_MS + MIN;
+  w.scan([errored('twitch', 'radio')], back);
+  assert.equal(w.openedSessions.size, 0);
+  assert.equal(w.notifiedSessions.size, 0);
+  w.scan([result], back + INTERVAL);
+  assert.deepEqual(w.notified, ['twitch:radio', 'twitch:radio']);
+  assert.deepEqual(w.spawned, ['twitch:radio', 'twitch:radio']);
+});
+
+// The once-per-key dedupe of scan results: a streamer listed twice adds one
+// offline observation per scan, not two. The span rule alone hides a double
+// count from auto-close, so the streak itself is what is pinned.
+test('F25: a streamer listed twice adds one offline observation per scan, not two', () => {
+  const w = makeWorld([{ platform: 'kick', username: 'dup' }, { platform: 'kick', username: 'DUP' }]);
+  w.scan([live('kick', 'dup', { liveSince: 's' }), live('kick', 'DUP', { liveSince: 's' })], T0);
+  w.scan([offline('kick', 'dup'), offline('kick', 'DUP')], T0 + INTERVAL);
+  assert.equal(w.liveness.offlineStreak('kick:dup'), 1);
+  // Both entries still get a line (the close loop runs per result), but each says 1/2.
+  const lines = w.logs.filter(l => l.includes('reported offline'));
+  assert.ok(lines.length > 0 && lines.every(l => l.includes('reported offline (1/2)')), lines.join('\n'));
+});
+
+// liveness.retain: a streamer the scan no longer covers (removed from the
+// list while its cell stays open, as delete-streamer leaves it) loses its
+// liveness entry. Kept, the stale offline streak starved the cell of watch
+// time, and after re-adding it a single offline result closed the cell.
+test('a streamer removed from the list and re-added starts a fresh offline count', () => {
+  const w = makeWorld([{ platform: 'kick', username: 'k' }, { platform: 'kick', username: 'other' }]);
+  w.scan([live('kick', 'k', { liveSince: 's' }), offline('kick', 'other')], T0);
+  w.scan([offline('kick', 'k'), offline('kick', 'other')], T0 + INTERVAL); // k: 1/2
+
+  const removed = w.config.streamers.shift();
+  w.scan([offline('kick', 'other')], T0 + 2 * INTERVAL);
+  assert.equal(w.liveness.has('kick:k'), false);
+  assert.equal(w.liveness.credit('kick:k', T0 + 2 * INTERVAL, INTERVAL).credit, true, 'credited like any open cell the scanner does not know');
+
+  // Re-added: its first offline result counts as a first again.
+  w.config.streamers.push(removed);
+  w.scan([offline('kick', 'other'), offline('kick', 'k')], T0 + 3 * INTERVAL);
+  assert.deepEqual(w.closed, []);
+  assert.ok(w.activeWindows.has('kick:k'));
+});
+
+// The priority sort ranks every result by its full config index, not
+// "index 0 first, the rest tied". With the rest tied, #3 took the one free
+// slot and #2 then preempted it: an open and a close for nothing.
+test('results sort by full config priority, so a lower-ranked stream never opens only to be preempted', () => {
+  const w = makeWorld([
+    { platform: 'twitch', username: 'lead' },
+    { platform: 'twitch', username: 'second' },
+    { platform: 'twitch', username: 'third' },
+  ], { maxTwitchTabs: 1 });
+  w.scan([offline('twitch', 'lead'), live('twitch', 'third', { liveSince: 's' }), live('twitch', 'second', { liveSince: 's' })], T0);
+  assert.deepEqual(w.spawned, ['twitch:second']);
+  assert.deepEqual(w.closed, []);
+});
+
+// The activity console is the only trace of these decisions, so its lines
+// are pinned scan by scan: the platform in capitals, the offline count before
+// the second confirmation, the wait in seconds, and nothing at all for an
+// open cell whose check came back live or errored.
+test('log lines: each auto-close and auto-open decision, and silence for live or errored open cells', () => {
+  const w = makeWorld([{ platform: 'twitch', username: 'Top' }, { platform: 'twitch', username: 'Low' }], { maxTwitchTabs: 1 });
+  const scanLogs = (results, now) => {
+    const from = w.logs.length;
+    w.scan(results, now);
+    return w.logs.slice(from);
+  };
+  const since = { liveSince: '2026-09-27T07:00:00Z' };
+
+  assert.deepEqual(scanLogs([offline('twitch', 'Top'), live('twitch', 'Low', since)], T0), [
+    '[Lurk] Detected live stream: Low on TWITCH!',
+  ]);
+  // Low is open and live, so no offline line for it; Top goes live and takes its slot.
+  assert.deepEqual(scanLogs([live('twitch', 'Top', since), live('twitch', 'Low', since)], T0 + INTERVAL), [
+    '[Lurk] Detected live stream: Top on TWITCH!',
+    '[Lurk] Preempting: Closing lower-priority active stream low on TWITCH (priority index 1) to open higher-priority stream Top (priority index 0).',
+    '[Lurk] Limit reached: Skip auto-opening TWITCH stream for Low (Active: 1/1)',
+  ]);
+  // Top is open and its check errored: that says nothing either way.
+  assert.deepEqual(scanLogs([errored('twitch', 'Top'), offline('twitch', 'Low')], T0 + 2 * INTERVAL), []);
+  assert.deepEqual(scanLogs([offline('twitch', 'Top'), offline('twitch', 'Low')], T0 + 3 * INTERVAL), [
+    '[Lurk] Top on TWITCH reported offline (1/2). Closing it if the next scan agrees.',
+  ]);
+  assert.deepEqual(scanLogs([offline('twitch', 'Top'), offline('twitch', 'Low')], T0 + 3 * INTERVAL + 5000), [
+    '[Lurk] Top on TWITCH reported offline again, 5 s after the first. Closing it if a scan at least 90 s after that one agrees.',
+  ]);
+  assert.deepEqual(scanLogs([offline('twitch', 'Top'), offline('twitch', 'Low')], T0 + 4 * INTERVAL), [
+    '[Lurk] Streamer Top on TWITCH went offline. Auto-closing container.',
+  ]);
+  assert.deepEqual(w.closed, ['twitch:low', 'twitch:top']);
+});

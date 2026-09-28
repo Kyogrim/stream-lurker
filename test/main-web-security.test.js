@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   STREAM_PARTITION,
+  isWebUrl,
   isPlatformUrl,
   isOAuthPopupUrl,
   isLoginPopupUrl,
@@ -37,6 +38,47 @@ test('platform URLs: https on the platform hosts and their subdomains only', () 
     'https://www.twitch.tv.',                 // trailing-dot host
     'file:///C:/Windows/win.ini', 'javascript:alert(1)', 'app://bundle/index.html', '', null, undefined, 'not a url',
   ]) assert.equal(isPlatformUrl(bad), false, String(bad));
+});
+
+// Pins the exported isWebUrl: http and https, any host, and a real boolean
+// (never null/undefined) for everything else.
+test('web URLs: http and https on any host, a plain false for anything else', () => {
+  for (const ok of ['https://example.com/', 'http://example.com/x?y=1', 'HTTPS://WWW.TWITCH.TV/Upper', 'http://127.0.0.1:8080/']) {
+    assert.equal(isWebUrl(ok), true, ok);
+  }
+  for (const bad of [
+    'file:///C:/Windows/win.ini', 'javascript:alert(1)', 'app://bundle/index.html', 'ms-settings:privacy', 'ftp://x.example/',
+    'about:blank', 'data:text/html,hi', 'not a url', '', null, undefined,
+  ]) assert.equal(isWebUrl(bad), false, String(bad));
+});
+
+// Pins both anchors of every Google/Apple host pattern. A lost `$` lets a
+// lookalike domain that merely starts with the real host through; a lost `^`
+// widens an exact-host allowlist to every host that ends with it.
+test('Google and Apple host patterns match whole hostnames, never a prefix or suffix', () => {
+  for (const role of ['stream', 'hidden']) {
+    for (const bad of [
+      'https://accounts.google.com.evil.net/ServiceLogin', 'https://consent.google.com.evil.net/ml', // real host as a prefix
+      'https://xaccounts.google.com/', 'https://evil.consent.google.com/ml',                        // real host as a suffix
+    ]) assert.equal(isAllowedTopLevelUrl(role, bad), false, `${role} ${bad}`);
+  }
+
+  // Sign in with Apple: apple.com itself and its subdomains, not a lookalike.
+  assert.equal(isAllowedTopLevelUrl('login', 'https://apple.com/legal/privacy/'), true, 'bare apple.com');
+  for (const bad of ['https://appleid.apple.com.evil.net/auth/authorize', 'https://apple.com.evil.net/']) {
+    assert.equal(isAllowedTopLevelUrl('login', bad), false, bad);
+  }
+
+  // The per-country cookie hop is accounts.google.<cc> exactly, even on the right path.
+  for (const bad of ['https://evil.accounts.google.de/accounts/SetSID', 'https://xaccounts.google.co.uk/accounts/SetSID']) {
+    assert.equal(isAllowedTopLevelUrl('login', bad), false, bad);
+  }
+
+  // In-app OAuth popups: exactly the two sign-in hosts.
+  for (const bad of ['https://xaccounts.google.com/o/oauth2', 'https://evil.appleid.apple.com/auth/authorize']) {
+    assert.equal(isOAuthPopupUrl(bad), false, bad);
+    assert.equal(isLoginPopupUrl(bad), false, bad);
+  }
 });
 
 test('stream cells and pop-outs stay on the platforms, plus Google consent/auth', () => {
@@ -172,6 +214,27 @@ test('webview attach: wrong partition or a non-platform src is refused', () => {
   assert.equal(sanitizeWebviewAttach(undefined, undefined).allow, false, 'missing arguments do not throw');
 });
 
+// Pins the refusal reason main.js writes to the activity log ("Refused to
+// attach a <webview>: <reason>"): it names the partition or src that failed,
+// says (none) / (empty) when there was none, and keeps a hostile src to 120
+// characters so injected markup cannot flood the log line.
+test('webview attach: the refusal reason names what failed, bounded for the activity log', () => {
+  const src = 'https://www.twitch.tv/x';
+  assert.match(sanitizeWebviewAttach({}, { partition: 'persist:other', src }).reason, /partition "persist:other"/);
+  assert.match(sanitizeWebviewAttach({}, { src }).reason, /partition "\(none\)"/);
+  assert.match(sanitizeWebviewAttach({}, { partition: '', src }).reason, /partition "\(none\)"/);
+
+  const bad = 'https://evil.example/landing';
+  assert.ok(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: bad }).reason.includes(`src ${bad} `));
+  assert.match(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION }).reason, /src \(empty\) /);
+  assert.match(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: '' }).reason, /src \(empty\) /);
+
+  const long = `https://evil.example/${'a'.repeat(5000)}`;
+  const reason = sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: long }).reason;
+  assert.ok(reason.includes(`src ${long.slice(0, 120)} `), 'the first 120 characters are kept');
+  assert.ok(!reason.includes(long.slice(0, 121)), 'nothing past them');
+});
+
 test('webview attach: accepts exactly what a stream cell may navigate to (reordering a cell re-attaches it)', () => {
   for (const ok of ['https://consent.google.com/ml?continue=x', 'https://accounts.google.com/ServiceLogin', 'https://kick.com/x']) {
     assert.equal(sanitizeWebviewAttach({}, { partition: STREAM_PARTITION, src: ok }).allow, true, ok);
@@ -293,6 +356,32 @@ test("r2-21: only clicks, taps, Enter and Space count as a gesture; the app's ow
   ]) assert.equal(isUserGestureInput(bad), false, JSON.stringify(bad));
 });
 
+// Pins each modifier veto on its own, in each of the two shapes Electron
+// uses: the { alt, meta } booleans with no modifiers array, and a modifiers
+// array with no booleans. Also pins the key pattern's anchors: Backspace ends
+// in "space" but is typing, not activating a link.
+test('gesture input: Alt, Meta, Command or Cmd held vetoes Enter/Space in either event shape', () => {
+  for (const bad of [
+    { type: 'keyDown', key: 'Enter', code: 'Enter', alt: true, meta: false },  // booleans only
+    { type: 'keyDown', key: 'Enter', code: 'Enter', alt: false, meta: true },
+    { type: 'rawKeyDown', key: ' ', code: 'Space', alt: true },
+    { type: 'keyDown', keyCode: 'Return', modifiers: ['alt'] },                 // modifiers only
+    { type: 'keyDown', keyCode: 'Return', modifiers: ['Alt'] },
+    { type: 'keyDown', keyCode: 'Return', modifiers: ['meta'] },
+    { type: 'keyDown', keyCode: 'Return', modifiers: ['cmd'] },
+    { type: 'keyDown', keyCode: 'Space', modifiers: ['shift', 'alt'] },
+  ]) assert.equal(isUserGestureInput(bad), false, JSON.stringify(bad));
+
+  for (const typing of [
+    { type: 'keyDown', key: 'Backspace', code: 'Backspace', modifiers: [] },
+    { type: 'rawKeyDown', keyCode: 'Backspace' },
+  ]) assert.equal(isUserGestureInput(typing), false, JSON.stringify(typing));
+
+  // Control and Shift are not vetoes: Ctrl+Enter / Shift+Enter still activate.
+  assert.equal(isUserGestureInput({ type: 'keyDown', keyCode: 'Return', modifiers: ['shift'] }), true);
+  assert.equal(isUserGestureInput({ type: 'keyDown', key: 'Enter', shift: true, alt: false, meta: false }), true);
+});
+
 test("r2-21 regression: a page cannot ride the synthesized Alt+T to the user's browser", () => {
   const c = clock();
   const gate = createExternalOpenGate({ now: c.now });
@@ -306,26 +395,42 @@ test("r2-21 regression: a page cannot ride the synthesized Alt+T to the user's b
   assert.equal(gate.decide(cell, 'https://example.com/chat-link', { focused: true }).open, true, 'a real click still works');
 });
 
+// Every verdict is compared whole: the reason is the log text and part of the
+// log-throttle key, and a refusal must never carry open: true.
+const refused = (reason) => ({ open: false, reason });
+
 test('external opens need a recent gesture and a focused window', () => {
   const c = clock();
   const gate = createExternalOpenGate({ now: c.now });
   const cell = {};
   const url = 'https://example.com/chat-link';
 
-  assert.equal(gate.decide(cell, url, { focused: true }).open, false, 'no gesture yet: a script calling window.open on its own');
+  assert.deepEqual(gate.decide(cell, url, { focused: true }), refused('no click or key press just before it'), 'no gesture yet: a script calling window.open on its own');
   gate.noteGesture(cell);
-  assert.equal(gate.decide(cell, url, { focused: false }).open, false, 'window not focused');
-  const first = gate.decide(cell, url, { focused: true });
-  assert.equal(first.open, true);
-  assert.equal(first.href, url);
+  assert.deepEqual(gate.decide(cell, url, { focused: false }), refused('its window was not focused'));
+  assert.deepEqual(gate.decide(cell, url, {}), refused('its window was not focused'), 'focus unknown counts as unfocused');
+  assert.deepEqual(gate.decide(cell, url, { focused: true }), { open: true, reason: '', href: url });
 
-  // A burst from the same click opens nothing more: the gesture is spent.
-  assert.equal(gate.decide(cell, 'https://example.com/second', { focused: true }).open, false);
+  // The same click opens nothing more, even once the rate limit has passed:
+  // the gesture is spent.
+  c.advance(3000);
+  assert.deepEqual(gate.decide(cell, 'https://example.com/second', { focused: true }), refused('no click or key press just before it'));
 
   // Gesture too old.
   gate.noteGesture(cell);
   c.advance(6000);
-  assert.equal(gate.decide(cell, 'https://example.com/late', { focused: true }).open, false);
+  assert.deepEqual(gate.decide(cell, 'https://example.com/late', { focused: true }), refused('no click or key press just before it'));
+});
+
+test('external opens: a plain http link opens too, and the verdict carries the normalized href', () => {
+  const c = clock();
+  const gate = createExternalOpenGate({ now: c.now });
+  const cell = {};
+  gate.noteGesture(cell);
+  assert.deepEqual(gate.decide(cell, 'http://example.com/plain-http', { focused: true }), { open: true, reason: '', href: 'http://example.com/plain-http' });
+  c.advance(2000);
+  gate.noteGesture(cell);
+  assert.deepEqual(gate.decide(cell, 'HTTPS://Example.COM', { focused: true }), { open: true, reason: '', href: 'https://example.com/' });
 });
 
 test('external opens are rate limited and deduplicated per opener', () => {
@@ -336,10 +441,10 @@ test('external opens are rate limited and deduplicated per opener', () => {
   assert.equal(gate.decide(cell, 'https://a.example/', { focused: true }).open, true);
   c.advance(500);
   gate.noteGesture(cell);
-  assert.equal(gate.decide(cell, 'https://b.example/', { focused: true }).reason, 'rate limited');
+  assert.deepEqual(gate.decide(cell, 'https://b.example/', { focused: true }), refused('rate limited'));
   c.advance(2000);
   gate.noteGesture(cell);
-  assert.equal(gate.decide(cell, 'https://a.example/', { focused: true }).reason, 'same link again');
+  assert.deepEqual(gate.decide(cell, 'https://a.example/', { focused: true }), refused('same link again'));
   gate.noteGesture(cell);
   assert.equal(gate.decide(cell, 'https://b.example/', { focused: true }).open, true);
 
@@ -349,28 +454,91 @@ test('external opens are rate limited and deduplicated per opener', () => {
   assert.equal(gate.decide(other, 'https://c.example/', { focused: true }).open, true);
 });
 
+// Pins the three windows at their exact edges (defaults: gesture 5000 ms,
+// rate limit 2000 ms, dedupe 10000 ms): each boundary value is still on the
+// permissive side, one millisecond further is not.
+test('external opens: exact edges of the gesture window, the rate limit and the dedupe window', () => {
+  const c = clock();
+  const gate = createExternalOpenGate({ now: c.now });
+  const cell = {};
+  const open = (url) => gate.decide(cell, url, { focused: true });
+
+  gate.noteGesture(cell);
+  c.advance(5000);
+  assert.equal(open('https://a.example/').open, true, 'a gesture exactly 5000 ms old still counts');
+
+  c.advance(1999);
+  gate.noteGesture(cell);
+  assert.deepEqual(open('https://b.example/'), refused('rate limited'), '1999 ms after an open');
+  c.advance(1);
+  assert.equal(open('https://b.example/').open, true, 'exactly 2000 ms after an open');
+
+  c.advance(9999);
+  gate.noteGesture(cell);
+  assert.deepEqual(open('https://b.example/'), refused('same link again'), '9999 ms after opening the same link');
+  c.advance(1);
+  assert.equal(open('https://b.example/').open, true, 'exactly 10000 ms later the same link may open again');
+
+  gate.noteGesture(cell);
+  c.advance(5001);
+  assert.deepEqual(open('https://c.example/'), refused('no click or key press just before it'), 'a gesture 5001 ms old');
+});
+
 test('external opens refuse every non-web scheme, even right after a click', () => {
   const gate = createExternalOpenGate();
   const cell = {};
-  for (const bad of ['file:///C:/Windows/System32/calc.exe', 'ms-settings:', 'search-ms:query=x', 'javascript:alert(1)', 'mailto:x@y.z', 'app://bundle/index.html', 'not a url', '']) {
+  for (const bad of ['file:///C:/Windows/System32/calc.exe', 'ms-settings:', 'search-ms:query=x', 'javascript:alert(1)', 'mailto:x@y.z', 'app://bundle/index.html', 'ftp://x.example/', 'not a url', '']) {
     gate.noteGesture(cell);
-    const v = gate.decide(cell, bad, { focused: true });
-    assert.equal(v.open, false, bad);
+    assert.deepEqual(gate.decide(cell, bad, { focused: true }), refused('not an http(s) link'), bad);
   }
-  assert.equal(gate.decide(null, 'https://x.example/', { focused: true }).open, false);
 });
 
-test('log throttle: once per key per interval, bounded memory', () => {
+// Pins the opener guard on both methods: the gate keys a WeakMap by the
+// opener, so a missing or primitive key must be refused (decide) or ignored
+// (noteGesture), never reach the WeakMap and throw.
+test('external opens: an opener that is not an object arms nothing and never throws', () => {
+  const gate = createExternalOpenGate();
+  for (const key of [null, undefined, '', 'cell-1', 42, true]) {
+    assert.doesNotThrow(() => gate.noteGesture(key), String(key));
+    assert.deepEqual(gate.decide(key, 'https://x.example/', { focused: true }), refused('no opener'), String(key));
+  }
+});
+
+test('log throttle: once per key per interval, again at exactly intervalMs', () => {
   const c = clock();
-  const t = createLogThrottle({ intervalMs: 1000, maxKeys: 3, now: c.now });
+  const t = createLogThrottle({ intervalMs: 1000, now: c.now });
   assert.equal(t.shouldLog('a'), true);
   assert.equal(t.shouldLog('a'), false);
   assert.equal(t.shouldLog('b'), true);
-  c.advance(1001);
-  assert.equal(t.shouldLog('a'), true);
-  // Past maxKeys the map is reset rather than growing.
-  t.shouldLog('c'); t.shouldLog('d'); t.shouldLog('e');
-  assert.equal(t.shouldLog('b'), true, 'forgotten after the reset');
+  c.advance(999);
+  assert.equal(t.shouldLog('a'), false, '999 ms later');
+  c.advance(1);
+  assert.equal(t.shouldLog('a'), true, 'exactly intervalMs later');
+  assert.equal(t.shouldLog('a'), false, 'and the interval restarts from there');
+});
+
+// Pins the default interval: main.js's security log passes no intervalMs.
+test('log throttle: the default interval is one hour', () => {
+  const c = clock();
+  const t = createLogThrottle({ now: c.now });
+  assert.equal(t.shouldLog('k'), true);
+  c.advance(60 * 60 * 1000 - 1);
+  assert.equal(t.shouldLog('k'), false, 'a millisecond short of an hour');
+  c.advance(1);
+  assert.equal(t.shouldLog('k'), true);
+});
+
+// Pins the memory bound: at most maxKeys keys are remembered, and the key that
+// would exceed it clears the map first. Every key here is well inside its
+// (default, one hour) interval, so a key logs again only if it was forgotten.
+test('log throttle: remembers at most maxKeys keys; the next new key resets the map', () => {
+  const c = clock();
+  const t = createLogThrottle({ maxKeys: 3, now: c.now });
+  for (const k of ['a', 'b', 'c']) assert.equal(t.shouldLog(k), true, k);
+  assert.equal(t.shouldLog('a'), false, 'three keys fit: a is still remembered');
+  assert.equal(t.shouldLog('d'), true);
+  assert.equal(t.shouldLog('a'), true, 'the fourth key cleared the map: a logs again inside its hour');
+  assert.equal(t.shouldLog('d'), false, 'what came after the reset is remembered');
 });
 
 test('r2-22: a burst of distinct origins logs at most maxPerMinute lines, then one summary when the minute ends', async () => {
@@ -401,6 +569,52 @@ test('log throttle: without maxPerMinute there is no cap and no timer (the auto-
   assert.equal(c.pending(), 0);
 });
 
+// Pins the cap's minute: 60 s long, opened by the first line logged in it, with
+// the summary landing exactly when that minute ends, not when the cap is first
+// hit and not a full minute after that.
+test('log throttle: the per-minute cap spans a full minute from its first line, and the summary lands as it ends', async () => {
+  const c = createClock();
+  const summaries = [];
+  const t = createLogThrottle({ maxPerMinute: 1, onSuppressed: (n) => summaries.push(n), now: () => c.now, timers: c });
+  await c.advance(1000);
+  assert.equal(t.shouldLog('k1'), true, 'opens a minute at t=1000');
+  await c.advance(30 * 1000);
+  assert.equal(t.shouldLog('k2'), false, '30 s in: same minute, cap reached');
+  assert.equal(t.shouldLog('k3'), false);
+  await c.advance(29999);
+  assert.deepEqual(summaries, [], 'the minute is not over');
+  await c.advance(1);
+  assert.deepEqual(summaries, [2], 'at t=61000, exactly when it ends');
+  assert.equal(t.shouldLog('k4'), true, 'a new minute');
+});
+
+// Pins onSuppressed as optional: with no callback the overflow is dropped
+// quietly, and the summary timer must not call null from inside a timer.
+test('log throttle: a cap without onSuppressed drops the overflow without throwing', async () => {
+  const c = createClock();
+  const t = createLogThrottle({ maxPerMinute: 1, now: () => c.now, timers: c });
+  assert.equal(t.shouldLog('a'), true);
+  assert.equal(t.shouldLog('b'), false);
+  assert.equal(c.pending(), 1);
+  await c.advance(60 * 1000);
+  assert.equal(c.pending(), 0);
+  assert.equal(t.shouldLog('c'), true);
+});
+
+// Pins the default timers: main.js's security throttle passes none, so the
+// summary has to go through the real setTimeout. The cap is hit in the last
+// millisecond of the minute so that real timer fires at once.
+test('log throttle: with the default timers the summary still arrives (the security log passes none)', async () => {
+  let now = 0;
+  const summaries = [];
+  const t = createLogThrottle({ maxPerMinute: 1, onSuppressed: (n) => summaries.push(n), now: () => now });
+  assert.equal(t.shouldLog('a'), true);
+  now = 60 * 1000 - 1;
+  assert.equal(t.shouldLog('b'), false);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(summaries, [1]);
+});
+
 test('download allowlist: only what the dashboard asked for, once, before it expires', () => {
   const c = clock();
   const d = createDownloadAllowlist({ ttlMs: 60000, now: c.now });
@@ -424,4 +638,42 @@ test('download allowlist: only what the dashboard asked for, once, before it exp
 
   assert.equal(d.expect('not a url', 'x'), false);
   assert.equal(d.take('https://evil.example/malware.exe'), null);
+});
+
+// Pins the defaults main.js uses (createDownloadAllowlist() with no options):
+// a request stays good for one minute, its last millisecond included.
+test('download allowlist: by default a request is good for exactly one minute', () => {
+  const c = clock();
+  const d = createDownloadAllowlist({ now: c.now });
+  d.expect('https://a.example/1.mp4', 'one.mp4');
+  c.advance(60 * 1000);
+  assert.equal(d.take(['https://a.example/1.mp4']), 'one.mp4', 'exactly 60000 ms old');
+  d.expect('https://a.example/2.mp4', 'two.mp4');
+  c.advance(60 * 1000 + 1);
+  assert.equal(d.take(['https://a.example/2.mp4']), null, '60001 ms old');
+});
+
+// Pins the cap: never more than maxEntries pending, oldest dropped first.
+test('download allowlist: holds at most maxEntries requests and drops the oldest first', () => {
+  const c = clock();
+  const d = createDownloadAllowlist({ maxEntries: 2, now: c.now });
+  d.expect('https://a.example/1.mp4', 'one.mp4');
+  d.expect('https://a.example/2.mp4', 'two.mp4');
+  assert.equal(d.take(['https://a.example/1.mp4']), 'one.mp4', 'exactly maxEntries: both kept');
+  d.expect('https://a.example/1.mp4', 'one again.mp4');
+  d.expect('https://a.example/3.mp4', 'three.mp4');
+  assert.equal(d.take(['https://a.example/2.mp4']), null, 'a third request dropped the oldest');
+  assert.equal(d.take(['https://a.example/3.mp4']), 'three.mp4');
+  assert.equal(d.take(['https://a.example/1.mp4']), 'one again.mp4');
+});
+
+// Pins take()'s input forms: a bare URL is a one-hop chain, and a hop that
+// does not parse is skipped rather than ending the search.
+test('download allowlist: take() accepts a bare URL and skips unparsable hops', () => {
+  const d = createDownloadAllowlist();
+  d.expect('https://a.example/clip.mp4', 'clip.mp4');
+  assert.equal(d.take('https://a.example/clip.mp4?sig=2'), 'clip.mp4');
+  d.expect('https://a.example/clip.mp4', 'again.mp4');
+  assert.equal(d.take(['not a url', '', 'https://a.example/clip.mp4']), 'again.mp4');
+  assert.equal(d.take(['not a url', null]), null);
 });

@@ -229,7 +229,9 @@ test('F18: the monitored list and the refusal log are both bounded', () => {
   // At the edge: new entries stop at the cap.
   r = merge(current, { streamers: many(2002) });
   assert.equal(r.next.streamers.length, 2000);
-  assert.equal(r.refused.length, 2);
+  assert.deepEqual(r.refused.map(x => x.reason), [
+    'the list already has 2000 entries: twitch:n2000', 'the list already has 2000 entries: twitch:n2001',
+  ]);
   // Thirty bad entries log ten lines and one count.
   r = merge(current, { streamers: [...current.streamers, ...Array.from({ length: 30 }, () => ({ platform: 'myspace', username: 'x' }))] });
   assert.equal(r.refused.length, 11);
@@ -471,4 +473,257 @@ test('C1: signed-out state defaults to not signed out and round-trips', () => {
   assert.deepEqual(map, {});
   assert.deepEqual(before, { twitch: 111 }, 'a new object each time');
   assert.deepEqual(withSignedOut([], 'kick', true, 5), { kick: 5 });
+});
+
+// ---------------------------------------------------------------------------
+// Edges pinned by mutation testing (StrykerJS over main/config-boundary.js):
+// each test below fails on a mutant the tests above let through. Values such
+// as NaN, Infinity and undefined are real inputs: IPC is a structured clone,
+// which keeps all three, and JSON.parse turns 1e999 into Infinity.
+
+test('F18: every quality the Settings <select> offers saves, from the dashboard and from a backup', () => {
+  // The <option> values of index.html's quality select.
+  for (const q of ['160p', '360p', '480p', '720p', 'source']) {
+    const current = { ...mainConfig(), defaultQuality: q === 'source' ? '160p' : 'source' };
+    assert.equal(merge(current, { defaultQuality: q }).next.defaultQuality, q, q);
+    assert.equal(importedConfig({ streamers: [], watchTime: {}, defaultQuality: q }, current).config.defaultQuality, q, q);
+  }
+});
+
+test('F18: a numeric setting that is not a number is refused and keeps main\'s value, never the default', () => {
+  // main has 5 and the default is 3, so a value coerced to the default shows.
+  const current = { ...mainConfig(), checkInterval: 5 };
+  for (const bad of ['', '   ', 'abc', NaN, Infinity, -Infinity, null, true, [], {}]) {
+    const { next, refused } = merge(current, { checkInterval: bad });
+    assert.equal(next.checkInterval, 5, String(bad));
+    assert.deepEqual(refused, [{ key: 'checkInterval', reason: 'not a number' }], String(bad));
+  }
+  const imported = importedConfig({ streamers: [], watchTime: {}, checkInterval: ' ' }, current);
+  assert.equal(imported.config.checkInterval, 5);
+  assert.deepEqual(imported.refused, [{ key: 'checkInterval', reason: 'not a number' }]);
+  // A numeric string (a range input's value) still counts, clamped.
+  assert.equal(merge(current, { checkInterval: ' 7 ' }).next.checkInterval, 7);
+  assert.equal(merge(current, { checkInterval: '120' }).next.checkInterval, 60);
+});
+
+test('F18: the Twitch client id and secret are capped at 200 characters', () => {
+  const { next } = merge(mainConfig(), { twitchClientId: ` ${'i'.repeat(500)} `, twitchClientSecret: 's'.repeat(201) });
+  assert.equal(next.twitchClientId, 'i'.repeat(200));
+  assert.equal(next.twitchClientSecret, 's'.repeat(200));
+  const imported = importedConfig({ streamers: [], watchTime: {}, twitchClientId: 'j'.repeat(300) }, mainConfig());
+  assert.equal(imported.config.twitchClientId, 'j'.repeat(200));
+});
+
+test('F18: a calendar event keeps booleans and nulls, drops non-finite numbers, and holds 20 fields at most', () => {
+  const current = mainConfig();
+  const ev = { id: 'e', done: true, hidden: false, note: null, day: NaN, time: Infinity, low: -Infinity };
+  assert.deepEqual(merge(current, { calendarEvents: [ev] }).next.calendarEvents, [{ id: 'e', done: true, hidden: false, note: null }]);
+  // Twenty kept fields; a dropped one (nested) does not use up a slot.
+  const fields = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, i]));
+  const wide = merge(current, { calendarEvents: [{ nested: { a: 1 }, ...fields(30) }, fields(21), fields(20)] }).next.calendarEvents;
+  assert.deepEqual(wide.map(e => Object.keys(e).length), [20, 20, 20]);
+  assert.deepEqual(wide[0], fields(20));
+});
+
+test('F18: the auto-quality flags are an object of true flags, bounded in count and key length', () => {
+  const current = { ...mainConfig(), disabledAutoQuality: { 'twitch:a': true } };
+  // Anything but an object is refused and main's map stays: a list used to
+  // come through as {} and clear every flag.
+  for (const bad of [[], [true], 'twitch:a', 5, null]) {
+    const { next, patch, refused } = merge(current, { disabledAutoQuality: bad });
+    assert.deepEqual(next.disabledAutoQuality, { 'twitch:a': true }, JSON.stringify(bad));
+    assert.equal('disabledAutoQuality' in patch, false, JSON.stringify(bad));
+    assert.deepEqual(refused, [{ key: 'disabledAutoQuality', reason: 'not an object' }], JSON.stringify(bad));
+  }
+  // A key of 200 characters is the longest kept.
+  const k200 = 'k'.repeat(200);
+  assert.deepEqual(merge(current, { disabledAutoQuality: { [k200]: true, [`${k200}x`]: true } }).next.disabledAutoQuality, { [k200]: true });
+  // 5000 flags at most, the first ones; a skipped entry does not use up a slot.
+  const many = { skipped: 'yes', ...Object.fromEntries(Array.from({ length: 5001 }, (_, i) => [`twitch:n${i}`, true])) };
+  const kept = merge(current, { disabledAutoQuality: many }).next.disabledAutoQuality;
+  assert.equal(Object.keys(kept).length, 5000);
+  assert.equal(kept['twitch:n4999'], true);
+  assert.equal('twitch:n5000' in kept, false);
+  // A backup's map goes through the same checks, and a bad one keeps this machine's.
+  assert.deepEqual(importedConfig({ streamers: [], watchTime: {}, disabledAutoQuality: { 'kick:b': true, 'kick:c': 1 } }, current).config.disabledAutoQuality, { 'kick:b': true });
+  const bad = importedConfig({ streamers: [], watchTime: {}, disabledAutoQuality: [] }, current);
+  assert.deepEqual(bad.config.disabledAutoQuality, { 'twitch:a': true });
+  assert.deepEqual(bad.refused, [{ key: 'disabledAutoQuality', reason: 'not an object' }]);
+});
+
+test('F18: a streamer from the dashboard finds main\'s entry by trimmed, lower-cased platform:name, numbers included', () => {
+  const stored = [{ platform: 'twitch', username: 'Old-Name', mode: 'notify' }, { platform: 'twitch', username: '42', mode: 'notify' }];
+  const current = { ...mainConfig(), streamers: stored };
+  // Padding and a numeric name still match: main's entry, spelled as stored and with its mode.
+  const r = merge(current, { streamers: [{ platform: ' Twitch ', username: ' old-name ' }, { platform: 'twitch', username: 42 }] });
+  assert.deepEqual(r.next.streamers, stored);
+  assert.deepEqual(r.refused, []);
+});
+
+test('F18: an entry without a usable name never stands in for a stored channel', () => {
+  // NaN, Infinity, null and undefined are all valid Twitch channel names as text.
+  const stored = ['NaN', 'Infinity', 'null', 'undefined'].map(username => ({ platform: 'twitch', username, mode: 'notify' }));
+  const current = { ...mainConfig(), streamers: stored };
+  const { patch, refused } = rendererConfigPatch({ streamers: [
+    { platform: 'twitch', username: NaN, mode: 'ignore' },
+    { platform: 'twitch', username: Infinity, mode: 'ignore' },
+    { platform: 'twitch', username: null, mode: 'ignore' },
+    { platform: 'twitch', mode: 'ignore' },
+  ] }, current);
+  assert.deepEqual(patch.streamers, [], 'nothing matched, so all four stored entries were removed, none re-moded');
+  assert.deepEqual(refused.map(x => x.reason), [
+    'no username: twitch:NaN', 'no username: twitch:Infinity', 'no username: twitch:object', 'no username: twitch:undefined',
+  ]);
+});
+
+test('F18: an entry without a text platform is refused, not a crash', () => {
+  const { patch, refused } = rendererConfigPatch({ streamers: [{ username: 'x' }, { platform: 5, username: 'y' }] }, mainConfig());
+  assert.deepEqual(patch.streamers, []);
+  assert.deepEqual(refused.map(x => x.reason), ['unknown platform: undefined:x', 'unknown platform: 5:y']);
+});
+
+test('F18: when main\'s own list holds a channel twice (a hand edit), the first entry is the one kept', () => {
+  const current = { ...mainConfig(), streamers: [{ platform: 'twitch', username: 'Dup', mode: 'notify' }, { platform: 'twitch', username: 'dup', mode: 'ignore' }] };
+  assert.deepEqual(merge(current, { streamers: [{ platform: 'twitch', username: 'DUP' }] }).next.streamers, [{ platform: 'twitch', username: 'Dup', mode: 'notify' }]);
+});
+
+test('F18: a new channel sent twice in one save goes in once', () => {
+  const current = mainConfig();
+  const r = merge(current, { streamers: [...current.streamers, { platform: 'kick', username: 'new_one' }, { platform: 'KICK', username: 'NEW_ONE ' }] });
+  assert.deepEqual(r.next.streamers, [...current.streamers, { platform: 'kick', username: 'new_one' }]);
+  assert.deepEqual(r.refused, [{ key: 'streamers', reason: 'duplicate: KICK:NEW_ONE ' }]);
+});
+
+test('F18: streamer ids fold case like watch-history keys (toLowerCase), so distinct channels stay distinct', () => {
+  // Upper-casing would merge them: 'ß' becomes 'SS', and a dotless 'ı' becomes 'I'.
+  const current = { ...mainConfig(), streamers: [{ platform: 'youtube', username: '@straße' }, { platform: 'twitch', username: 'a', mode: 'notify' }] };
+  const r = merge(current, { streamers: [
+    { platform: 'youtube', username: '@straße' }, { platform: 'youtube', username: '@strasse' }, { platform: 'twıtch', username: 'a' },
+  ] });
+  assert.deepEqual(r.next.streamers, [{ platform: 'youtube', username: '@straße' }, { platform: 'youtube', username: '@strasse' }]);
+  assert.deepEqual(r.refused, [{ key: 'streamers', reason: 'unknown platform: twıtch:a' }]);
+});
+
+test('F18: a refused streamer is described in one short line whatever it holds', () => {
+  const { refused } = rendererConfigPatch({ streamers: [
+    [1], 'x', 5, true, { platform: {}, username: 42 }, { platform: 'myspace', username: 'y'.repeat(100) },
+  ] }, mainConfig());
+  assert.deepEqual(refused.map(x => x.reason), [
+    'not an object: a list', 'not an object: a string', 'not an object: a number', 'not an object: a boolean',
+    'unknown platform: object:42', `unknown platform: myspace:${'y'.repeat(40)}`,
+  ]);
+});
+
+test('F11: an imported streamer\'s platform is trimmed, and a missing, non-finite or blank name is refused with its reason', () => {
+  assert.deepEqual(importedStreamer({ platform: ' Twitch ', username: 'x' }), { streamer: { platform: 'twitch', username: 'x' } });
+  const cases = [[undefined, 'no username'], [null, 'no username'], [NaN, 'no username'], [Infinity, 'no username'],
+    [{}, 'no username'], [['x'], 'no username'], ['', 'empty username'], ['   ', 'empty username']];
+  for (const [username, reason] of cases) {
+    assert.deepEqual(importedStreamer({ platform: 'twitch', username }), { reason }, String(username));
+  }
+  assert.deepEqual(importedStreamer({ platform: 'twitch' }), { reason: 'no username' });
+  // 100 characters is the longest name taken.
+  assert.deepEqual(importedStreamer({ platform: 'kick', username: 'k'.repeat(100) }), { streamer: { platform: 'kick', username: 'k'.repeat(100) } });
+  assert.deepEqual(importedStreamer({ platform: 'kick', username: 'k'.repeat(101) }), { reason: 'not a channel name' });
+});
+
+test('F89 layer 2: channelNameProblem takes a padded platform, refuses non-text names, and anchors Rumble\'s rule too', () => {
+  assert.equal(channelNameProblem(' Twitch ', 'xqc'), null);
+  for (const p of [null, undefined, 5, {}]) assert.equal(channelNameProblem(p, 'x'), 'Unknown platform.', String(p));
+  for (const u of [NaN, Infinity, {}, ['x'], true, undefined]) {
+    assert.equal(channelNameProblem('twitch', u), 'Username cannot be empty', String(u));
+  }
+  // A pasted URL or a name with a slash or space is not a Rumble name either.
+  for (const u of ['https://rumble.com/c/name', 'name/extra', 'a b']) assert.match(channelNameProblem('rumble', u), /not a valid Rumble/, u);
+});
+
+test('F89 layer 2: the add-streamer error names the platform and its rule, and says "not a link" only for a link', () => {
+  for (const [p, u, label] of [['twitch', 'has-dash', 'Twitch'], ['kick', 'dot.name', 'Kick'], ['youtube', '<b>', 'YouTube'], ['rumble', 'a b', 'Rumble']]) {
+    const msg = channelNameProblem(p, u);
+    assert.match(msg, new RegExp(`^That is not a valid ${label} channel name \\(.+\\)\\.$`), msg);
+  }
+  assert.match(channelNameProblem('kick', 'kick.com/name'), /\)\. Enter the channel name, not a link\.$/);
+});
+
+test('F11: the import reports as ignored exactly the keys it did not read', () => {
+  const current = mainConfig();
+  const r = importedConfig({ ...staleCopy(current), disabledAutoQuality: { 'twitch:x': true }, somethingNew: 1 }, current);
+  assert.deepEqual(r.ignored.sort(), ['accounts', 'dashboardStorageMigrated', 'extensionPairingCode', 'extensions', 'launchOnStartup',
+    'onboardingComplete', 'rumbleEnabled', 'seventvLastUpdated', 'signedOutPlatforms', 'somethingNew', 'youtubeExpiredFingerprint']);
+  assert.deepEqual(r.config.disabledAutoQuality, { 'twitch:x': true });
+  assert.deepEqual(r.refused, []);
+});
+
+test('F11: a damaged entry in this install\'s own list never breaks an import', () => {
+  const current = { ...mainConfig(), streamers: [null, 'x', { username: 'x' }, { platform: 5, username: 'y' }, { platform: 'twitch', username: 'Old-Name' }] };
+  const r = importedConfig({ streamers: [{ platform: 'twitch', username: 'old-name' }], watchTime: {} }, current);
+  assert.deepEqual(r.config.streamers, [{ platform: 'twitch', username: 'old-name' }], 'still recognised as monitored here (F89)');
+  assert.deepEqual(r.dropped, []);
+});
+
+test('F11: a backup\'s watch time keeps zero minutes and drops negatives, text and what JSON turns into Infinity', () => {
+  const file = JSON.parse('{"streamers":{"twitch:a":0,"twitch:b":1e999,"twitch:c":-1,"twitch:d":5},"sessions":"5","longestSessionMs":1e999}');
+  const wt = importedWatchTime(file);
+  assert.deepEqual(wt.streamers, { 'twitch:a': 0, 'twitch:d': 5 });
+  assert.equal(wt.sessions, 0, 'a string is not a count');
+  assert.equal(wt.longestSessionMs, 0);
+  assert.equal(importedWatchTime({ sessions: -3 }).sessions, 0);
+  assert.equal(importedWatchTime({ sessions: 4, longestSessionMs: 0 }).sessions, 4);
+});
+
+test('F11: repairWatchTime leaves healthy totals alone and resets non-finite ones', () => {
+  const healthy = { watchTime: { streamers: {}, platforms: { twitch: 1, kick: 0, youtube: 0, rumble: 0 }, streamerSessions: {}, daily: {},
+    streamerLongestMs: {}, streamerLastSeen: {}, sessions: 9, longestSessionMs: 3600000 } };
+  const before = staleCopy(healthy);
+  assert.deepEqual(repairWatchTime(healthy), []);
+  assert.deepEqual(healthy, before, 'minutes are never reset on a healthy config');
+  // NaN (a bad sum in memory) or Infinity (1e999 in the file) would stick: NaN + 1 is NaN.
+  const bad = { watchTime: { sessions: NaN, longestSessionMs: Infinity } };
+  assert.deepEqual(repairWatchTime(bad), ['watchTime.sessions', 'watchTime.longestSessionMs']);
+  assert.equal(bad.watchTime.sessions, 0);
+  assert.equal(bad.watchTime.longestSessionMs, 0);
+});
+
+test('F18: extensions: non-text entries are skipped silently, and a clean save reports nothing', () => {
+  const current = mainConfig();
+  const [one, sevenTv] = current.extensions;
+  const r = rendererConfigPatch({ extensions: [sevenTv, 5, null, '', {}, one] }, current);
+  assert.deepEqual(r.patch.extensions, [sevenTv, one]);
+  assert.deepEqual([r.refused, r.approvedUsed, r.keptExtensions], [[], [], []]);
+  // Without an extensions key, no approval is spent and nothing is kept.
+  const s = rendererConfigPatch({ autoOpen: false }, current, { approvedExtensions: new Set(['D:\\x']), dashboardExtensions: new Set() });
+  assert.deepEqual([s.approvedUsed, s.keptExtensions], [[], []]);
+  // A list that is not a list is refused whole, with its key.
+  assert.deepEqual(rendererConfigPatch({ extensions: 'C:\\x' }, current).refused, [{ key: 'extensions', reason: 'not a list' }]);
+  // A config with no extension list knows no folder: none matched, none kept.
+  const bare = rendererConfigPatch({ extensions: ['C:\\ext\\one'] }, { streamers: [] }, { dashboardExtensions: new Set() });
+  assert.deepEqual([bare.patch.extensions, bare.keptExtensions], [[], []]);
+});
+
+test('F18: extension refusals log ten lines at most, each path cut to 160 characters', () => {
+  const long = `D:\\${'x'.repeat(1000)}`;
+  assert.deepEqual(rendererConfigPatch({ extensions: [long] }, mainConfig()).refused,
+    [{ key: 'extensions', reason: `folder not picked in Stream Lurker's own dialog: ${long.slice(0, 160)}` }]);
+  const evil = (n) => Array.from({ length: n }, (_, i) => `D:\\evil${i}`);
+  assert.equal(rendererConfigPatch({ extensions: evil(10) }, mainConfig()).refused.length, 10, 'exactly ten: no "0 more" line');
+  const eleven = rendererConfigPatch({ extensions: evil(11) }, mainConfig()).refused;
+  assert.equal(eleven.length, 11);
+  assert.equal(eleven[10].reason, '1 more entries refused');
+});
+
+test('F18: a save that is not an object is refused whole, in one log line', () => {
+  for (const bad of [null, [1], 'x', 5]) {
+    assert.deepEqual(rendererConfigPatch(bad, mainConfig()),
+      { patch: {}, refused: [{ key: '(config)', reason: 'not an object' }], approvedUsed: [], keptExtensions: [] }, JSON.stringify(bad));
+  }
+});
+
+test('C1: only an app-login record reads as app-login; changing one platform keeps the others', () => {
+  // A plain-object value of another shape (a newer build's) still blocks as a sign-out.
+  for (const v of [{ at: 1 }, { at: 1, reason: 'signed-out' }, { at: 1, reason: 'future' }]) {
+    assert.equal(signedOutReasonIn({ twitch: v }, 'twitch'), 'signed-out', JSON.stringify(v));
+  }
+  const others = { kick: 5, youtube: { at: 6, reason: 'app-login' } };
+  assert.deepEqual(withSignedOut(others, 'twitch', true, 7), { ...others, twitch: 7 });
+  assert.deepEqual(withSignedOut({ ...others, twitch: 7 }, 'twitch', false), others);
 });

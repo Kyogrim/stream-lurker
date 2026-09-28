@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const {
   parseCookieBlob, normalizeExpiry, isHostOnlyCookie, cookieSetDetails, planCookieWrites,
   shouldClearExisting, removalUrl, isYouTubeCookieDomain, assignPastedYouTubeDomains, hasGoogleSessionCookies,
-  youtubeJarCookies, isCookieHost, isCookieDomainOf, applyCookiePlan,
+  youtubeJarCookies, isCookieHost, isCookieDomainOf, applyCookiePlan, normalizeSameSite, regDomain,
 } = require('../main/cookie-import');
 const { createSyncTickets } = require('../main/account-state');
 
@@ -84,6 +84,91 @@ test('F38: JSON expiry: -1, 0, milliseconds, date strings, session flag', () => 
   assert.equal(cookieSetDetails({ name: 'x', value: '1', domain: '.a.com', expirationDate: -1 }, { nowS: NOW_S }).expirationDate, NOW_S + ONE_YEAR_S);
 });
 
+// The parser's output, field by field: the defaults for what an exporter
+// leaves out, both httpOnly spellings, a value that is not a string, and
+// hostOnly copied only when the source gives a real boolean.
+test('parseCookieBlob JSON: every field normalized exactly, hostOnly only when the source says so', () => {
+  const out = parseCookieBlob(JSON.stringify([
+    { name: 'full', value: 'v', domain: '.youtube.com', path: '/feed', secure: true, httpOnly: true, sameSite: 'Strict', expirationDate: 1830000000, hostOnly: false },
+    { name: 'bare' },
+    { name: 'num', value: 42, secure: false, httponly: true, sameSite: 'None' },
+    { name: 'nul', value: null, hostOnly: 'true' },
+  ]));
+  assert.deepEqual(out, [
+    { name: 'full', value: 'v', domain: '.youtube.com', path: '/feed', secure: true, httpOnly: true, sameSite: 'strict', expirationDate: 1830000000, hostOnly: false },
+    { name: 'bare', value: '', domain: '', path: '/', secure: true, httpOnly: false, sameSite: 'unspecified', expirationDate: undefined },
+    { name: 'num', value: '42', domain: '', path: '/', secure: false, httpOnly: true, sameSite: 'no_restriction', expirationDate: undefined },
+    { name: 'nul', value: '', domain: '', path: '/', secure: true, httpOnly: false, sameSite: 'unspecified', expirationDate: undefined },
+  ]);
+});
+
+// The JSON shapes besides a bare array: Playwright's storageState wraps the
+// list in { cookies }, and a single copied cookie is one object. A value
+// holding '=' (YouTube's PREF) must not also be read as a header string.
+test('parseCookieBlob JSON: a storageState object, a single cookie object, leading whitespace', () => {
+  const storageState = JSON.stringify({
+    cookies: [
+      { name: 'SID', value: 's', domain: '.google.com', path: '/', expires: -1, httpOnly: true, secure: true, sameSite: 'None' },
+      { name: 'HSID', value: 'h', domain: '.google.com', path: '/', expires: 1830000000, httpOnly: true, secure: true, sameSite: 'Lax' },
+    ],
+    origins: [],
+  });
+  assert.deepEqual(parseCookieBlob(storageState).map(c => `${c.name}=${c.value}@${c.domain} ${c.sameSite} ${c.expirationDate}`),
+    ['SID=s@.google.com no_restriction undefined', 'HSID=h@.google.com lax 1830000000']);
+  const single = JSON.stringify({ name: 'PREF', value: 'f6=40000000&tz=Europe.Paris', domain: 'www.youtube.com' });
+  assert.deepEqual(parseCookieBlob(single).map(c => `${c.name}=${c.value}@${c.domain}`), ['PREF=f6=40000000&tz=Europe.Paris@www.youtube.com']);
+  // Pasted after a blank line and some indentation, as a copy often is.
+  assert.deepEqual(parseCookieBlob(`\n   ${single}\n`).map(c => c.name), ['PREF']);
+});
+
+test('parseCookieBlob JSON: entries without a name, or null, are skipped and the rest kept', () => {
+  const out = parseCookieBlob(JSON.stringify([
+    { value: 'orphan', domain: '.youtube.com' },
+    { name: 'SID', value: 's', domain: '.google.com' },
+    null,
+    { name: '', value: 'x' },
+  ]));
+  assert.deepEqual(out.map(c => c.name), ['SID']);
+});
+
+// cookies.txt lines that are not cookies, and cookies written untidily.
+// Every field is trimmed; the value keeps an inner tab; SameSite is None (the
+// format has no column for it, and YouTube's third-party cookies need None).
+test('cookies.txt: commented-out, tab-only and truncated lines are skipped; padded fields are trimmed', () => {
+  const file = [
+    '# Netscape HTTP Cookie File',
+    '#.google.com\tTRUE\t/\tTRUE\t1830000000\tSID\tdisabled-by-hand',
+    '\t\t\t\t\t\t', // an empty row, as a spreadsheet copy gives
+    '.google.com\tTRUE\t/\tTRUE', // cut off mid-line
+    ' .google.com \t TRUE \t /feed \t TRUE \t 1830000000 \t HSID \t h ',
+    'kick.com\t FALSE \t\tTRUE\t1830000000\tsession\ta\tb', // empty path, a tab inside the value
+    '.youtube.com\tTRUE\t/\tTRUE\t1830000000\tPREF\tf6=4#HttpOnly_x', // the marker counts only at a line start
+  ].join('\n');
+  assert.deepEqual(parseCookieBlob(file), [
+    { domain: '.google.com', hostOnly: false, path: '/feed', secure: true, expirationDate: 1830000000, name: 'HSID', value: 'h', httpOnly: false, sameSite: 'no_restriction' },
+    { domain: 'kick.com', hostOnly: true, path: '/', secure: true, expirationDate: 1830000000, name: 'session', value: 'a\tb', httpOnly: false, sameSite: 'no_restriction' },
+    { domain: '.youtube.com', hostOnly: false, path: '/', secure: true, expirationDate: 1830000000, name: 'PREF', value: 'f6=4#HttpOnly_x', httpOnly: false, sameSite: 'no_restriction' },
+  ]);
+});
+
+test('cookies.txt: only an exact FALSE flag (any case) makes a dotless domain host-only', () => {
+  const hostOnly = (flag) => parseCookieBlob(`kick.com\t${flag}\t/\tTRUE\t1830000000\tn\tv`)[0].hostOnly;
+  assert.equal(hostOnly('FALSE'), true);
+  assert.equal(hostOnly('false'), true);
+  assert.equal(hostOnly('TRUE'), false);
+  assert.equal(hostOnly('NOTFALSE'), false);
+  assert.equal(hostOnly('FALSE1'), false);
+});
+
+// A Cookie header: ';' with or without a space, padding around '=', pieces
+// with no name, a value that holds '='. A header that happens to contain a
+// tab (copied from a table cell) is still a header, not a failed cookies.txt.
+test('Cookie header: separators, padding and nameless pieces', () => {
+  const cookie = (name, value) => ({ name, value, domain: '', path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' });
+  assert.deepEqual(parseCookieBlob('a=1;b=2; c = 3 ;=orphan; flag; d=x=y;'), [cookie('a', '1'), cookie('b', '2'), cookie('c', '3'), cookie('d', 'x=y')]);
+  assert.deepEqual(parseCookieBlob('SID=s;\tHSID=h'), [cookie('SID', 's'), cookie('HSID', 'h')]);
+});
+
 test('normalizeExpiry: far-future seconds stay seconds; only raw numbers can be milliseconds', () => {
   const NEVER = 253402300799; // 9999-12-31T23:59:59Z, the usual "never expires"
   assert.equal(normalizeExpiry(NEVER), NEVER);
@@ -104,6 +189,35 @@ test('normalizeExpiry rejects everything that is not a positive time', () => {
     assert.equal(normalizeExpiry(v), undefined, String(v));
   }
   assert.equal(normalizeExpiry('1830000000'), 1830000000);
+});
+
+// The millisecond cut includes 1e12 itself; a numeric string may be padded or
+// carry any number of decimals; an ISO date with no time part ends in digits
+// but is a date, not a number.
+test('normalizeExpiry: the 1e12 boundary, padded and fractional strings, date-only strings', () => {
+  assert.equal(normalizeExpiry(1e12), 1e9);
+  assert.equal(normalizeExpiry('1000000000000'), 1e9);
+  assert.equal(normalizeExpiry(1e12 - 1), 1e12 - 1, 'just under the cut is still seconds');
+  assert.equal(normalizeExpiry(' 1830000000 '), 1830000000);
+  assert.equal(normalizeExpiry('1830000000.5'), 1830000000.5);
+  assert.equal(normalizeExpiry('1830000000.25'), 1830000000.25);
+  assert.equal(normalizeExpiry('2028-01-01'), Date.parse('2028-01-01') / 1000);
+});
+
+// Every sameSite spelling exporters use (Chrome/Cookie-Editor lowercase with
+// no_restriction, Puppeteer/Playwright capitalised with None) onto the four
+// values cookies.set accepts. Anything else is unspecified, never None.
+test('normalizeSameSite maps every exporter spelling, and defaults to unspecified', () => {
+  const cases = [
+    ['lax', 'lax'], ['Lax', 'lax'],
+    ['strict', 'strict'], ['Strict', 'strict'],
+    ['no_restriction', 'no_restriction'], ['None', 'no_restriction'], ['none', 'no_restriction'],
+    ['unspecified', 'unspecified'], ['', 'unspecified'], ['bogus', 'unspecified'], [undefined, 'unspecified'], [null, 'unspecified'],
+  ];
+  for (const [input, want] of cases) assert.equal(normalizeSameSite(input), want, String(input));
+  // A secure cookie that names no SameSite is written unspecified (Chromium's
+  // Lax default), not widened to cross-site.
+  assert.equal(cookieSetDetails({ name: 'a', value: '1', domain: '.kick.com' }, { nowS: NOW_S }).sameSite, 'unspecified');
 });
 
 test('F39: __Host- cookies are written without a Domain, on path /, secure', () => {
@@ -143,6 +257,61 @@ test('SameSite=None on an insecure cookie is downgraded instead of rejected', ()
   const d = cookieSetDetails({ name: 'PREF', value: 'p', domain: 'www.youtube.com', secure: false, sameSite: 'no_restriction' }, { nowS: NOW_S });
   assert.equal(d.secure, false);
   assert.equal(d.sameSite, 'unspecified');
+  // Only None needs Secure: an insecure Lax or Strict cookie keeps its SameSite.
+  assert.equal(cookieSetDetails({ name: 'a', value: 'v', domain: '.kick.com', secure: false, sameSite: 'lax' }, { nowS: NOW_S }).sameSite, 'lax');
+  assert.equal(cookieSetDetails({ name: 'a', value: 'v', domain: '.kick.com', secure: false, sameSite: 'Strict' }, { nowS: NOW_S }).sameSite, 'strict');
+});
+
+// isHostOnlyCookie on its own: the __Host- prefix wins over any domain or
+// flag, a padded domain is read trimmed, and without a name or a domain there
+// is nothing to be host-only.
+test('isHostOnlyCookie: __Host- always, padded domains trimmed, no name or domain is not host-only', () => {
+  assert.equal(isHostOnlyCookie({ name: '__Host-GAPS', domain: '.accounts.google.com' }), true);
+  assert.equal(isHostOnlyCookie({ name: '__Host-GAPS', domain: 'accounts.google.com', hostOnly: false }), true);
+  assert.equal(isHostOnlyCookie({ name: 'SID', domain: ' .google.com ' }), false);
+  assert.equal(isHostOnlyCookie({ name: 'PREF', domain: ' www.youtube.com' }), true);
+  assert.equal(isHostOnlyCookie({ name: 'SID' }), false);
+  assert.equal(isHostOnlyCookie({ domain: 'kick.com' }), false);
+  assert.equal(isHostOnlyCookie(null), false);
+});
+
+// The path goes straight into the write URL, so one that does not start with
+// '/' is replaced: otherwise '.evil.com/' or '@evil.com/' moves the cookie to
+// another host. A real sub-path is kept.
+test('cookieSetDetails: a path that does not start with / can never move the write off the host', () => {
+  const at = (path) => cookieSetDetails({ name: 'a', value: '1', domain: '.kick.com', path }, { nowS: NOW_S });
+  assert.equal(at('/api').path, '/api');
+  assert.equal(at('/api').url, 'https://kick.com/api');
+  for (const path of ['api', '.evil.com/', '@evil.com/', ':8443/']) {
+    const d = at(path);
+    assert.equal(d.path, '/', path);
+    assert.equal(d.url, 'https://kick.com/', path);
+    assert.equal(new URL(d.url).hostname, 'kick.com', path);
+  }
+});
+
+test('cookieSetDetails: a missing value is empty, and a cookie with no name is never written', () => {
+  const on = { domain: '.kick.com' };
+  assert.equal(cookieSetDetails({ ...on, name: 'a' }, { nowS: NOW_S }).value, '');
+  assert.equal(cookieSetDetails({ ...on, name: 'a', value: null }, { nowS: NOW_S }).value, '');
+  assert.equal(cookieSetDetails({ ...on, name: 'a', value: 0 }, { nowS: NOW_S }).value, '0');
+  assert.equal(cookieSetDetails({ ...on, value: 'v' }, { nowS: NOW_S }), null);
+  assert.equal(cookieSetDetails({ ...on, name: '', value: 'v' }, { nowS: NOW_S }), null);
+  assert.equal(cookieSetDetails(null, { nowS: NOW_S }), null);
+  // The Kick import filters on the domain only, so a nameless or null entry
+  // from the extension reaches the planner; it is dropped there, not written.
+  const plan = planCookieWrites([null, { ...on, value: 'v' }, { ...on, name: 'session_token', value: 't' }], { nowS: NOW_S });
+  assert.deepEqual(plan.writes.map(d => d.name), ['session_token']);
+  assert.deepEqual([...plan.clear.keys()], ['session_token']);
+});
+
+// writeCookieList passes no nowS: the default must be the current time in
+// seconds, so a cookie with no expiry lives a year from now.
+test('cookieSetDetails: without nowS a cookie with no expiry gets a year from the real now', () => {
+  const before = Math.floor(Date.now() / 1000);
+  const { writes: [d] } = planCookieWrites([{ name: 'a', value: '1', domain: '.kick.com' }], { defaultDomain: '.kick.com' });
+  const after = Math.floor(Date.now() / 1000);
+  assert.ok(d.expirationDate >= before + ONE_YEAR_S && d.expirationDate <= after + ONE_YEAR_S, String(d.expirationDate));
 });
 
 // Chromium's cookie store, reduced to the rules above.
@@ -206,6 +375,39 @@ test('F39: one import can hold the same name on two hosts of a site; both surviv
   assert.equal(find('SID', '.twitch.tv')[0].value, 'other-site', 'another site keeps its same-named cookie');
 });
 
+// Which existing cookies a plan clears: a name written on two sites is
+// cleared on both, on any host of each (the registrable domain), and nowhere
+// else. A name the plan never writes, or a cookie with no name, is left.
+test('planCookieWrites clears a name on every site it is written to, and only there', () => {
+  const plan = planCookieWrites([
+    { name: 'SID', value: 's', domain: '.google.com' },
+    { name: 'SID', value: 's', domain: 'www.youtube.com' },
+    { name: 'session', value: 'k', domain: '.kick.com' },
+  ], { nowS: NOW_S });
+  assert.deepEqual([...plan.clear.get('SID')].sort(), ['google.com', 'youtube.com']);
+  for (const domain of ['.google.com', 'accounts.google.com', '.youtube.com', '.www.youtube.com', 'm.youtube.com']) {
+    assert.equal(shouldClearExisting({ name: 'SID', domain, path: '/' }, plan), true, domain);
+  }
+  assert.equal(shouldClearExisting({ name: 'SID', domain: '.twitch.tv', path: '/' }, plan), false);
+  assert.equal(shouldClearExisting({ name: 'session', domain: '.youtube.com', path: '/' }, plan), false, 'a Kick import never clears a YouTube cookie of the same name');
+  assert.equal(shouldClearExisting({ name: 'LOGIN_INFO', domain: '.youtube.com', path: '/' }, plan), false, 'a name the plan does not write');
+  assert.equal(shouldClearExisting({ domain: '.youtube.com', path: '/' }, plan), false);
+  assert.equal(shouldClearExisting(null, plan), false);
+  assert.equal(regDomain('www.youtube.com'), 'youtube.com');
+  assert.equal(regDomain('.Accounts.Google.com'), 'google.com');
+  assert.equal(regDomain('kick.com'), 'kick.com');
+});
+
+// A same-named cookie on a sub-path is removed at its own path: a removal
+// URL on '/' would not match it and it would survive the import.
+test('removalUrl keeps the cookie\'s path, so a copy on a sub-path is really cleared', () => {
+  assert.equal(removalUrl({ name: 'VISITOR', domain: '.youtube.com', path: '/feed' }), 'https://youtube.com/feed');
+  assert.equal(removalUrl({ name: 'PREF', domain: 'www.youtube.com', path: '/' }), 'https://www.youtube.com/');
+  const jar = createJar([{ name: 'VISITOR', value: 'stale', domain: '.youtube.com', path: '/feed' }]);
+  applyPlan(jar, [{ name: 'VISITOR', value: 'new', domain: '.youtube.com', path: '/' }], '.youtube.com');
+  assert.deepEqual(jar.cookies.map(c => `${c.name}=${c.value}@${c.domain}${c.path}`), ['VISITOR=new@.youtube.com/']);
+});
+
 test('issue-19: a pasted session YouTube rejects is undone exactly, the probe page\'s cookies included', () => {
   // A working session as ses.cookies.get returns it, plus neighbours that
   // are not the YouTube import's business.
@@ -254,6 +456,19 @@ test('issue-19: a pasted session YouTube rejects is undone exactly, the probe pa
   assert.equal(pref.sameSite, 'lax');
   assert.equal('domain' in writes.get('__Host-GAPS|https://accounts.google.com/'), false);
   assert.equal(writes.get('YSC|.youtube.com').expirationDate, NOW_S + ONE_YEAR_S, 'a session cookie comes back for a year, as imports always did');
+});
+
+// The jar copy's de-duplication key includes the path: two cookies of one
+// name on one host but different paths are two cookies, and both must be
+// put back. A missing path is '/'.
+test('youtubeJarCookies keeps same-named cookies on different paths; a missing path is /', () => {
+  const out = youtubeJarCookies([
+    { name: 'PREF', value: 'a', domain: 'www.youtube.com', path: '/' },
+    { name: 'PREF', value: 'b', domain: 'www.youtube.com', path: '/embed' },
+    { name: 'VISITOR', value: 'c', domain: '.youtube.com' },
+    { name: 'VISITOR', value: 'd', domain: '.youtube.com', path: '/' },
+  ]);
+  assert.deepEqual(out.map(c => c.value), ['a', 'b', 'c']);
 });
 
 // r4-2: writeCookieList's loop (applyCookiePlan), asked about the import's
@@ -438,6 +653,23 @@ test('issue-4: a domain that is not a bare hostname is refused by every platform
   assert.equal(cookieSetDetails({ name: 'n', value: 'v' }, { defaultDomain: '.kick.com', nowS: NOW_S }).url, 'https://kick.com/');
 });
 
+// The JSON parser keeps a domain as written, padding included. Every check
+// after it reads the domain trimmed, so the cookie passes the filters and is
+// written on the clean domain, still a domain cookie. A domain of only
+// spaces is no domain, and the import's default applies.
+test('a padded domain passes the filters and is written trimmed; a blank one takes the default', () => {
+  const [c] = parseCookieBlob(JSON.stringify([{ name: 'SID', value: 's', domain: ' .youtube.com ' }]));
+  assert.equal(c.domain, ' .youtube.com ');
+  assert.equal(isCookieHost(c.domain), true);
+  assert.equal(isYouTubeCookieDomain(c.domain), true);
+  assert.equal(isCookieDomainOf(' .kick.com ', 'kick.com'), true);
+  const d = cookieSetDetails(c, { defaultDomain: '.youtube.com', nowS: NOW_S });
+  assert.equal(d.domain, '.youtube.com');
+  assert.equal(d.url, 'https://youtube.com/');
+  assert.equal(cookieSetDetails({ name: 'n', value: 'v', domain: '   ' }, { defaultDomain: '.kick.com', nowS: NOW_S }).domain, '.kick.com');
+  assert.equal(cookieSetDetails({ name: 'login', value: 'me' }, { defaultDomain: ' .twitch.tv ', nowS: NOW_S }).domain, '.twitch.tv');
+});
+
 test('issue-4: the Kick and Twitch imports filter through isCookieDomainOf', () => {
   const mainJs = require('fs').readFileSync(require('path').join(__dirname, '..', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
   const body = (marker) => mainJs.slice(mainJs.indexOf(marker), mainJs.indexOf('\n}\n', mainJs.indexOf(marker)));
@@ -475,6 +707,23 @@ test('hasGoogleSessionCookies needs __Secure-*PSID, or SID with HSID and SSID, w
   assert.equal(hasGoogleSessionCookies(c('SID', 'APISID', 'SAPISID', 'LSID')), false);
   assert.equal(hasGoogleSessionCookies([{ name: '__Secure-1PSID', value: '' }]), false);
   assert.equal(hasGoogleSessionCookies(null), false);
+  // All three of SID, HSID and SSID: any two are not a session. A null entry
+  // is skipped, not a crash.
+  assert.equal(hasGoogleSessionCookies(c('HSID', 'SSID')), false);
+  assert.equal(hasGoogleSessionCookies(c('SID', 'SSID')), false);
+  assert.equal(hasGoogleSessionCookies([null, ...c('SID', 'HSID', 'SSID')]), true);
+});
+
+// The exact cookies a domain-less paste becomes: __Host- host-only on www with
+// path '/', everything else a .youtube.com domain cookie. A domain of only
+// spaces counts as none; no list at all is an empty list.
+test('assignPastedYouTubeDomains: the exact shape it gives, and what counts as no domain', () => {
+  assert.deepEqual(assignPastedYouTubeDomains(parseCookieBlob('__Host-3PLSID=x; SID=s')), [
+    { name: '__Host-3PLSID', value: 'x', domain: 'www.youtube.com', hostOnly: true, path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' },
+    { name: 'SID', value: 's', domain: '.youtube.com', hostOnly: false, path: '/', secure: true, httpOnly: false, sameSite: 'no_restriction' },
+  ]);
+  assert.equal(assignPastedYouTubeDomains([{ name: 'SID', value: 's', domain: '  ' }])[0].domain, '.youtube.com');
+  assert.deepEqual(assignPastedYouTubeDomains(null), []);
 });
 
 test('pasted cookies that carry their own domain are left alone', () => {

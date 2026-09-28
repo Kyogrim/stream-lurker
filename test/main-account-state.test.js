@@ -295,3 +295,113 @@ test('F52: the same account is recognised however its name is spelled', () => {
   assert.equal(sameAccountName(undefined, 'bob'), false, 'no account before is a change');
   assert.equal(sameAccountName('a@b', 'ab'), false, 'only a leading @ is dropped');
 });
+
+// ---------------------------------------------------------------------------
+// Decisions the tests above left open (Stryker survivors on account-state.js).
+// Each test pins one of them through the exported API.
+
+// A placeholder is exactly one of the four "<Platform> User" names, trimmed.
+// A real name that only contains one is a real account; taken for a
+// placeholder, any page-read name (the avatar's alt text included) would
+// replace it at once.
+test('placeholder names: the whole name must match, surrounding spaces ignored', () => {
+  assert.equal(isPlaceholderName('Former Twitch User'), false, 'a real name ending in one');
+  assert.equal(isPlaceholderName('YouTube Users United'), false, 'a real name starting with one');
+  assert.equal(isPlaceholderName('  YouTube User '), true, 'a padded placeholder (a hand-edited config) is still one');
+  for (const stored of ['Former Twitch User', 'YouTube Users United']) {
+    assert.deepEqual(youtubeRenameDecision({ stored, name: 'Alice', source: 'label' }), { rename: false, pending: null }, stored);
+  }
+  assert.deepEqual(youtubeRenameDecision({ stored: ' YouTube User ', name: 'Alice', source: 'label' }), { rename: true, pending: null });
+});
+
+// sameAccountName folds case with toLowerCase. An uppercase fold would also
+// merge different letters, Turkish dotless ı with i ('kırmızı' and 'kirmizi'
+// are both KIRMIZI), and a switch between two such accounts would go unseen.
+test('F52: folding case does not merge different letters', () => {
+  assert.equal(sameAccountName('@kırmızı', '@kirmizi'), false);
+  assert.equal(sameAccountName('@Kırmızı', '@kırmızı'), true, 'a real case difference still matches');
+  assert.deepEqual(youtubeRenameDecision({ stored: '@kırmızı', name: '@kirmizi', source: 'ytcfg' }), { rename: false, pending: '@kirmizi' }, 'the other account is noticed');
+});
+
+// The fingerprint's allowlist is exact. accounts.google.com also returns
+// cookies whose names only end in SID (LSID, __Host-1PLSID, __Host-3PLSID,
+// OSID): they neither make a session on their own nor move a session's
+// fingerprint. Both PAPISID variants are on the list.
+test('F34: only the listed Google identifiers make the fingerprint', () => {
+  const acct = (name, value) => yt(name, value, 'accounts.google.com');
+  const session = [yt('SID', 's1', '.google.com'), yt('__Secure-1PSID', 'p1', '.google.com')];
+  const suffixOnly = [acct('LSID', 'l1'), acct('__Host-1PLSID', 'l1'), acct('__Host-3PLSID', 'l3'), acct('OSID', 'o1')];
+  assert.equal(youtubeAuthFingerprint(suffixOnly), null, 'no stable identifier, no session');
+  assert.equal(youtubeAuthFingerprint([...session, ...suffixOnly]), youtubeAuthFingerprint(session));
+  assert.equal(youtubeAuthFingerprint([...session, acct('LSID', 'l2')]), youtubeAuthFingerprint([...session, acct('LSID', 'l1')]),
+    'a new LSID value is not a new sign-in');
+  for (const name of ['__Secure-1PAPISID', '__Secure-3PAPISID']) {
+    assert.notEqual(youtubeAuthFingerprint([yt(name, 'a1')]), null, `${name} alone is a session`);
+    assert.notEqual(youtubeAuthFingerprint([...session, yt(name, 'a2')]), youtubeAuthFingerprint([...session, yt(name, 'a1')]),
+      `a new ${name} is a new sign-in`);
+  }
+});
+
+// The expiry marker (config.youtubeExpiredFingerprint) is saved to disk and
+// read back by whichever build auto-updates over this one. If the digest is
+// built differently, every saved marker misses: the dead session is re-added
+// and its expiry announced again on the first launch after the update
+// (issue-16/17). The value below is sha256 over the sorted "host|name=value"
+// lines joined by \n, first 32 hex chars, checked independently with
+// sha256sum and Python's hashlib. Change it only together with a migration of
+// saved markers.
+test('F34: the fingerprint recipe is fixed, so a saved expiry marker still matches after an update', () => {
+  const jar = [
+    yt('SID', 'g.a000sid', '.google.com'),
+    yt('__Secure-1PSID', 'g.a000p1', '.google.com'),
+    yt('SAPISID', 'sap/AbC', '.youtube.com'),
+    yt('HSID', 'Hh1', 'www.youtube.com'), // host-only: its inner dots are kept
+    yt('__Secure-3PAPISID', 'sap/AbC', 'accounts.google.com'),
+    yt('YSC', 'rot', '.youtube.com'), // rotating, not part of it
+    yt('__Secure-1PSIDTS', 'rot', '.google.com'),
+  ];
+  assert.equal(youtubeAuthFingerprint(jar), 'c516b00a38c604b9f8015707f310d8bc');
+  // Only a domain cookie's leading dot is dropped: the same cookie stored
+  // with or without it is the same session.
+  assert.equal(youtubeAuthFingerprint([yt('SID', 's1', '.youtube.com'), yt('HSID', 'h1', '.youtube.com')]),
+    youtubeAuthFingerprint([yt('SID', 's1', 'youtube.com'), yt('HSID', 'h1', 'youtube.com')]));
+});
+
+// youtubeRenameDecision's early exits, each reached by the input that needs it.
+
+// probeYouTubeLogin reports a live session with name null when the page
+// showed none. Renaming on that would write null (or blanks) over the
+// account, a placeholder included.
+test('issue-14: a probe that read no name leaves the stored one alone', () => {
+  for (const name of [null, undefined, '', '   ']) {
+    assert.deepEqual(youtubeRenameDecision({ stored: 'YouTube User', name, source: 'ytcfg' }), { rename: false, pending: null }, String(name));
+  }
+});
+
+// The same account spelled another way is no change: no pending name, and so
+// no second read that "confirms" a rename, a config write and a "signed-in
+// account is now ..." notice for the account already stored.
+test('issue-14: the same account, however it is spelled, is never queued or renamed', () => {
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: '@ALICE', source: 'ytcfg' }), { rename: false, pending: null });
+  assert.deepEqual(youtubeRenameDecision({ stored: 'Alice Smith', name: 'alice smith', source: 'ytcfg', pending: 'alice smith' }), { rename: false, pending: null });
+  assert.deepEqual(youtubeRenameDecision({ stored: 'Alice Smith', name: 'Alice Smith', source: 'ytcfg', pending: 'Alice Smith' }), { rename: false, pending: null });
+});
+
+// Only ytcfg and the menu's channel handle may rename a real account. The
+// menu's display name, the avatar's alt text or a name with no source never
+// do, even when two reads in a row agree, and never leave a pending name.
+test('issue-14: an untrusted source never renames a real account, however often it repeats', () => {
+  for (const source of ['account-name', 'label', null, undefined]) {
+    assert.deepEqual(youtubeRenameDecision({ stored: 'Alice Smith', name: 'Bob Jones', source, pending: 'Bob Jones' }), { rename: false, pending: null }, `display name, ${source}`);
+    assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: '@bob', source, pending: '@bob' }), { rename: false, pending: null }, `handle, ${source}`);
+  }
+});
+
+// ytcfg's values are not trimmed on the way in, and a rename stores the name
+// as read. A handle with a stray space is still a handle: the same account's
+// display name must not replace it, and another account's handle is tracked.
+test('issue-14: a handle with stray whitespace is still a handle', () => {
+  assert.deepEqual(youtubeRenameDecision({ stored: ' @alice', name: 'Alice Smith', source: 'ytcfg', pending: 'Alice Smith' }), { rename: false, pending: null });
+  assert.deepEqual(youtubeRenameDecision({ stored: '@alice', name: ' @bob', source: 'ytcfg' }), { rename: false, pending: ' @bob' });
+  assert.equal(youtubeRenameDecision({ stored: '@alice', name: '@bob', source: 'ytcfg', pending: ' @bob' }).rename, true);
+});

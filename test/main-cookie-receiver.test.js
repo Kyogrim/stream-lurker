@@ -7,18 +7,23 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
-const { EventEmitter } = require('events');
+const { EventEmitter, once } = require('events');
 const {
   pingProof, pingBody, isAllowedHost, isAllowedOrigin, isJsonContentType, codesMatch, maskCode,
-  createPairingGuard, createReceiverHandler, createReceiverServer, listenOnFirstPort,
+  createPairingGuard, readBodyCapped, createReceiverHandler, createReceiverServer, listenOnFirstPort,
   MAX_IMPORT_BODY_BYTES, PING_PROOF_PREFIX, SIGNED_OUT_ERROR, APP_LOGIN_ERROR, autoSyncRefusalFor,
   MIN_PROOF_CODE_LENGTH, TRUNCATED_CODE_ERROR,
 } = require('../main/cookie-receiver');
 const connector = require('../extension/connector.js');
 
 const CODE = 'A1B2C3D4E5F60718293A4B5C6D7E8F90';
+const WRONG_CODE_ERROR = 'Invalid pairing code. Copy the code shown in Stream Lurker into the extension.';
 
-// A receiver on an ephemeral port, with recording importers.
+// A receiver on an ephemeral port, with recording importers. importerThrows:
+// true throws Error('boom'), a function returns what to throw per platform.
+// Every request's handler promise is kept: a test can wait for work that
+// sends no answer (an abandoned upload), and a rejection, which main.js (it
+// does not await the handler) would meet as an unhandled one, fails close().
 async function startReceiver(overrides = {}) {
   const calls = [];
   const logs = [];
@@ -29,15 +34,16 @@ async function startReceiver(overrides = {}) {
   let codeRejections = 0;
   const importer = (platform) => async (cookies, opts) => {
     calls.push({ platform, cookies, opts });
+    if (typeof overrides.importerThrows === 'function') throw overrides.importerThrows(platform);
     if (overrides.importerThrows) throw new Error('boom');
     if (overrides.importerResult) return overrides.importerResult(platform, opts);
     return { success: true, username: `${platform}-user`, cookiesSet: cookies.length };
   };
   const handler = createReceiverHandler({
     getPort: () => port,
-    getPairingCode: () => overrides.code || CODE,
+    getPairingCode: () => ('code' in overrides ? overrides.code : CODE),
     guard: overrides.guard || createPairingGuard(),
-    importers: { twitch: importer('twitch'), youtube: importer('youtube'), kick: importer('kick') },
+    importers: overrides.importers || { twitch: importer('twitch'), youtube: importer('youtube'), kick: importer('kick') },
     isSignedOut: overrides.isSignedOut || ((p) => signedOut.has(p)),
     onManualImport: (p) => { manual.push(p); signedOut.delete(p); },
     onAutoAttempt: (a) => autoAttempts.push(a),
@@ -45,39 +51,91 @@ async function startReceiver(overrides = {}) {
     log: (t) => logs.push(t),
     maxBodyBytes: overrides.maxBodyBytes,
   });
-  const server = createReceiverServer(handler);
+  const pending = new Set();
+  const rejections = [];
+  let handled = 0;
+  const server = createReceiverServer((req, res) => {
+    handled++;
+    const settled = handler(req, res).catch((err) => { rejections.push(err); });
+    pending.add(settled);
+    settled.then(() => pending.delete(settled));
+  });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = server.address().port;
   return {
-    server, port, calls, logs, manual, signedOut, autoAttempts,
+    server, port, calls, logs, manual, signedOut, autoAttempts, rejections,
     codeRejections: () => codeRejections,
-    close: () => new Promise(r => server.close(r)),
+    handled: () => handled,
+    idle: async () => { while (pending.size) await Promise.all([...pending]); },
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise(r => server.close(r));
+      assert.deepEqual(rejections, [], 'the handler never rejects');
+    },
   };
 }
 
-// A raw request, so Host, Origin and the body can be anything.
-function request(port, { method = 'GET', path = '/', headers = {}, body, host } = {}) {
+// A raw request, so Host, Origin and the body can be anything. With no
+// agent the client itself asks for Connection: close; pass a keep-alive
+// agent to see whether the server keeps or closes the connection. An
+// unanswered request fails after timeoutMs instead of hanging the run.
+function request(port, { method = 'GET', path = '/', headers = {}, body, host, agent = false, timeoutMs = 3000 } = {}) {
   return new Promise((resolve, reject) => {
     // A declared length, as browsers send it (the chunked case is tested apart).
     const length = body !== undefined ? { 'Content-Length': String(Buffer.byteLength(body)) } : {};
     const req = http.request({
-      host: '127.0.0.1', port, method, path, agent: false,
+      host: '127.0.0.1', port, method, path, agent,
       headers: { Host: host || `127.0.0.1:${port}`, ...length, ...headers },
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
+        clearTimeout(timer);
         const text = Buffer.concat(chunks).toString('utf8');
         let json = null;
         try { json = JSON.parse(text); } catch (e) { /* not JSON */ }
         resolve({ status: res.statusCode, headers: res.headers, text, json });
       });
     });
-    req.on('error', reject);
+    const timer = setTimeout(() => req.destroy(new Error(`no answer to ${method} ${path} within ${timeoutMs} ms`)), timeoutMs);
+    req.on('error', (e) => { clearTimeout(timer); reject(e); });
     if (body !== undefined) req.write(body);
     req.end();
   });
 }
+
+// A POST /import with no Content-Length (chunked), so only the bytes received count.
+function postChunked(port, parts) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1', port, method: 'POST', path: '/import', agent: false,
+      headers: { Host: `127.0.0.1:${port}`, 'Content-Type': 'application/json', 'X-Pairing-Code': CODE, 'Transfer-Encoding': 'chunked' },
+    }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.on('error', (e) => { if (e.code !== 'ECONNRESET' && e.code !== 'EPIPE') reject(e); });
+    for (const part of parts) req.write(part);
+    req.end();
+  });
+}
+
+// Polls until cond() holds: a request reaching the handler has no event to await.
+async function until(cond, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error('timed out waiting');
+    await new Promise(r => setTimeout(r, 5));
+  }
+}
+
+// What a promise settles to, or NEVER if it has not within ms.
+const NEVER = Symbol('never settled');
+async function within(promise, ms = 1000) {
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(NEVER), ms); });
+  try { return await Promise.race([promise, late]); } finally { clearTimeout(timer); }
+}
+
+// A stand-in for http.IncomingMessage: headers, and the events readBodyCapped listens to.
+const fakeRequest = (headers = {}) => Object.assign(new EventEmitter(), { headers });
 
 const jsonHeaders = (extra = {}) => ({ 'Content-Type': 'application/json', ...extra });
 const importBody = (extra = {}) => JSON.stringify({ platform: 'twitch', cookies: [{ name: 'auth-token', value: 'x' }], ...extra });
@@ -110,6 +168,16 @@ test('C1 /ping: a 16-64 hex nonce gets the HMAC proof; anything else gets none',
   assert.notEqual(pingProof(CODE, r.port + 1, nonce), expected);
   const unbound = crypto.createHmac('sha256', CODE).update(`stream-lurker-ping:${nonce}`).digest('hex');
   assert.notEqual(expected, unbound, 'the pre-amendment message is no longer what is signed');
+});
+
+// pingBody's own guard: the handler always hands it URLSearchParams, but a
+// query that cannot answer get() is "no nonce": { app } alone, never a throw.
+test('C1 /ping: pingBody treats a missing or foreign query as no nonce', () => {
+  const nonce = 'a'.repeat(32);
+  for (const query of [null, undefined, {}, `nonce=${nonce}`, { nonce }]) {
+    assert.deepEqual(pingBody(query, CODE, 47100), { app: 'stream-lurker' }, String(query));
+  }
+  assert.match(pingBody(new URLSearchParams({ nonce }), CODE, 47100).proof, /^[0-9a-f]{64}$/, 'a real query with the same nonce signs');
 });
 
 test('F17/issue-6: a code shorter than 32 characters signs no proof (one would give it away offline)', async (t) => {
@@ -170,6 +238,10 @@ test('F16: a Host other than 127.0.0.1:<port> or localhost:<port> is refused (DN
   assert.equal(r.calls.length, 0);
   assert.equal(isAllowedHost(undefined, 1), false);
   assert.equal(isAllowedHost('127.0.0.1:0', 0), false, 'not bound yet');
+  // Node strips the whitespace around a header value before the handler sees
+  // it; the helper tolerates it on its own too, and still compares exactly.
+  assert.equal(isAllowedHost(` 127.0.0.1:${r.port} `, r.port), true);
+  assert.equal(isAllowedHost(` 127.0.0.1:${r.port}0 `, r.port), false);
 });
 
 test('F16: a web Origin is refused; an extension origin or none is accepted', async (t) => {
@@ -209,6 +281,56 @@ test('F16: OPTIONS, text/plain and other routes are refused without CORS headers
   assert.equal(isJsonContentType('application/json; charset=utf-8'), true);
   assert.equal(isJsonContentType('Application/JSON'), true);
   assert.equal(isJsonContentType('application/jsonx'), false);
+  // Whitespace before a parameter is allowed (OWS). Node keeps it inside the
+  // value, so the helper's own trim is what lets this client in.
+  assert.equal(isJsonContentType('application/json ; charset=utf-8'), true);
+  const spaced = await request(r.port, { method: 'POST', path: '/import', headers: { 'Content-Type': 'application/json ; charset=utf-8', 'X-Pairing-Code': CODE }, body: importBody() });
+  assert.equal(spaced.status, 200);
+});
+
+// The C1 answer to every refusal: its status, the exact { success: false,
+// error } body (connector.postImport reads success === true as "imported",
+// so a refusal claiming success would be believed), JSON marked no-store,
+// Allow on each 405, and Connection: close so the rest of a refused upload
+// is dropped rather than read. Asked over keep-alive, as the extension's
+// fetch does; an answer that is not a refusal keeps the connection open.
+test('C1 refusals: exact bodies, Allow on 405, no-store, and the connection closed', async (t) => {
+  const r = await startReceiver({ maxBodyBytes: 1000 });
+  t.after(r.close);
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const post = (extra = {}) => ({ method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody(), ...extra });
+  const refusals = [
+    // [what, request, status, error, Allow]
+    ['a foreign Host', { path: '/ping', host: 'attacker.example' }, 403, 'Forbidden'],
+    ['a web Origin', { path: '/ping', headers: { Origin: 'https://evil.example' } }, 403, 'Forbidden'],
+    ['a path the URL parser rejects', { path: '//' }, 400, 'Bad request'],
+    ['POST /ping', { method: 'POST', path: '/ping' }, 405, 'Method not allowed', 'GET'],
+    ['GET /import', { path: '/import' }, 405, 'Method not allowed', 'POST'],
+    ['another route', { path: '/other' }, 404, 'Not found'],
+    ['text/plain', post({ headers: { 'Content-Type': 'text/plain', 'X-Pairing-Code': CODE } }), 415, 'Expected application/json'],
+    ['a wrong header code', post({ headers: jsonHeaders({ 'X-Pairing-Code': 'WRONG123' }) }), 403, WRONG_CODE_ERROR],
+    ['a body over the cap', post({ body: importBody({ pad: 'x'.repeat(2000) }) }), 413, 'Request too large'],
+    ['bad JSON', post({ body: '{nope' }), 400, 'Invalid JSON'],
+    ['a JSON array', post({ body: '[1,2]' }), 400, 'Invalid request'],
+  ];
+  for (const [what, opts, status, error, allow] of refusals) {
+    const res = await request(r.port, { agent, ...opts });
+    assert.equal(res.status, status, what);
+    assert.deepEqual(res.json, { success: false, error }, what);
+    assert.equal(res.headers.connection, 'close', what);
+    assert.equal(res.headers['content-type'], 'application/json', what);
+    assert.equal(res.headers['cache-control'], 'no-store', what);
+    assert.equal(res.headers.allow, allow, what);
+  }
+  assert.equal(r.calls.length, 0, 'no refusal reached an importer');
+  for (const opts of [{ path: '/ping' }, post()]) {
+    const ok = await request(r.port, { agent, ...opts });
+    assert.equal(ok.status, 200, opts.path);
+    assert.equal(ok.headers.connection, 'keep-alive', opts.path);
+    assert.equal(ok.headers['content-type'], 'application/json', opts.path);
+    assert.equal(ok.headers['cache-control'], 'no-store', opts.path);
+  }
 });
 
 test('F54: a wrong header code is refused before the body is read', async (t) => {
@@ -236,18 +358,80 @@ test('F54: bodies over 2 MB get 413, by Content-Length or by bytes received', as
   const declared = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: big });
   assert.equal(declared.status, 413);
   // Chunked: no Content-Length, so it is the byte count that trips.
-  const chunked = await new Promise((resolve, reject) => {
+  assert.equal(await postChunked(r.port, Array(10).fill('x'.repeat(200))), 413);
+  assert.equal(r.calls.length, 0);
+  // Declared over the cap with only a sliver sent: answered from the header
+  // alone. Waiting for the bytes would hold the socket until the timeout.
+  const sliver = await new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1', port: r.port, method: 'POST', path: '/import', agent: false,
-      headers: { Host: `127.0.0.1:${r.port}`, 'Content-Type': 'application/json', 'X-Pairing-Code': CODE, 'Transfer-Encoding': 'chunked' },
-    }, (res) => { res.resume(); resolve(res.statusCode); });
-    req.on('error', (e) => { if (e.code !== 'ECONNRESET' && e.code !== 'EPIPE') reject(e); });
-    for (let i = 0; i < 10; i++) req.write('x'.repeat(200));
-    req.end();
+      headers: { Host: `127.0.0.1:${r.port}`, 'Content-Type': 'application/json', 'X-Pairing-Code': CODE, 'Content-Length': '5000' },
+    }, (response) => { resolve(response.statusCode); response.resume(); req.destroy(); });
+    req.on('error', (e) => { if (e.code !== 'ECONNRESET') reject(e); });
+    req.write('{"platform":"twitch","cookies":[');
+    setTimeout(() => reject(new Error('no answer without the body')), 3000).unref();
   });
-  assert.equal(chunked, 413);
-  assert.equal(r.calls.length, 0);
+  assert.equal(sliver, 413);
+  // The cap itself is allowed: exactly maxBodyBytes imports, declared or chunked.
+  const bare = JSON.stringify({ platform: 'twitch', cookies: [], pad: '' });
+  const exact = JSON.stringify({ platform: 'twitch', cookies: [], pad: 'p'.repeat(1000 - bare.length) });
+  assert.equal(Buffer.byteLength(exact), 1000);
+  assert.equal((await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: exact })).status, 200);
+  assert.equal(await postChunked(r.port, [exact.slice(0, 600), exact.slice(600)]), 200);
+  assert.equal(r.calls.length, 2);
   assert.equal(MAX_IMPORT_BODY_BYTES, 2 * 1024 * 1024, 'C1: 2 MB');
+});
+
+// readBodyCapped's documented outcomes, on a stand-in request. The cap is
+// inclusive; an over-cap Content-Length is refused before any event is
+// awaited, and bytes past the cap are refused whatever arrives after.
+test('F54: readBodyCapped allows exactly the cap and refuses one byte more, declared or received', async () => {
+  assert.deepEqual(await within(readBodyCapped(fakeRequest({ 'content-length': '1001' }), 1000)), { tooLarge: true }, 'refused on the header alone');
+  const exact = fakeRequest({ 'content-length': '1000' });
+  const read = readBodyCapped(exact, 1000);
+  exact.emit('data', Buffer.alloc(600, 'a'));
+  exact.emit('data', Buffer.alloc(400, 'b'));
+  exact.emit('end');
+  assert.deepEqual(await within(read), { text: 'a'.repeat(600) + 'b'.repeat(400) });
+  const over = fakeRequest();
+  const refused = readBodyCapped(over, 1000);
+  over.emit('data', Buffer.alloc(1000, 'a'));
+  over.emit('data', Buffer.alloc(1, 'a'));
+  over.emit('end');
+  assert.deepEqual(await within(refused), { tooLarge: true });
+});
+
+// A client abort reaches the request as 'error' then 'close' (Node 24); a
+// stream that ends either way before 'end' must settle as { aborted: true },
+// each event on its own, or the handler would wait on it forever.
+test('F54: readBodyCapped settles { aborted: true } on an error or a close before the end', async () => {
+  for (const event of ['error', 'close']) {
+    const req = fakeRequest();
+    const read = readBodyCapped(req, 1000);
+    req.emit('data', Buffer.from('{"platform":'));
+    req.emit(event, event === 'error' ? new Error('aborted') : undefined);
+    assert.deepEqual(await within(read), { aborted: true }, event);
+  }
+});
+
+// An upload the client abandons mid-body is dropped: no import, no answer,
+// and no wrong pairing code counted (an old extension sends its code in the
+// body, so none has been seen yet). Counting it would let a flaky connection
+// walk the real extension into the lockout.
+test('F54: an upload abandoned mid-body is dropped, not counted as a wrong code', async (t) => {
+  const r = await startReceiver();
+  t.after(r.close);
+  const socket = net.connect(r.port, '127.0.0.1');
+  await once(socket, 'connect');
+  socket.write(`POST /import HTTP/1.1\r\nHost: 127.0.0.1:${r.port}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"platform":"twitch","pairingCode":"`);
+  await until(() => r.handled() === 1);
+  socket.destroy();
+  await r.idle();
+  assert.equal(r.codeRejections(), 0);
+  assert.deepEqual(r.logs, []);
+  assert.equal(r.calls.length, 0);
+  const next = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: CODE }) });
+  assert.equal(next.status, 200);
 });
 
 test('C1: an old extension (code in the body only) still imports; a wrong body code is refused', async (t) => {
@@ -264,6 +448,21 @@ test('C1: an old extension (code in the body only) still imports; a wrong body c
   // A correct header wins over a wrong body field.
   const both = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ pairingCode: 'WRONG' }) });
   assert.equal(both.status, 200);
+});
+
+// The log line for an import that carries no code at all (none in the body,
+// or a field that is not a string) says "no code", never a made-up length.
+test('C1: an import with no pairing code at all is refused and logged as "no code"', async (t) => {
+  for (const extra of [{}, { pairingCode: 12345678 }, { pairingCode: null }]) {
+    // A receiver each, so each is the first failure of its streak (the one logged).
+    const r = await startReceiver();
+    t.after(r.close);
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody(extra) });
+    assert.equal(res.status, 403, JSON.stringify(extra));
+    assert.deepEqual(res.json, { success: false, error: WRONG_CODE_ERROR });
+    assert.equal(r.logs.length, 1);
+    assert.match(r.logs[0], /the wrong pairing code \(no code\)\./);
+  }
 });
 
 test('issue-8: connector 1.2 with a code cut to 16 characters is told to reload the extension', async (t) => {
@@ -295,6 +494,9 @@ test('issue-8: connector 1.2 with a code cut to 16 characters is told to reload 
   }
   assert.equal(r.codeRejections(), 7);
   assert.equal(r.calls.length, 0);
+  // The length is measured without the padding a paste can carry.
+  const padded = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: ` ${CODE.slice(0, 16)} ` }) });
+  assert.equal(padded.json.error, TRUNCATED_CODE_ERROR);
   // The whole code still imports through the same path.
   const ok = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: CODE }) });
   assert.equal(ok.status, 200);
@@ -312,8 +514,8 @@ test('issue-8: the reload hint still counts toward the lockout', async (t) => {
 test('issue-8: an install still on an 8- or 16-character code never gets the reload hint', async (t) => {
   for (const code of ['DEADBEEF', 'DEADBEEFDEADBEEF']) {
     const r = await startReceiver({ code });
+    t.after(r.close);
     const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders(), body: importBody({ pairingCode: 'Q'.repeat(16) }) });
-    await r.close();
     assert.equal(res.status, 403, code);
     assert.notEqual(res.json.error, TRUNCATED_CODE_ERROR, `${code}: its own field held the whole code`);
   }
@@ -324,7 +526,10 @@ test('F17: five wrong codes in a row lock /import for the lockout period, even f
   const guard = createPairingGuard({ now: () => now });
   const r = await startReceiver({ guard });
   t.after(r.close);
-  const attempt = (code) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': code }), body: importBody() });
+  // Keep-alive, as the extension's fetch: the 429 itself must close it.
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  const attempt = (code) => request(r.port, { agent, method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': code }), body: importBody() });
   for (let i = 0; i < 4; i++) assert.equal((await attempt(`BAD${i}`)).status, 403);
   // A success resets the streak.
   assert.equal((await attempt(CODE)).status, 200);
@@ -332,6 +537,8 @@ test('F17: five wrong codes in a row lock /import for the lockout period, even f
   const locked = await attempt(CODE);
   assert.equal(locked.status, 429);
   assert.equal(locked.headers['retry-after'], '60');
+  assert.deepEqual(locked.json, { success: false, error: 'Too many wrong pairing codes. Try again in a minute.' });
+  assert.equal(locked.headers.connection, 'close');
   now += 59 * 1000;
   assert.equal((await attempt(CODE)).status, 429);
   now += 2 * 1000;
@@ -343,6 +550,27 @@ test('F17: five wrong codes in a row lock /import for the lockout period, even f
   for (const line of r.logs) assert.ok(!line.includes(CODE) && !line.includes('BAD0'), line);
 });
 
+// The guard as main.js drives it: lockedForMs() is the time left and never
+// negative (0 before any lockout and once one ends), and reset(), which the
+// New code button calls, lifts a lockout and forgets a streak at once.
+test('F17: lockedForMs never goes negative; reset() lifts the lockout and clears the streak', () => {
+  let now = 5000000;
+  const guard = createPairingGuard({ maxFailures: 3, lockMs: 1000, now: () => now });
+  assert.equal(guard.lockedForMs(), 0, 'never locked');
+  for (let i = 0; i < 3; i++) guard.fail();
+  assert.equal(guard.lockedForMs(), 1000);
+  now += 1500;
+  assert.equal(guard.lockedForMs(), 0, 'ended 500 ms ago, not -500');
+  for (let i = 0; i < 3; i++) guard.fail();
+  assert.equal(guard.lockedForMs(), 1000);
+  guard.reset();
+  assert.equal(guard.lockedForMs(), 0, 'the new code is accepted at once');
+  guard.fail();
+  guard.fail();
+  guard.reset();
+  assert.deepEqual(guard.fail(), { failures: 1, lockedNow: false }, 'the streak starts over');
+});
+
 test('F17: codes compare in constant time, whatever their lengths', () => {
   assert.equal(codesMatch(CODE, CODE), true);
   assert.equal(codesMatch(` ${CODE.toLowerCase()} `, CODE), true);
@@ -351,8 +579,41 @@ test('F17: codes compare in constant time, whatever their lengths', () => {
   assert.equal(codesMatch('', CODE), false);
   assert.equal(codesMatch(CODE, ''), false, 'no code configured matches nothing');
   assert.equal(codesMatch(undefined, CODE), false);
+  // Not even an equally empty code, and a stored value that is not a string
+  // is refused, not thrown on.
+  assert.equal(codesMatch('', ''), false);
+  assert.equal(codesMatch('  ', ''), false);
+  assert.equal(codesMatch('12345678', 12345678), false);
+  assert.equal(codesMatch(CODE, null), false);
   assert.equal(maskCode('ABCDEF12'), 'AB… (8 characters)');
   assert.equal(maskCode(''), 'no code');
+  // A padded code is measured without the padding; no code at all says so.
+  assert.equal(maskCode('  ABCDEF12  '), 'AB… (8 characters)');
+  for (const none of [undefined, null, 12345678, '   ']) assert.equal(maskCode(none), 'no code', String(none));
+});
+
+// An install with no usable pairing code lets nothing in: every import is
+// refused with the plain 403 (an empty or 16-character code included, and
+// never a 500 from the reload-hint check) and /ping signs no proof.
+test('F17: with no pairing code configured, every import is refused and /ping proves nothing', async (t) => {
+  for (const code of ['', null]) {
+    const r = await startReceiver({ code });
+    t.after(r.close);
+    const attempts = [
+      { headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody() },
+      { headers: jsonHeaders(), body: importBody() },
+      { headers: jsonHeaders(), body: importBody({ pairingCode: '' }) },
+      { headers: jsonHeaders(), body: importBody({ pairingCode: 'Q'.repeat(16) }) },
+    ];
+    for (const attempt of attempts) {
+      const res = await request(r.port, { method: 'POST', path: '/import', ...attempt });
+      assert.equal(res.status, 403, `${code}: ${attempt.body}`);
+      assert.deepEqual(res.json, { success: false, error: WRONG_CODE_ERROR });
+    }
+    const ping = await request(r.port, { path: `/ping?nonce=${'a'.repeat(32)}` });
+    assert.deepEqual(ping.json, { app: 'stream-lurker' });
+    assert.equal(r.calls.length, 0);
+  }
 });
 
 test('C1 SIGNED_OUT: an automatic re-sync of a signed-out platform gets 409; a manual import reconnects it', async (t) => {
@@ -395,10 +656,17 @@ test('F53: the 409 carries why re-sync is off; an import that sees a sign-out mi
   // platform exactly as if the refusal had come first.
   const midFlight = await post('kick', { auto: true });
   assert.equal(midFlight.status, 409);
-  assert.equal(midFlight.json.code, 'SIGNED_OUT');
-  assert.equal(midFlight.json.username, undefined);
+  // Exactly the up-front refusal: no username, and never success.
+  assert.deepEqual(midFlight.json, { success: false, code: 'SIGNED_OUT', error: SIGNED_OUT_ERROR });
   const viaClient = await connector.postImport({ fetch: globalThis.fetch, port: r.port, code: CODE, platform: 'kick', cookies: [], auto: true });
   assert.equal(viaClient.code, 'SIGNED_OUT');
+  assert.equal(viaClient.success, false);
+  // Both kinds of 409 are recorded as failed re-syncs.
+  assert.deepEqual(r.autoAttempts, [
+    { platform: 'youtube', ok: false, error: APP_LOGIN_ERROR, status: 409 },
+    { platform: 'kick', ok: false, error: SIGNED_OUT_ERROR, status: 409 },
+    { platform: 'kick', ok: false, error: SIGNED_OUT_ERROR, status: 409 },
+  ]);
   // The truthy-but-not-a-string form still sends the sign-out text.
   assert.equal(autoSyncRefusalFor('signed-out'), SIGNED_OUT_ERROR);
   assert.equal(autoSyncRefusalFor('app-login'), APP_LOGIN_ERROR);
@@ -437,6 +705,7 @@ test('F96: a throwing importer on a re-sync is reported, and a throwing recorder
   t.after(r.close);
   const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ auto: true }) });
   assert.equal(res.status, 500);
+  assert.deepEqual(res.json, { success: false, error: 'boom' });
   assert.deepEqual(r.autoAttempts, [{ platform: 'twitch', ok: false, error: 'boom', status: 500 }]);
 
   let port = 0;
@@ -463,6 +732,91 @@ test('F52: auto responses never carry the username; a failed manual import does 
   assert.ok(r.logs.some(l => /kick import failed: boom/.test(l)));
 });
 
+// The re-sync record keeps at most 200 characters of the importer's error,
+// and a failure the importer did not explain is recorded as "Import failed",
+// never a blank that Platform Logins would show as no reason at all.
+test('F96: a re-sync failure is recorded with its error capped at 200 characters, or "Import failed"', async (t) => {
+  const r = await startReceiver({
+    importerResult: (platform) => (platform === 'twitch' ? { success: false, error: 'x'.repeat(500) } : { success: false }),
+  });
+  t.after(r.close);
+  const post = (platform) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ platform, auto: true }) });
+  await post('twitch');
+  await post('kick');
+  assert.deepEqual(r.autoAttempts, [
+    { platform: 'twitch', ok: false, error: 'x'.repeat(200), status: 200 },
+    { platform: 'kick', ok: false, error: 'Import failed', status: 200 },
+  ]);
+});
+
+// An importer that throws something other than an Error (a rejected
+// executeJavaScript can) is answered with the fixed "Import failed": never
+// an answer with no error, and never the 500 of a crash in the error path.
+test('an importer throwing a non-Error is answered 500 "Import failed", and recorded so', async (t) => {
+  const thrown = { twitch: 'a string', youtube: null, kick: { code: 42 } };
+  const r = await startReceiver({ importerThrows: (platform) => thrown[platform] });
+  t.after(r.close);
+  for (const platform of ['twitch', 'youtube', 'kick']) {
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ platform, auto: true }) });
+    assert.equal(res.status, 500, platform);
+    assert.deepEqual(res.json, { success: false, error: 'Import failed' }, platform);
+  }
+  assert.deepEqual(r.autoAttempts.map(a => a.error), ['Import failed', 'Import failed', 'Import failed']);
+});
+
+// An importer result that is not an object is a plain failure: never an
+// empty {}, never a string's characters spread into an object, never success.
+test('an importer result that is not an object is answered { success: false, error: "Import failed" }', async (t) => {
+  const results = [undefined, null, 'ok', 5, true];
+  const r = await startReceiver({ importerResult: () => results.shift() });
+  t.after(r.close);
+  for (let i = 0; i < 5; i++) {
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody() });
+    assert.equal(res.status, 200, String(i));
+    assert.deepEqual(res.json, { success: false, error: 'Import failed' }, String(i));
+  }
+  assert.deepEqual(r.manual, [], 'no failure counts as a manual import');
+});
+
+// A result JSON cannot encode (a BigInt, a cycle) never escapes the handler:
+// its promise settles and the failure is logged. main.js does not await the
+// handler, so a rejection would be an unhandled one in the main process.
+test('an importer result JSON cannot encode is logged and never escapes the handler', async (t) => {
+  const r = await startReceiver({ importerResult: () => ({ success: true, cookiesSet: 1n }) });
+  t.after(r.close);
+  const req = http.request({
+    host: '127.0.0.1', port: r.port, method: 'POST', path: '/import', agent: false,
+    headers: { Host: `127.0.0.1:${r.port}`, ...jsonHeaders({ 'X-Pairing-Code': CODE }) },
+  });
+  req.on('error', () => { /* closed by the test */ });
+  req.end(importBody());
+  await until(() => r.handled() === 1);
+  await r.idle();
+  req.destroy();
+  assert.deepEqual(r.rejections, []);
+  assert.equal(r.logs.length, 1);
+  assert.match(r.logs[0], /^\[Ext\] Cookie receiver error: Do not know how to serialize a BigInt/);
+});
+
+// The last-resort answer: whatever throws where nothing else catches it
+// (here the sign-out lookup), Error or not, the client gets 500 "Internal
+// error" on a closed connection, and the log carries the message itself.
+test('a dependency that throws outside the importer gets 500 "Internal error", logged', async (t) => {
+  const thrown = [new Error('config unreadable'), null];
+  const r = await startReceiver({ isSignedOut: () => { throw thrown.shift(); } });
+  t.after(r.close);
+  const agent = new http.Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  for (let i = 0; i < 2; i++) {
+    const res = await request(r.port, { agent, method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ auto: true }) });
+    assert.equal(res.status, 500, String(i));
+    assert.deepEqual(res.json, { success: false, error: 'Internal error' });
+    assert.equal(res.headers.connection, 'close');
+  }
+  assert.deepEqual(r.logs, ['[Ext] Cookie receiver error: config unreadable', '[Ext] Cookie receiver error: null']);
+  assert.equal(r.calls.length, 0);
+});
+
 test('bad JSON, a non-object body and an unknown platform are answered, not thrown', async (t) => {
   const r = await startReceiver();
   t.after(r.close);
@@ -477,6 +831,58 @@ test('bad JSON, a non-object body and an unknown platform are answered, not thro
   const res = await post(JSON.stringify({ platform: 'twitch', cookies: [{ name, value: 'v' }] }));
   assert.equal(res.status, 200);
   assert.equal(r.calls.at(-1).cookies[0].name, name);
+});
+
+// What counts as a request object: an empty body reads as {} (the header
+// code alone decides, and no platform is named), while JSON null, a number,
+// a string or a boolean is refused like an array, before a field is read.
+test('an empty body reads as {}; JSON null, a number, a string or a boolean is 400 "Invalid request"', async (t) => {
+  const r = await startReceiver();
+  t.after(r.close);
+  const post = (body) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body });
+  const empty = await post('');
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.json, { success: false, error: 'Unknown platform' });
+  for (const body of ['null', '5', '"twitch"', 'true', 'false', '0']) {
+    const res = await post(body);
+    assert.equal(res.status, 400, body);
+    assert.deepEqual(res.json, { success: false, error: 'Invalid request' }, body);
+  }
+  assert.equal(r.calls.length, 0);
+});
+
+// The platform allowlist, not the importers object, decides what may import:
+// a name every object has ('constructor', 'toString', 'valueOf') must never
+// call an Object.prototype method as an importer (constructor would echo the
+// cookies back), and an allowlisted platform with no importer wired is
+// unknown rather than a crash.
+test('C1: only an allowlisted platform with a wired importer imports', async (t) => {
+  const r = await startReceiver();
+  t.after(r.close);
+  const post = (body) => request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body });
+  for (const platform of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__', 'rumble', '']) {
+    const res = await post(importBody({ platform }));
+    assert.equal(res.status, 200, platform);
+    assert.deepEqual(res.json, { success: false, error: 'Unknown platform' }, platform);
+  }
+  assert.equal(r.calls.length, 0);
+  const partial = await startReceiver({ importers: { twitch: async () => ({ success: true, cookiesSet: 0 }) } });
+  t.after(partial.close);
+  const kick = await request(partial.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ platform: 'kick' }) });
+  assert.equal(kick.status, 200);
+  assert.deepEqual(kick.json, { success: false, error: 'Unknown platform' });
+});
+
+// An importer always receives an array: a cookies field that is not one
+// arrives as [] (nothing to write), never as something made up.
+test('C1: a cookies field that is not an array reaches the importer as []', async (t) => {
+  const r = await startReceiver();
+  t.after(r.close);
+  for (const cookies of ['auth-token=x', { name: 'auth-token', value: 'x' }, null, 5]) {
+    const res = await request(r.port, { method: 'POST', path: '/import', headers: jsonHeaders({ 'X-Pairing-Code': CODE }), body: importBody({ cookies }) });
+    assert.equal(res.status, 200, JSON.stringify(cookies));
+    assert.deepEqual(r.calls.at(-1).cookies, [], JSON.stringify(cookies));
+  }
 });
 
 test('G2.4: any bind error moves on to the next port (EADDRINUSE and EACCES alike)', async (t) => {
@@ -509,6 +915,37 @@ test('G2.4: any bind error moves on to the next port (EADDRINUSE and EACCES alik
   const none = await listenOnFirstPort({ ports: [1, 2], createServer: () => fakeServer('EACCES') });
   assert.equal(none.server, null);
   assert.deepEqual(none.errors, [{ port: 1, code: 'EACCES' }, { port: 2, code: 'EACCES' }]);
+});
+
+// A port listen() rejects outright (out of range: net throws synchronously,
+// with no 'error' event) is skipped like one that fails to bind, not waited
+// on forever and not reported as bound.
+test('G2.4: a port listen() throws on is skipped too', async (t) => {
+  const got = await within(listenOnFirstPort({ ports: [70000, 0], createServer: () => http.createServer() }), 2000);
+  assert.notEqual(got, NEVER, 'the walk finished');
+  t.after(() => got.server && got.server.close());
+  assert.equal(got.port, 0);
+  assert.ok(got.server.address().port > 0, 'bound on the next port');
+  assert.deepEqual(got.errors, [{ port: 70000, code: 'ERR_SOCKET_BAD_PORT' }]);
+});
+
+// Why each port was skipped, as main logs it: the error's code, else its
+// message, else 'error'. Real bind errors carry a code and a longer message.
+test('G2.4: a skipped port is reported by its error code, else its message, else "error"', async () => {
+  const failing = (err) => {
+    const s = new EventEmitter();
+    s.listen = () => setImmediate(() => s.emit('error', err));
+    s.close = () => {};
+    return s;
+  };
+  const errs = [
+    Object.assign(new Error('listen EACCES: permission denied 127.0.0.1:1'), { code: 'EACCES' }),
+    new Error('no code on this one'),
+    new Error(''),
+  ];
+  const got = await listenOnFirstPort({ ports: [1, 2, 3], createServer: () => failing(errs.shift()) });
+  assert.equal(got.server, null);
+  assert.deepEqual(got.errors, [{ port: 1, code: 'EACCES' }, { port: 2, code: 'no code on this one' }, { port: 3, code: 'error' }]);
 });
 
 test('F54: the server bounds slow and piled-up connections', () => {
