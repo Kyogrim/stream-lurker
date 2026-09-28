@@ -3412,8 +3412,8 @@ async function installCatalogEntry(entry) {
     let manifestRoot;
     try {
       addLog(`[Catalog] Extracting ${asset.name}…`);
-      const { refused } = extractZipBuffer(zip, staging);
-      if (refused.length) addLog(`[Catalog] Skipped ${refused.length} unsafe path(s) in ${asset.name}.`);
+      const { refusedCount } = extractZipBuffer(zip, staging);
+      if (refusedCount) addLog(`[Catalog] Skipped ${refusedCount} unsafe path(s) in ${asset.name}.`);
       ({ manifest, manifestRoot } = promoteStaged(staging, installRoot, {
         // Per-extension post-install patches.
         patch: entry.id === '7tv' ? patchSevenTVManifestForKick : null,

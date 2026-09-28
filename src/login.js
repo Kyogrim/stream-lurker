@@ -366,15 +366,17 @@ function setupYoutubeImportModal() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeYoutubeImportModal(); });
 
   const doImport = async () => {
-    const blob = (input?.value || '').trim();
-    if (!blob) {
+    // Sent as typed: trimming here dropped a cookies.txt last line whose value
+    // is empty (the line ends in its tab). main parses and cleans it.
+    const raw = input?.value || '';
+    if (!raw.trim()) {
       if (status) { status.textContent = 'Paste your exported cookies first.'; status.className = 'ti-status error'; }
       return;
     }
     if (status) { status.textContent = 'Importing session…'; status.className = 'ti-status pending'; }
     if (importBtn) importBtn.disabled = true;
     try {
-      const res = await window.api.setGoogleCookies(blob);
+      const res = await window.api.setGoogleCookies(raw);
       if (res?.success) {
         const msg = res.verified
           ? `Connected! (${res.cookiesSet} cookies, verified)`

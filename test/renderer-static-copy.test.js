@@ -61,3 +61,12 @@ test('F104: the Clips subtitle promises Twitch clips only, and no points auto-cl
   assert.match(sub, /Twitch/);
   assert.doesNotMatch(sub, /auto-claim|channel points/i);
 });
+
+test('the YouTube paste is sent as typed: trimming it would drop a last-line empty cookie value', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'login.js'), 'utf8').replace(/\r\n/g, '\n');
+  const fn = src.slice(src.indexOf('const doImport = async () => {'));
+  assert.match(fn, /window\.api\.setGoogleCookies\(raw\)/);
+  assert.match(fn, /if \(!raw\.trim\(\)\)/);
+});

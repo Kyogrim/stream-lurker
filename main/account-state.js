@@ -12,11 +12,13 @@ function placeholderName(platform) {
 }
 
 // A stored name that carries no information, so it's worth replacing.
-// Matches every name placeholderName can produce, including its fallback for
-// a platform with no entry in PLACEHOLDER_NAMES: one word, then " User".
-// Account names never contain a space (logins, slugs, @handles).
+// Exactly the names the app writes as placeholders. Not a pattern: YouTube
+// stores display names, and "Gaming User" is somebody's real account.
+// test/main-account-state.test.js checks every platform main.js signs in or
+// out has an entry, so no placeholder is ever written that this misses.
+const PLACEHOLDER_SET = new Set(Object.values(PLACEHOLDER_NAMES).map(n => n.toLowerCase()));
 function isPlaceholderName(name) {
-  return !name || /^[a-z0-9]+ user$/i.test(String(name).trim());
+  return !name || PLACEHOLDER_SET.has(String(name).trim().toLowerCase());
 }
 
 // Whether two names are the same account: YouTube shows a handle with or
@@ -149,6 +151,7 @@ function createSyncTickets() {
 // expiry marker included) is decided in config-boundary.js.
 
 module.exports = {
+  PLACEHOLDER_NAMES,
   placeholderName,
   isPlaceholderName,
   sameAccountName,

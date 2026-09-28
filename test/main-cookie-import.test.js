@@ -751,3 +751,14 @@ test('cookies.txt: an empty value on the last line is kept like anywhere else', 
     + ['.x.com', 'TRUE', '/', 'TRUE', '1830000000', 'b', ''].join(T);
   assert.deepEqual(parseCookieBlob(blob).map(c => [c.name, c.value]), [['a', ''], ['b', '']]);
 });
+
+test('cookies.txt with a BOM or leading spaces still reads #HttpOnly_ lines', () => {
+  const T = '\t';
+  const line = ['#HttpOnly_.youtube.com', 'TRUE', '/', 'TRUE', '1830000000', 'SID', 'v'].join(T);
+  for (const blob of ['﻿' + line, '  ' + line, '\n\n' + line + '\n']) {
+    const c = parseCookieBlob(blob);
+    assert.equal(c.length, 1, JSON.stringify(blob.slice(0, 3)));
+    assert.equal(c[0].domain, '.youtube.com');
+    assert.equal(c[0].httpOnly, true);
+  }
+});

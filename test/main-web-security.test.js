@@ -690,4 +690,13 @@ test('external-open gate: a clock starting at 0 behaves like any other', () => {
   t = 200;
   gate.noteGesture(key);
   assert.equal(gate.decide(key, 'https://example.com/b', { focused: true }).reason, 'rate limited', 'still rate limited after a real open');
+  // One gesture, one tab: the gesture spent at t=100 must not count again.
+  const other = {};
+  t = 0;
+  const g2 = createExternalOpenGate({ now: () => t });
+  g2.noteGesture(other);
+  t = 100;
+  assert.equal(g2.decide(other, 'https://example.com/c', { focused: true }).open, true);
+  t = 2500;
+  assert.equal(g2.decide(other, 'https://example.com/d', { focused: true }).reason, 'no click or key press just before it');
 });

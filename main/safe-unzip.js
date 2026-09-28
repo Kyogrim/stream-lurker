@@ -14,6 +14,8 @@ const path = require('path');
 const { unzipSync } = require('fflate');
 
 const DEFAULT_LIMITS = { maxEntries: 20000, maxTotalBytes: 512 * 1024 * 1024 };
+// Names listed in `refused`; refusedCount has them all.
+const MAX_REFUSED_LISTED = 100;
 
 // Returns the safe relative path for an entry, or null if it must be refused.
 function safeEntryPath(name) {
@@ -33,37 +35,55 @@ function safeEntryPath(name) {
 function extractZipBuffer(buf, destDir, limits = {}) {
   const { maxEntries, maxTotalBytes } = { ...DEFAULT_LIMITS, ...limits };
   const root = path.resolve(destDir);
+  const input = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   const refused = [];
-  let entries = 0;
+  let refusedCount = 0;
+  let records = 0;
   let total = 0;
+  let compressed = 0;
+  const declared = new Map();
 
-  const files = unzipSync(buf instanceof Uint8Array ? buf : new Uint8Array(buf), {
+  const files = unzipSync(input, {
     filter(file) {
+      // Every record counts, directories and refused ones too: a zip64
+      // directory can claim billions of phantom records past the end of the
+      // buffer, and fflate walks each one.
+      records += 1;
+      if (records > maxEntries) throw new Error(`archive has more than ${maxEntries} files`);
+      // In a real archive no two records share data, so their compressed sizes
+      // add up to less than the archive itself. More means records point at
+      // the same stream, which fflate would inflate once per record.
+      compressed += file.size;
+      if (compressed > input.length) throw new Error('archive entries overlap');
       if (file.name.endsWith('/')) return false; // directory entry; created on demand
       const rel = safeEntryPath(file.name);
       const target = rel && path.resolve(root, rel);
       // fflate collects results in a plain object, where '__proto__' would set
       // the prototype and the entry would vanish unreported.
       if (!target || !target.startsWith(root + path.sep) || file.name === '__proto__') {
-        refused.push(file.name);
+        refusedCount += 1;
+        if (refused.length < MAX_REFUSED_LISTED) refused.push(file.name);
         return false;
       }
-      entries += 1;
-      // originalSize is only what the archive declares. A stored entry is read
-      // by its compressed size, so a record claiming 0 bytes could carry any
-      // amount, and several records can point at the same data. Count the
-      // larger of the two for every record.
+      // originalSize is only what the archive declares, and a stored entry is
+      // read by its compressed size, so count the larger of the two.
       total += Math.max(file.size, file.originalSize);
-      if (entries > maxEntries) throw new Error(`archive has more than ${maxEntries} files`);
       if (total > maxTotalBytes) throw new Error(`archive expands past ${maxTotalBytes} bytes`);
+      declared.set(file.name, file.originalSize);
       return true;
     },
   });
 
-  // And the real sizes, whatever the headers said, before anything is written.
+  // After fflate: every entry must be the size it declared, and the real total
+  // within the cap. With fflate 0.8 a stored entry is at most its compressed
+  // size and a deflated one is cut to its declared size, so the filter already
+  // bounds the total; this catches a lying stored entry and guards an upgrade.
   let actual = 0;
-  for (const data of Object.values(files)) actual += data.length;
-  if (actual > maxTotalBytes) throw new Error(`archive expands past ${maxTotalBytes} bytes`);
+  for (const [name, data] of Object.entries(files)) {
+    if (data.length !== declared.get(name)) throw new Error(`${name} is not the size it declares`);
+    actual += data.length;
+  }
+  if (actual > maxTotalBytes) throw new Error(`archive holds more than ${maxTotalBytes} bytes`);
 
   fs.mkdirSync(root, { recursive: true });
   let written = 0;
@@ -75,7 +95,7 @@ function extractZipBuffer(buf, destDir, limits = {}) {
     fs.writeFileSync(target, data);
     written += 1;
   }
-  return { written, refused };
+  return { written, refused, refusedCount };
 }
 
 module.exports = { extractZipBuffer, safeEntryPath };

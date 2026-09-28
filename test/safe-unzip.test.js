@@ -97,7 +97,10 @@ test('default limits apply with no options, and survive overriding the other lim
 // A limit is a maximum, not an exclusive bound: an archive that uses exactly
 // its budget extracts, one more file or byte does not. Directory entries and
 // refused names are not extracted, so they do not spend the budget either.
-test('limits are inclusive, and only extracted files count against them', () => {
+// Every central record counts against the entry limit (directories and
+// refused names too: a zip64 directory can claim billions of phantom
+// records), while only extracted files count against the byte limit.
+test('limits are inclusive: every record counts toward entries, only extracted files toward bytes', () => {
   const entries = {
     'a.txt': strToU8('aaaa'),
     'b.txt': strToU8('bbbb'),
@@ -106,12 +109,12 @@ test('limits are inclusive, and only extracted files count against them', () => 
     '../evil.txt': strToU8('refused, and not counted'),
   };
   const dest = path.join(tmp(), 'out');
-  const r = extractZipBuffer(zipSync(entries), dest, { maxEntries: 3, maxTotalBytes: 12 });
+  const r = extractZipBuffer(zipSync(entries), dest, { maxEntries: 5, maxTotalBytes: 12 });
   assert.equal(r.written, 3);
   assert.deepEqual(r.refused, ['../evil.txt']);
   assert.deepEqual(fs.readdirSync(dest).sort(), ['a.txt', 'b.txt', 'c.txt']);
 
-  assert.throws(() => extractZipBuffer(zipSync(entries), path.join(tmp(), 'out'), { maxEntries: 2 }), /more than 2 files/);
+  assert.throws(() => extractZipBuffer(zipSync(entries), path.join(tmp(), 'out'), { maxEntries: 4 }), /more than 4 files/, 'the directory and the refused record count');
   assert.throws(() => extractZipBuffer(zipSync(entries), path.join(tmp(), 'out'), { maxTotalBytes: 11 }), /expands past 11 bytes/);
 });
 
@@ -169,15 +172,17 @@ test('a stored entry that declares 0 bytes still counts its real size against th
   assert.equal(fs.existsSync(dest), false, 'nothing written');
 });
 
-test('a deflated entry that under-declares its size never writes past the cap', () => {
+// fflate inflates a deflated entry into a buffer of the DECLARED size and
+// drops the rest, which is what lets the per-record accounting trust
+// max(size, originalSize). If an fflate upgrade ever grows that buffer, this
+// turns red instead of the defence quietly moving elsewhere.
+test('fflate cuts a deflated entry to the size it declares', () => {
   const blob = new Uint8Array(256 * 1024).fill(1); // compresses to almost nothing
   const zip = declareSize(zipSync({ 'blob.bin': blob }), 16);
   const dest = path.join(tmp(), 'out');
-  let threw = false;
-  try { extractZipBuffer(zip, dest, { maxTotalBytes: 4096 }); } catch (e) { threw = true; }
-  const written = fs.existsSync(dest)
-    ? fs.readdirSync(dest).reduce((n, f) => n + fs.statSync(path.join(dest, f)).size, 0) : 0;
-  assert.ok(threw || written <= 4096, `wrote ${written} bytes past a 4096-byte cap`);
+  const r = extractZipBuffer(zip, dest, { maxTotalBytes: 4096 });
+  assert.equal(r.written, 1);
+  assert.equal(fs.statSync(path.join(dest, 'blob.bin')).size, 16);
 });
 
 // fflate's zipSync cannot build an entry named __proto__ (it walks a plain
@@ -203,4 +208,83 @@ test('names with a colon are refused (NTFS alternate data streams), and so is a 
   assert.equal(r.written, 1);
   assert.deepEqual([...r.refused].sort(), ['__proto__', 'docs/Re: notes.txt', 'manifest.json:hidden']);
   assert.deepEqual(fs.readdirSync(dest), ['ok.txt']);
+});
+
+// ── Second review: hostile central directories ─────────────────────────────
+
+// Repeats a one-entry zip's central record `copies` times, every copy pointing
+// at the same local entry and declaring `declared` bytes uncompressed.
+function repeatCentralRecord(zip, copies, declared) {
+  const buf = Buffer.from(zip);
+  let eocd = buf.length - 22;
+  while (buf.readUInt32LE(eocd) !== 0x06054b50) eocd -= 1;
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  const record = Buffer.from(buf.subarray(cdOffset, cdOffset + cdSize));
+  record.writeUInt32LE(declared, 24);
+  const end = Buffer.from(buf.subarray(eocd, eocd + 22));
+  end.writeUInt16LE(copies, 8);
+  end.writeUInt16LE(copies, 10);
+  end.writeUInt32LE(cdSize * copies, 12);
+  return new Uint8Array(Buffer.concat([buf.subarray(0, cdOffset), ...Array(copies).fill(record), end]));
+}
+
+// A ~100-byte archive whose zip64 end record claims `count` central records,
+// all past the end of the buffer. fflate walks every one of them.
+function phantomZip64(count) {
+  const z64 = Buffer.alloc(56);
+  z64.writeUInt32LE(0x06064b50, 0);
+  z64.writeBigUInt64LE(44n, 4);
+  z64.writeBigUInt64LE(BigInt(count), 24);
+  z64.writeBigUInt64LE(BigInt(count), 32);
+  z64.writeBigUInt64LE(0x7fff0000n, 48);
+  const loc = Buffer.alloc(20);
+  loc.writeUInt32LE(0x07064b50, 0);
+  loc.writeUInt32LE(1, 16);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0xffff, 8);
+  eocd.writeUInt16LE(0xffff, 10);
+  eocd.writeUInt32LE(0xffffffff, 12);
+  eocd.writeUInt32LE(0xffffffff, 16);
+  return new Uint8Array(Buffer.concat([z64, loc, eocd]));
+}
+
+test('many records pointing at one stored entry are stopped before anything is inflated', () => {
+  // Each record claims 0 bytes. Both refusals that can stop this live in the
+  // filter, before fflate copies the entry once per record; the checks after
+  // unzipSync ('holds more than', 'not the size it declares') would be too late.
+  const zip = repeatCentralRecord(zipSync({ 'a.bin': new Uint8Array(64 * 1024).fill(3) }, { level: 0 }), 50, 0);
+  const dest = path.join(tmp(), 'out');
+  assert.throws(() => extractZipBuffer(zip, dest, { maxTotalBytes: 1024 * 1024 }), /overlap|expands past 1048576/);
+  assert.equal(fs.existsSync(dest), false);
+});
+
+test('records whose compressed data overlap are refused (one stream inflated over and over)', () => {
+  const zip = repeatCentralRecord(zipSync({ 'a.bin': new Uint8Array(4096).fill(3) }, { level: 0 }), 40, 4096);
+  const dest = path.join(tmp(), 'out');
+  assert.throws(() => extractZipBuffer(zip, dest), /overlap/);
+  assert.equal(fs.existsSync(dest), false);
+});
+
+test('an entry that is not the size it declares is refused', () => {
+  const zip = declareSize(zipSync({ 'blob.bin': new Uint8Array(8192).fill(9) }, { level: 0 }), 100);
+  const dest = path.join(tmp(), 'out');
+  assert.throws(() => extractZipBuffer(zip, dest), /not the size it declares/);
+  assert.equal(fs.existsSync(dest), false);
+});
+
+test('a zip64 directory claiming millions of phantom records fails fast instead of exhausting memory', () => {
+  const started = Date.now();
+  assert.throws(() => extractZipBuffer(phantomZip64(5e6), path.join(tmp(), 'out')), /more than 20000 files/);
+  assert.ok(Date.now() - started < 5000, 'stopped at the entry limit, not after walking every record');
+});
+
+test('the refused list is bounded; the count is not', () => {
+  const entries = { 'ok.txt': strToU8('y') };
+  for (let i = 0; i < 150; i++) entries[`../evil${i}.txt`] = strToU8('x');
+  const r = extractZipBuffer(zipSync(entries), path.join(tmp(), 'out'));
+  assert.equal(r.written, 1);
+  assert.equal(r.refusedCount, 150);
+  assert.equal(r.refused.length, 100);
 });

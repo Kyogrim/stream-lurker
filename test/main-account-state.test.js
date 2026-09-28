@@ -408,12 +408,25 @@ test('issue-14: a handle with stray whitespace is still a handle', () => {
 
 // Found by mutation testing: a platform with no map entry got a placeholder
 // ('<Platform> User') that isPlaceholderName did not recognise.
-test('every placeholder the app can write is recognised as one', () => {
-  const { placeholderName } = require('../main/account-state');
-  for (const p of ['twitch', 'kick', 'youtube', 'rumble', 'mixer', 'trovo']) {
-    assert.equal(isPlaceholderName(placeholderName(p)), true, p);
+test('placeholders are exactly the ones the app writes; real display names never count', () => {
+  const { placeholderName, PLACEHOLDER_NAMES } = require('../main/account-state');
+  // Every platform main.js validates or signs out has its own placeholder, so
+  // no account is ever stored under a name isPlaceholderName would miss.
+  const fs = require('fs');
+  const path = require('path');
+  const mainJs = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8').replace(/\r\n/g, '\n');
+  const lists = [...mainJs.matchAll(/(?:platformsToCheck|SIGN_OUT_PLATFORMS) = \[([^\]]*)\]/g)];
+  assert.ok(lists.length >= 2, 'found the platform lists in main.js');
+  for (const [, body] of lists) {
+    for (const p of body.match(/'([a-z]+)'/g).map(s => s.slice(1, -1))) {
+      assert.ok(Object.prototype.hasOwnProperty.call(PLACEHOLDER_NAMES, p), `${p} has a placeholder`);
+      assert.equal(isPlaceholderName(placeholderName(p)), true, p);
+    }
   }
-  for (const real of ['@Kyogrim', 'kyogrim_en', 'Kyogrim', 'user', 'Twitch Userx']) {
+  // YouTube stores display names, which can be two words ending in "User".
+  for (const real of ['@Kyogrim', 'kyogrim_en', 'Kyogrim', 'user', 'Twitch Userx', 'Power User', 'Gaming User', 'Guest User']) {
     assert.equal(isPlaceholderName(real), false, real);
   }
+  assert.deepEqual(youtubeRenameDecision({ stored: 'Gaming User', name: 'Account menu', source: 'menu' }).rename, false,
+    'a real two-word display name keeps its untrusted-source protection');
 });

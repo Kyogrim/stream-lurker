@@ -81,9 +81,11 @@ function parseCookieBlob(input) {
 
   // Netscape cookies.txt (tab-separated): domain, includeSub, path, secure, expiry, name, value
   if (/\t/.test(raw) || /^#\s*(HTTP Cookie File|Netscape)/im.test(raw)) {
-    // Only surrounding line breaks go: trim() also took the tab that ends a
-    // last line whose value is empty, and that cookie was dropped.
-    for (const rawLine of text.replace(/^[\r\n]+|[\r\n]+$/g, '').split(/\r?\n/)) {
+    // Leading whitespace and a BOM go, but only line breaks at the end:
+    // trim() also took the tab that ends a last line whose value is empty,
+    // and that cookie was dropped.
+    const body = text.replace(/^[\s\uFEFF]+/, '').replace(/[\r\n]+$/, '');
+    for (const rawLine of body.split(/\r?\n/)) {
       let line = rawLine;
       // curl-style exporters write httpOnly cookies as "#HttpOnly_<domain>".
       // Those are exactly Google's session cookies (SID, HSID, SSID,
