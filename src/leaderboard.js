@@ -1,7 +1,7 @@
 // Lurk Stats tab: headline totals, activity heatmap, the full watch-time
 // ranking, per-platform split, and a per-streamer drill-down.
 
-import { PLATFORMS, state, getPlatformSVG, isPlatformEnabled, platformColorVar, fmtDuration } from './state.js';
+import { PLATFORMS, state, getPlatformSVG, isPlatformEnabled, platformColorVar, fmtDuration, escapeHtml } from './state.js';
 
 const EMPTY_HOURS = { twitch: 0, kick: 0, youtube: 0, rumble: 0 };
 
@@ -84,7 +84,7 @@ function buildHeatmap(daily) {
     const label = future
       ? ''
       : `${cursor.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}: ${mins ? fmtDuration(mins) : 'no activity'}`;
-    cells += `<div class="lb-hm-cell" data-level="${level}"${label ? ` title="${label}"` : ''}></div>`;
+    cells += `<div class="lb-hm-cell" data-level="${level}"${label ? ` title="${escapeHtml(label)}"` : ''}></div>`;
     cursor.setDate(cursor.getDate() + 1);
   }
 
@@ -187,8 +187,8 @@ function panelEl() { return document.getElementById('leaderboard-panel'); }
 function statCard(value, label, accent) {
   return `
     <div class="lb-stat-card">
-      <span class="lb-stat-val" style="color: ${accent || 'var(--cyan-color)'};">${value}</span>
-      <span class="lb-stat-lbl">${label}</span>
+      <span class="lb-stat-val" style="color: ${escapeHtml(accent || 'var(--cyan-color)')};">${escapeHtml(value)}</span>
+      <span class="lb-stat-lbl">${escapeHtml(label)}</span>
     </div>
   `;
 }
@@ -234,14 +234,14 @@ function renderOverview() {
     const pct = Math.max(4, (s.minutes / maxMinutes) * 100);
     const platColor = platformColorVar(s.platform);
     return `
-      <div class="lb-row lb-row-clickable" data-key="${s.platform}:${s.username}" role="button" tabindex="0" title="View ${s.username}'s stats">
-        <span class="lb-row-rank">${rankBadge(idx)}</span>
-        <span class="platform-badge ${s.platform}" style="width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
+      <div class="lb-row lb-row-clickable" data-key="${escapeHtml(s.platform)}:${escapeHtml(s.username)}" role="button" tabindex="0" title="View ${escapeHtml(s.username)}'s stats">
+        <span class="lb-row-rank">${escapeHtml(rankBadge(idx))}</span>
+        <span class="platform-badge ${escapeHtml(s.platform)}" style="width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
           ${getPlatformSVG(s.platform)}
         </span>
         <div class="lb-row-main">
           <div class="lb-row-top">
-            <span class="lb-row-name">${s.username}</span>
+            <span class="lb-row-name">${escapeHtml(s.username)}</span>
             <span class="lb-row-time">${fmtDuration(s.minutes)}</span>
           </div>
           <div class="lb-row-bar"><div style="width: ${pct}%; background-color: ${platColor};"></div></div>
@@ -258,7 +258,7 @@ function renderOverview() {
     const color = platformColorVar(p);
     return `
       <div class="lb-plat-row">
-        <span class="lb-plat-name"><span class="lb-plat-dot" style="background-color: ${color};"></span>${PLATFORM_LABELS[p]}</span>
+        <span class="lb-plat-name"><span class="lb-plat-dot" style="background-color: ${color};"></span>${escapeHtml(PLATFORM_LABELS[p])}</span>
         <div class="lb-plat-bar"><div style="width: ${pct}%; background-color: ${color};"></div></div>
         <span class="lb-plat-val">${fmtDuration(m)} · ${pct.toFixed(0)}%</span>
       </div>
@@ -267,7 +267,7 @@ function renderOverview() {
 
   const movies = Math.floor(stats.totalMinutes / 120);
   const funFact = movies >= 1
-    ? `🍿 That's about <strong>${movies.toLocaleString()}</strong> feature-length ${movies === 1 ? 'movie' : 'movies'} worth of lurking.`
+    ? `🍿 That's about <strong>${escapeHtml(movies.toLocaleString())}</strong> feature-length ${movies === 1 ? 'movie' : 'movies'} worth of lurking.`
     : 'Keep lurking to unlock more stats!';
 
   host.innerHTML = `
@@ -323,12 +323,12 @@ function renderStreamerDetail(key) {
     </button>
 
     <div class="lb-detail-head">
-      <span class="platform-badge ${d.platform}" style="width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
+      <span class="platform-badge ${escapeHtml(d.platform)}" style="width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: ${platColor}; flex: 0 0 auto;">
         ${getPlatformSVG(d.platform)}
       </span>
       <div class="lb-detail-id">
-        <span class="lb-detail-name">${d.username}</span>
-        <span class="lb-detail-sub">${PLATFORM_LABELS[d.platform]} · ranked #${d.rank} of ${d.total} lurked</span>
+        <span class="lb-detail-name">${escapeHtml(d.username)}</span>
+        <span class="lb-detail-sub">${escapeHtml(PLATFORM_LABELS[d.platform])} · ranked #${escapeHtml(d.rank)} of ${escapeHtml(d.total)} lurked</span>
       </div>
     </div>
 

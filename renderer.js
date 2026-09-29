@@ -3,7 +3,7 @@ console.log('=== RENDERER.JS RUNNING ===');
 // the dashboard once on DOMContentLoaded and bridges main-process events to UI
 // updates.
 
-import { state, appendLogMessage } from './src/state.js';
+import { state, appendLogMessage, gridCellId, monitoredStreamers } from './src/state.js';
 import { setupTabs } from './src/tabs.js';
 import {
   createStreamTab,
@@ -13,6 +13,7 @@ import {
   setupGlobalGhostButton,
   setCellPoppedOut,
   refreshGridCellMeta,
+  syncActiveTabs,
 } from './src/multi-lurk.js';
 import { setupLiveNow, renderLiveNow } from './src/live-now.js';
 import { setupOnboarding, maybeShowOnboarding } from './src/onboarding.js';
@@ -21,11 +22,18 @@ import { renderMonitoredList } from './src/streamers.js';
 import { renderExtensionsList, renderExtensionCatalog } from './src/extensions.js';
 import { renderFollowsList, setupFollowsHandlers } from './src/follows.js';
 import { renderLeaderboard, setupLeaderboard } from './src/leaderboard.js';
-import { populateCalendarFormDays, renderCalendar, setupCalendarHandlers } from './src/calendar.js';
+import { populateCalendarFormDays, renderCalendar, setupCalendarHandlers, startCalendarAutoRefresh } from './src/calendar.js';
 import { setupLoginPortalListeners } from './src/login.js';
 import { hydrateSettingsUI, applyServiceToggles, setupSettingsHandlers } from './src/settings.js';
 import { startPointsPoller } from './src/points.js';
 import { initClipsManager } from './src/clips.js';
+import { loadWebFontsAfterLoad } from './src/fonts.js';
+import { setupExternalLinks } from './src/external-links.js';
+
+// Never awaited, and only once the window has loaded: the fonts are cosmetic
+// and must not hold up the dashboard or main's watch-time crediting (see
+// src/fonts.js).
+loadWebFontsAfterLoad();
 
 const BACKGROUND_CALENDAR_SYNC_DELAY_MS = 5000;
 const SCAN_BTN_COOLDOWN_MS = 1500;
@@ -129,7 +137,13 @@ function setupTopBarHandlers() {
     scanNowBtn.classList.remove('btn-cyan');
     scanNowBtn.innerHTML = `<span class="pulse-dot"></span> Scanning...`;
 
-    await window.api.forceScan();
+    // Resolves when the scan has run, which can take a while; a rejection
+    // must still give the button back.
+    try {
+      await window.api.forceScan();
+    } catch (err) {
+      appendLogMessage(`[ERROR] Scan Now failed: ${err?.message || err}`);
+    }
 
     setTimeout(() => {
       scanNowBtn.disabled = false;
@@ -194,40 +208,42 @@ function setupAddExtensionButton() {
   });
 }
 
-const WEBVIEW_LABEL = {
-  'twitch-login-webview': 'Twitch',
-  'kick-login-webview': 'Kick',
-  'youtube-login-webview': 'YouTube',
-  'rumble-login-webview': 'Rumble',
-};
-
-function setupRefreshWebviewButtons() {
-  document.querySelectorAll('.refresh-webview-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const webviewId = btn.dataset.webview;
-      const webview = document.getElementById(webviewId);
-      if (!webview) return;
-      webview.reload();
-      appendLogMessage(`[System] Refreshing ${WEBVIEW_LABEL[webviewId] || 'Platform'} Portal view.`);
-    });
-  });
-}
+// True from the moment the backend listeners exist until restoreOpenStreamTabs
+// has run. Stream opens and closes that land in between go into the grid but
+// are not synced: a sync then would send main a list without the streams still
+// to be restored, and main would end their sessions.
+let restoringStreams = true;
 
 // Re-create grid cells for containers the main process still considers open.
 // Runs on every dashboard load, so after a manual refresh or an automatic
 // crash-recovery reload the grid matches what main is tracking (and still
 // counting watch time for) instead of silently drifting to an empty grid.
+// Main hears the result once, as one full list (see createStreamTab), and
+// even when nothing was restored: a key that failed to restore is then
+// dropped by main rather than credited for a cell nobody can see.
 function restoreOpenStreamTabs() {
-  for (const key of state.activeContainers) {
-    const [platform, username] = key.split(':');
-    if (!platform || !username) continue;
-    if (document.getElementById(`grid-cell-${platform}-${username}`)) continue;
+  try {
+    for (const key of state.activeContainers) {
+      const [platform, username] = key.split(':');
+      if (!platform || !username) continue;
+      if (document.getElementById(gridCellId(platform, username))) continue;
 
-    // activeContainers keys are lowercased; recover the display casing.
-    const tracked = state.currentConfig?.streamers?.find(
-      s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
-    );
-    createStreamTab(platform, tracked ? tracked.username : username);
+      // One stream that can't be rebuilt must not cost the others their cells.
+      try {
+        // activeContainers keys are lowercased; recover the display casing.
+        // monitoredStreamers() skips a malformed entry, which would otherwise
+        // throw here for every key whose match comes after it.
+        const tracked = monitoredStreamers().find(
+          s => s.platform.toLowerCase() === platform && s.username.toLowerCase() === username
+        );
+        createStreamTab(platform, tracked ? tracked.username : username, { sync: false });
+      } catch (err) {
+        reportInitFailure(`Restoring ${key}`, err);
+      }
+    }
+  } finally {
+    restoringStreams = false;
+    syncActiveTabs();
   }
 }
 
@@ -256,10 +272,15 @@ function setupBackendListeners() {
     renderLiveNow();
   });
 
-  window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username));
-  window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username));
-  window.api.onCloseAllStreamTabs(() => closeAllStreamTabs());
-  window.api.onReloadStreamContainers(() => reloadAllStreamContainers());
+  window.api.onOpenStreamTab(({ platform, username }) => createStreamTab(platform, username, { sync: !restoringStreams }));
+  window.api.onCloseStreamTab(({ platform, username }) => removeStreamTab(platform, username, { sync: !restoringStreams }));
+  window.api.onCloseAllStreamTabs(() => closeAllStreamTabs({ sync: !restoringStreams }));
+  // Sent whenever the loaded extensions changed, including a folder that was
+  // unreachable at startup loading late: its "Unavailable" badge goes too.
+  window.api.onReloadStreamContainers(() => {
+    reloadAllStreamContainers();
+    renderExtensionsList();
+  });
   window.api.onStreamPopoutClosed(({ platform, username }) => setCellPoppedOut(platform, username, false));
 
   window.api.onWatchTimeUpdate((data) => {
@@ -271,95 +292,125 @@ function setupBackendListeners() {
   });
 }
 
+// Each startup step runs on its own. They used to share one try block, so a
+// render that threw on an imported config (a null list, an event without a
+// time) skipped setupBackendListeners: main kept scanning, opening streams and
+// counting watch time for a dashboard that never heard about any of it.
+function initStep(label, fn) {
+  try {
+    const result = fn();
+    if (result && typeof result.catch === 'function') result.catch(err => reportInitFailure(label, err));
+  } catch (err) {
+    reportInitFailure(label, err);
+  }
+}
+
+function reportInitFailure(label, err) {
+  console.error(`Dashboard startup step failed: ${label}`, err);
+  appendLogMessage(`[ERROR] ${label} failed during startup: ${err?.message || err}`);
+}
+
 async function init() {
   console.log('=== INIT RUNNING ===');
-  setupTabs();
-  setupGlobalGhostButton();
-  setupTopBarHandlers();
-  setupAddStreamerForm();
-  setupAddExtensionButton();
-  setupRefreshWebviewButtons();
-  setupSettingsHandlers();
-  setupFollowsHandlers();
-  setupCalendarHandlers();
-  setupLeaderboard();
-  setupLiveNow();
-  setupOnboarding();
-  setupUpdater();
+  initStep('Tabs', setupTabs);
+  initStep('External links', setupExternalLinks);
+  initStep('Ghost button', setupGlobalGhostButton);
+  initStep('Top bar', setupTopBarHandlers);
+  initStep('Add streamer form', setupAddStreamerForm);
+  initStep('Add extension button', setupAddExtensionButton);
+  initStep('Settings', setupSettingsHandlers);
+  initStep('Follows', setupFollowsHandlers);
+  initStep('Calendar handlers', setupCalendarHandlers);
+  initStep('Leaderboard handlers', setupLeaderboard);
+  initStep('Live Now', setupLiveNow);
+  initStep('Onboarding handlers', setupOnboarding);
+  initStep('Updater', setupUpdater);
 
+  // Everything below renders from these; without them there is nothing to show.
   try {
-    console.log('Fetching config...');
     state.currentConfig = await window.api.getConfig();
-    console.log('Config fetched successfully:', state.currentConfig);
-    
-    console.log('Fetching active containers...');
     state.activeContainers = await window.api.getActiveContainers();
-    console.log('Active containers fetched successfully:', state.activeContainers);
-
-    console.log('Hydrating settings UI...');
-    hydrateSettingsUI();
-    console.log('Applying service toggles...');
-    applyServiceToggles();
-
-    console.log('Rendering extensions list...');
-    renderExtensionsList();
-    renderExtensionCatalog();
-
-    console.log('Fetching recent logs...');
-    const initialLogs = await window.api.getRecentLogs();
-    console.log('Recent logs fetched successfully, count:', initialLogs ? initialLogs.length : 0);
-    initialLogs.forEach(log => appendLogMessage(log));
-
-    console.log('Updating stats...');
-    updateStats();
-    console.log('Rendering leaderboard...');
-    renderLeaderboard();
-    console.log('Leaderboard rendered successfully.');
-
-    console.log('Populating calendar form days...');
-    populateCalendarFormDays();
-    console.log('Calendar form days populated successfully.');
-
-    state.platformSchedules = state.currentConfig.syncedCalendarEvents || [];
-    console.log('Platform schedules set. Count:', state.platformSchedules ? state.platformSchedules.length : 0);
-
-    console.log('Rendering calendar...');
-    renderCalendar();
-    console.log('Calendar rendered successfully.');
-
-    console.log('Setting up login portal listeners...');
-    setupLoginPortalListeners();
-    console.log('Setting up backend listeners...');
-    setupBackendListeners();
-    console.log('Restoring open stream containers...');
-    restoreOpenStreamTabs();
-    console.log('Starting points poller...');
-    startPointsPoller();
-    console.log('Initializing clips manager...');
-    initClipsManager();
-    console.log('Dashboard initialization completed fully!');
-
-    // Fresh installs only — main marks existing configs as already onboarded.
-    maybeShowOnboarding();
-
-    // Silent delayed sync to keep platform schedules fresh.
-    setTimeout(async () => {
-      try {
-        appendLogMessage('[Calendar] Running background scheduled calendar sync...');
-        const schedules = await window.api.syncPlatformSchedules();
-        state.platformSchedules = schedules;
-        state.currentConfig.syncedCalendarEvents = schedules;
-        await window.api.saveConfig(state.currentConfig);
-        renderCalendar();
-        appendLogMessage(`[Calendar] Background sync complete. Stored ${schedules.length} events.`);
-      } catch (e) {
-        console.error('Background calendar sync failed:', e);
-      }
-    }, BACKGROUND_CALENDAR_SYNC_DELAY_MS);
   } catch (err) {
     console.error('Failed to initialize application dashboard:', err);
     appendLogMessage(`[ERROR] Initialization failed: ${err.message}`);
+    return;
   }
+
+  // The last scan's results, so a reloaded dashboard shows who is live now
+  // instead of "Checking..." cards until the next scan. Before the service
+  // toggles (they render the monitor grid) and before open streams are
+  // restored (their cells show viewers and uptime). [] before the first scan.
+  try {
+    const statuses = await window.api.getStatuses();
+    state.currentStatuses = Array.isArray(statuses) ? statuses : [];
+  } catch (err) {
+    reportInitFailure('Loading the last scan results', err);
+  }
+
+  initStep('Settings form', hydrateSettingsUI);
+  initStep('Service toggles', applyServiceToggles);
+  initStep('Extensions list', renderExtensionsList);
+  initStep('Extension catalog', renderExtensionCatalog);
+
+  try {
+    const initialLogs = await window.api.getRecentLogs();
+    (Array.isArray(initialLogs) ? initialLogs : []).forEach(log => appendLogMessage(log));
+  } catch (err) {
+    reportInitFailure('Loading recent logs', err);
+  }
+
+  initStep('Stats', updateStats);
+  initStep('Leaderboard', renderLeaderboard);
+  initStep('Calendar form', populateCalendarFormDays);
+  const synced = state.currentConfig?.syncedCalendarEvents;
+  state.platformSchedules = Array.isArray(synced) ? synced : [];
+  initStep('Calendar', renderCalendar);
+
+  // Registered after the getRecentLogs await, so a line that arrives in
+  // between is not printed twice. restoreOpenStreamTabs skips cells that an
+  // early open-stream-tab already created.
+  initStep('Login portal listeners', setupLoginPortalListeners);
+  initStep('Backend listeners', setupBackendListeners);
+  // Read again now that open-stream-tab has a listener. One main sent during
+  // the awaits above (a scan finishing while a crashed dashboard reloads) went
+  // to nobody, and restoring from the first answer would then report that
+  // stream closed: main ends its session and won't reopen it this broadcast.
+  // Main changes this list in the same synchronous step that sends an open or
+  // close, so events that reach the listeners before this answer are already
+  // reflected in it (and are held back from main until the restore syncs).
+  try {
+    const open = await window.api.getActiveContainers();
+    if (Array.isArray(open)) state.activeContainers = open;
+  } catch (err) {
+    reportInitFailure('Refreshing open streams', err);
+  }
+  // The same for the scan results: a scan that finished after the first read
+  // (the first one runs 3 s after startup) sent its status-update to nobody,
+  // and the cards would stay "Checking..." until the next scan, up to an hour
+  // away. Main stores the results before it sends them, so this answer is
+  // never older than a status-update the listener has already applied.
+  try {
+    const again = await window.api.getStatuses();
+    if (Array.isArray(again)) state.currentStatuses = again;
+  } catch (err) {
+    reportInitFailure('Refreshing the last scan results', err);
+  }
+  // Redrawn from both fresh reads; restored cells and Live Now follow below.
+  initStep('Monitor grid', renderStreamsGrid);
+  initStep('Stats', updateStats);
+  initStep('Stream cell details', refreshGridCellMeta);
+  initStep('Restoring open streams', restoreOpenStreamTabs);
+  initStep('Live Now count', renderLiveNow);
+  initStep('Points poller', startPointsPoller);
+  initStep('Clips', initClipsManager);
+  console.log('Dashboard initialization completed fully!');
+
+  // Fresh installs only — main marks existing configs as already onboarded.
+  initStep('Onboarding', maybeShowOnboarding);
+
+  // Keeps platform schedules and the Today column current for the whole
+  // session, not only the first minutes after launch.
+  initStep('Calendar auto-refresh', () => startCalendarAutoRefresh({ firstSyncDelayMs: BACKGROUND_CALENDAR_SYNC_DELAY_MS }));
 }
 
 console.log('Document readyState:', document.readyState);

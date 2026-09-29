@@ -2,7 +2,7 @@
 // System Settings), walking through the three things the app can't do for you:
 // signing in, choosing channels, and deciding how you want to be told.
 
-import { state, appendLogMessage } from './state.js';
+import { state, appendLogMessage, escapeHtml } from './state.js';
 import { switchTab } from './tabs.js';
 
 const STEPS = [
@@ -62,13 +62,15 @@ function render() {
   const isLast = stepIndex === STEPS.length - 1;
   const dots = STEPS.map((_, i) => `<span class="ob-dot${i === stepIndex ? ' active' : ''}"></span>`).join('');
 
+  // step.body and step.icon are markup, so they are not escaped: both are
+  // static strings from STEPS above (allowlisted in the HTML guard test).
   overlay.querySelector('.ob-modal').innerHTML = `
     <div class="ob-icon">
       <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${step.icon}</svg>
     </div>
-    <h2 class="ob-title">${step.title}</h2>
+    <h2 class="ob-title">${escapeHtml(step.title)}</h2>
     <p class="ob-body">${step.body}</p>
-    ${step.action ? `<button class="ob-action" data-tab="${step.action.tab}">${step.action.label}</button>` : ''}
+    ${step.action ? `<button class="ob-action" data-tab="${escapeHtml(step.action.tab)}">${escapeHtml(step.action.label)}</button>` : ''}
     <div class="ob-foot">
       <div class="ob-dots">${dots}</div>
       <div class="ob-buttons">

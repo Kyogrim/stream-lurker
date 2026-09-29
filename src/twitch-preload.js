@@ -1,11 +1,13 @@
-// Preload script for Twitch background GQL helper window
+// Preload for the platform login window (open-login-modal in main.js). The
+// dashboard sends Kick there, and Rumble while it is disabled; Twitch and
+// YouTube use cookie import instead. It injects the stealth patches below into
+// the page's main world at document start, so the login page sees a
+// fingerprint consistent with the spoofed UA. It needs nothing from Electron:
+// a synchronous IPC here would block every page load in the window until main
+// answers.
 try {
-  const { ipcRenderer, webFrame } = require('electron');
-  const uniqueIdVal = ipcRenderer.sendSync('get-twitch-unique-id-sync') || '';
-
   const code = `
     (() => {
-      const PRELOAD_UNIQUE_ID = ${JSON.stringify(uniqueIdVal)};
       // -------------------------------------------------------------
       // Stealth: Native-looking NavigatorUAData & toString() bypass
       // -------------------------------------------------------------
@@ -456,33 +458,6 @@ try {
           console.error('[Stealth] Failed to mock keyboard layout:', keyboardErr);
         }
 
-        // Lock localStorage device IDs to the unique_id cookie
-        try {
-          const originalGetItem = Storage.prototype.getItem;
-          defineNativeMethod(Storage.prototype, 'getItem', 'Storage', function (key) {
-            if (key === 'local_storage_device_id' || key === 'k-device-id' || key === 'local_copy_unique_id') {
-              const uid = PRELOAD_UNIQUE_ID;
-              if (uid) return JSON.stringify(uid);
-            }
-            return originalGetItem.call(this, key);
-          });
-
-          const originalSetItem = Storage.prototype.setItem;
-          defineNativeMethod(Storage.prototype, 'setItem', 'Storage', function (key, value) {
-            if (key === 'local_storage_device_id' || key === 'k-device-id' || key === 'local_copy_unique_id') {
-              const uid = PRELOAD_UNIQUE_ID;
-              if (uid) {
-                return originalSetItem.call(this, key, JSON.stringify(uid));
-              }
-            }
-            return originalSetItem.call(this, key, value);
-          });
-          
-          console.warn('[Stealth] Locked localStorage device IDs to unique_id cookie successfully. ID: "' + PRELOAD_UNIQUE_ID + '"');
-        } catch (storageErr) {
-          console.error('[Stealth] Failed to lock localStorage device IDs:', storageErr);
-        }
-
         // -------------------------------------------------------------
         // Stealth: Iframe contentWindow / contentDocument Context Patching
         // -------------------------------------------------------------
@@ -645,14 +620,25 @@ try {
   // Chromium version and userAgentData exposed to the page (a mismatch with the
   // spoofed UA/Sec-CH-UA that trips "browser not supported"). Retry as soon as the
   // <html> root appears, which is still before the platform's bot-detection scripts.
-  if (!injectIntoMainWorld()) {
-    const obs = new MutationObserver(() => {
-      if (injectIntoMainWorld()) obs.disconnect();
-    });
+  //
+  // Exactly once per document. Each extra run redefines the spoofed getters over
+  // fresh objects, so a page that captured navigator.plugins or userAgentData
+  // early later sees a different, inconsistent fingerprint (and every run adds
+  // its own observer, interval and listeners). The old readystatechange listener
+  // was never removed and re-injected at 'interactive' and again at 'complete'.
+  // The flag lives here in the preload's world, not on the page, where
+  // fingerprinting could find a marker or a page could pre-set it.
+  let injected = injectIntoMainWorld();
+  if (!injected) {
+    const tryInject = () => {
+      if (injected || !injectIntoMainWorld()) return;
+      injected = true;
+      obs.disconnect();
+      document.removeEventListener('readystatechange', tryInject);
+    };
+    const obs = new MutationObserver(tryInject);
     obs.observe(document, { childList: true, subtree: true });
-    document.addEventListener('readystatechange', () => {
-      if (injectIntoMainWorld()) obs.disconnect();
-    });
+    document.addEventListener('readystatechange', tryInject);
   }
 } catch (e) {
   console.error('[Preload] Failed to inject stealth script:', e);

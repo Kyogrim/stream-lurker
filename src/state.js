@@ -14,20 +14,72 @@ export const state = {
   draggedItem: null,
 };
 
+// The monitored list, minus any entry the dashboard cannot render. Main
+// normalizes config.streamers on load, import and save, so this only matters
+// for a bad entry that reached the renderer some other way; one used to throw
+// out of every render and out of startup. Same objects, same order.
+export function monitoredStreamers(cfg = state.currentConfig) {
+  const list = Array.isArray(cfg?.streamers) ? cfg.streamers : [];
+  return list.filter(s => s && typeof s === 'object'
+    && typeof s.platform === 'string' && typeof s.username === 'string');
+}
+
 export function isPlatformEnabled(platform) {
   const cfg = state.currentConfig;
   if (!cfg) return true;
   return cfg[`${platform.toLowerCase()}Enabled`] !== false;
 }
 
+// Only the four known platforms get a colour var. The platform string comes
+// from config (import-config merges arbitrary files) and lands inside style
+// attributes and cssText, so an unknown value must never be echoed back.
 export function platformColorVar(platform) {
-  return `var(--${platform.toLowerCase()}-color)`;
+  const p = String(platform ?? '').toLowerCase();
+  return PLATFORMS.includes(p) ? `var(--${p}-color)` : 'var(--text-muted)';
 }
 
+// Always returns a number or a number plus a K/M suffix: viewer counts come
+// off the network and are interpolated into HTML templates unescaped.
 export function formatViewerCount(count) {
-  if (count >= 1_000_000) return (count / 1_000_000).toFixed(1) + 'M';
-  if (count >= 1000) return (count / 1000).toFixed(1) + 'K';
-  return count;
+  const n = Number(count) || 0;
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return n;
+}
+
+// Escape a value for an HTML text node or a quoted attribute. Every string
+// from config, localStorage or the network goes through this (or through
+// textContent / DOM properties) before it reaches innerHTML; the guard in
+// test/renderer-html-guard.test.js enforces it. Quotes matter as much as
+// angle brackets: a bare " breaks out of title="..." or src="...".
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+export function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
+}
+
+// Hosts a URL may point at before it is used as an <img>/<webview> src or
+// handed to a clip/download IPC. A match is the host itself or a subdomain.
+export const TWITCH_PAGE_HOSTS = ['twitch.tv'];
+export const TWITCH_MEDIA_HOSTS = ['twitch.tv', 'jtvnw.net', 'twitchcdn.net'];
+// Clip video files (videoQualities[].sourceURL, handed to download-clip).
+// Twitch serves current clips from this one CloudFront distribution; it is
+// named exactly because anyone can host on bare cloudfront.net. Kept apart
+// from TWITCH_MEDIA_HOSTS, which the CSP's img-src mirrors for thumbnails.
+// main/clip-download.js holds the same list.
+export const TWITCH_CLIP_FILE_HOSTS = [...TWITCH_MEDIA_HOSTS, 'd1ndex63qxojbr.cloudfront.net'];
+export const STREAM_HOSTS = ['twitch.tv', 'kick.com', 'youtube.com', 'rumble.com'];
+
+// Returns the normalized URL when it is https: on one of `allowedHosts`, else
+// ''. Callers treat '' as "do not load". Credentials in the URL are refused
+// so a user:pass@ prefix can't dress up a lookalike host.
+export function safeHttpsUrl(value, allowedHosts) {
+  if (typeof value !== 'string' || !value) return '';
+  let url;
+  try { url = new URL(value); } catch { return ''; }
+  if (url.protocol !== 'https:' || url.username || url.password) return '';
+  const host = url.hostname.toLowerCase();
+  const ok = allowedHosts.some(h => host === h || host.endsWith(`.${h}`));
+  return ok ? url.href : '';
 }
 
 // Compact human-readable duration from minutes ("45m", "2h 13m").
@@ -48,8 +100,28 @@ const PLATFORM_SVG = {
   rumble: `<svg class="badge-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M12 0a12 12 0 1 0 12 12A12.013 12.013 0 0 0 12 0zm5.176 13.916a2.766 2.766 0 0 1-2.316.643c-.482-.093-2.025-.561-3.69-.974l-2.023 3.947a.384.384 0 0 1-.68 0L7.02 14.77a.384.384 0 0 1 0-.34l2.128-4.156a6.837 6.837 0 0 1-1.391-2.327.384.384 0 0 1 .494-.482l8.473 2.782a2.766 2.766 0 0 1 1.776 2.502 2.76 2.76 0 0 1-1.324 1.171z"/></svg>`,
 };
 
+// Own-property lookup only, so a stored platform like "constructor" can't
+// pull a non-SVG value off the prototype chain into the markup.
 export function getPlatformSVG(platform) {
-  return PLATFORM_SVG[platform.toLowerCase()] || '';
+  const key = String(platform ?? '').toLowerCase();
+  return Object.hasOwn(PLATFORM_SVG, key) ? PLATFORM_SVG[key] : '';
+}
+
+// The ids a lurked stream's sidebar tab and grid cell carry. Both end in the
+// same `${platform}-${username}` suffix, and usernames may contain '-' (Kick
+// slugs, YouTube handles), so a tab id is mapped to its cell by slicing off the
+// prefix, never by splitting on '-'.
+export function streamTabId(platform, username) {
+  return `stream-${String(platform).toLowerCase()}-${String(username).toLowerCase()}`;
+}
+
+export function gridCellId(platform, username) {
+  return `grid-cell-${String(platform).toLowerCase()}-${String(username).toLowerCase()}`;
+}
+
+export function gridCellIdForTab(tabId) {
+  const s = String(tabId ?? '');
+  return s.startsWith('stream-') ? `grid-cell-${s.slice('stream-'.length)}` : '';
 }
 
 export function streamUrl(platform, username, status) {

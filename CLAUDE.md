@@ -416,57 +416,203 @@ conflict, this section wins.**
 ### What it is
 
 An Electron desktop app that monitors Twitch / Kick / YouTube channels, auto-opens them when they go
-live, and lurks a whole lineup in one window. Windows-first, published as an NSIS installer with
-in-app auto-update.
+live, and lurks a whole lineup in one window. Releases are Windows-only NSIS installers; nothing has
+ever been published for Linux (see "Releasing"). Runs on Electron 44.4.5 (Chromium 152); every release
+up to v0.14.0-beta shipped Electron 30 (Chromium 124), which matters for the cookie database (see
+"The profile").
+
+Updates are user-triggered, never automatic: System Settings → Check for Updates, then Download
+Update, then Restart & Install (a downloaded update also installs on the next quit). Nothing checks in
+the background, so a release reaches only the users who click, whenever they click.
 
 ### Layout
 
 | Path | Role |
 |---|---|
-| `main.js` | Main process (~3.9k lines): scanning, IPC handlers, sessions/cookies, config, tray, releases |
-| `preload.js` | `contextBridge` — everything the renderer can call lives on `window.api` |
-| `renderer.js` | Entry point: wires modules together, binds main→renderer events |
-| `src/*.js` | 17 ES modules, one per feature (`multi-lurk`, `leaderboard`, `streamers`, `settings`, `live-now`, `onboarding`, …) |
-| `index.html` | One page; one `<section class="tab-content">` per tab |
+| `main.js` | Main process, the largest file (over 4k lines; `wc -l main.js` for today's count, and read it in pages): windows, sessions/cookies, IPC handlers, the scan loop, config, tray, updater, releases. The decisions it makes live in `main/` |
+| `main/*.js` | CommonJS modules for main-process logic, one concern each (config store and sanitizing, cookie import and migration, the extension's local receiver, scan planning, dashboard protocol and health, …). None requires `electron` (Electron objects come in as arguments), so each runs under plain Node in `test/main-<name>.test.js` (two predate that prefix: `cookie-migration` and `safe-unzip` are tested in `test/<name>.test.js`) |
+| `preload.js` | `contextBridge` for the dashboard, which runs with `sandbox: true`, so it may only `require('electron')`. Everything the renderer can call lives on `window.api` |
+| `renderer.js` | Entry point (ES module): wires modules together, binds main→renderer events |
+| `src/*.js` | ES modules loaded from `renderer.js`: one per feature (`multi-lurk`, `leaderboard`, `streamers`, `settings`, `live-now`, `onboarding`, …) plus shared ones (`state.js`, `tabs.js`, and `inject.js`, the scripts injected into platform pages). One exception: `src/twitch-preload.js` is a plain-script preload for the sandboxed login window (`open-login-modal` in `main.js`), not an ES module. Sandboxed preloads cannot be ES modules, so never add `import`/`export` to it |
+| `index.html` | One page, served from `app://bundle` (`main/dashboard-protocol.js`), never `file://`; one `<section class="tab-content">` per tab |
 | `style.css` | CSS custom properties, dark/cyan theme |
-| `extension/` | The "Stream Lurker Connector" browser extension (MV3) |
+| `extension/` | The "Stream Lurker Connector" browser extension (MV3). `connector.js` holds its protocol, shared by `popup.js`, the `background.js` worker and the tests; the app side is `main/cookie-receiver.js` |
+| `test/` | `node:test` gate tests, run by `npm test`: `main-*` (the `main/` modules, plus static guards that read `main.js` as text), `cookie-migration` and `safe-unzip` (two `main/` modules named before the prefix), `renderer-*`, `page-*` (scripts injected into platform pages), `extension-*` |
 
 ### Patterns to reuse
 
 - **Adding a tab:** a `data-tab="x"` nav button plus `<section id="tab-x" class="tab-content">`.
   `switchTab` in `src/tabs.js` is generic — no JS change needed.
 - **Adding IPC:** always three places — `ipcMain.handle` in `main.js`, a bridge in `preload.js`, a
-  `window.api.*` call in the renderer.
+  `window.api.*` call in the renderer. Use `ipcMain.handle` only: `main.js` wraps it so every handler
+  refuses any caller but the dashboard's top frame on `app://bundle`. `test/main-ipc-surface.test.js`
+  fails if the preload calls a channel that has no handler.
+- **Main-process logic:** put the decision in a `main/<name>.js` module with its inputs passed in,
+  test it in `test/main-<name>.test.js`, and leave only the wiring in `main.js`. `main.js` cannot load
+  outside Electron, so the `main-*-wiring` tests read it as text to check it still routes through the
+  modules.
+- **HTML in the renderer:** every value interpolated into `innerHTML` / `insertAdjacentHTML` /
+  `outerHTML` goes through `escapeHtml`, or is set with `textContent` / `setAttribute` instead. Every
+  URL put in a `src` / `href` goes through `safeHttpsUrl` with the hosts it may point at, unless it
+  is a literal `https://` or relative URL. `test/renderer-html-guard.test.js` checks both statically.
+- **`index.html`** has no inline `<script>`, no `on*=` handlers and no `javascript:` URLs. The
+  Content-Security-Policy blocks them at runtime and `test/renderer-csp.test.js` fails first.
+- **No menu shortcuts.** The application menu is removed on Windows and Linux, so Ctrl+R,
+  Ctrl+Shift+I and the zoom keys do nothing; never build on them. DevTools opens by itself in an
+  unpackaged build and cannot open in a packaged one.
 - **Shared helpers** live in `src/state.js` (`fmtDuration`, `formatViewerCount`, `getPlatformSVG`,
-  `platformColorVar`, `isPlatformEnabled`). Put anything used by two modules there rather than
-  duplicating it.
+  `platformColorVar`, `isPlatformEnabled`, `escapeHtml`, `safeHttpsUrl`). Put anything used by two
+  modules there rather than duplicating it.
 
 ### The config is irreplaceable
 
 `%APPDATA%/stream-lurker/config.json` holds the monitored list and thousands of hours of watch
-history. It is written atomically (temp file → rename) with a rolling `.bak`, and a damaged file is
-preserved as `config.json.corrupt-<timestamp>`.
+history. `saveConfigFile` (`main/config-store.js`) keeps four copies: `config.json`, a rolling `.bak`
+(the previous save), `config.json.daily.bak` (at most once a day) and `config.json.daily.prev.bak` (the
+daily copy it replaced, moved there by a rename, which rewrites no data). Each is replaced with
+`replaceFileDurably`: write `<file>.tmp`, flush it to disk (`fsync`), rename it over the file, flush
+again. Nothing is truncated in place. A rename without the flush is not crash-safe on NTFS: after
+an unexpected shutdown, a real config.json came back as 24,099 zero bytes, and the unflushed `.bak`
+beside it was lost too. The daily copies cover a drive that acknowledges flushes it has not done:
+`config.json` and `.bak` are both rewritten on every save (about once a minute while streams are
+open), while a daily copy a day old has reached the disk, even on the save that refreshes
+`.daily.bak`. The loader reads `config.json`, then `.bak`, then the two daily copies, those only where
+it would otherwise start from defaults. So any file holding config data goes through `saveConfigFile`,
+`replaceFileDurably` or `writeFileDurably`, never a bare `writeFileSync`/`copyFileSync`, and
+`test/main-config-store.test.js` crashes every save at every step to prove it. Recovery copies sit
+next to it as `config.json.<kind>-<stamp>.json`, where `<stamp>` is the ISO 8601 time with `:` and `.`
+turned into `-`, e.g. `config.json.corrupt-2026-09-27T14-03-11-123Z.json`:
+
+- `corrupt`: a config.json that read but is not a JSON object, moved aside before the app falls
+  back to `.bak` (a damaged `.bak` or daily copy is copied to `config.json.bak.corrupt-<stamp>.json`
+  or `config.json.daily.bak.corrupt-<stamp>.json`).
+- `dropped-streamers`: monitored-streamer entries the app could not use.
+- `preimport`: the config as it was just before a backup import replaced it.
+
+A config.json that exists but cannot be read (held by a backup or sync tool, a drive not mounted
+yet) is never overwritten: the app runs on defaults, saves nothing, and offers Retry
+(`main/config-store.js`).
 
 - Back it up before any destructive test.
 - Every new field needs a safe default for existing installs — a missing streamer `mode` must read as
   `auto`, or upgraders silently change behaviour.
 
-### Verification — there is no test framework
+### The profile: one process, and the cookie database
+
+The platform logins live in the Chromium profile next to config.json, and they are just as hard to
+get back.
+
+- **One process per profile.** `app.requestSingleInstanceLock()` runs at the top of `main.js`,
+  before anything touches the profile: a second launch on the same profile exits at once and brings
+  the running window forward (a `--hidden` launch, the Windows sign-in one, stays in the tray). The
+  lock is keyed on the profile directory and binds only processes that ask for it, so it does not
+  stop a loose script, or a process started with a different `--user-data-dir`.
+- **The cookie schema migration.** Electron 30 stores cookies at schema v21. Chromium 147 dropped
+  the migrations from v21, so Electron 42 and later delete such a file and start empty: every login
+  gone. `main/cookie-migration.js` replays Chromium's own v21 → v23 steps before Chromium opens the
+  file, and Chromium 152 takes it to v24 itself. It must run before `ready` and before any session
+  exists; once the network service has the file open it is too late, so never move it later.
+- **Rollback hazard: never ship a build on an older Electron than the last release.** Chromium also
+  deletes a cookie database that is too new for it, so a v24 file opened by Electron 30 is wiped.
+  Never downgrade `electron` in package.json, and never run an older build on a profile a newer one
+  has opened (one more reason dev builds get a copy of the profile).
+- **The dashboard runs on `app://bundle`, and the file-protocol fuse stays ON.** Saved clips live in
+  the dashboard's localStorage, which moved with its origin; `migrateFileOriginStorage`
+  (`main/dashboard-protocol.js`) copies them once from the old `file://` store. That import needs
+  `build.electronFuses.grantFileProtocolExtraPrivileges: true`: with it off, every `file://` page is an
+  opaque origin with no localStorage, the import fails on every launch, and every user's saved clips
+  are lost. The dashboard is safe either way because an `app://` page cannot read `file://`
+  (verified: fetch, XHR and iframe all refused). It only shows in a packaged build, so test it with
+  `npm run package` and `dist/win-unpacked/Stream Lurker.exe --user-data-dir=<copy of a profile>`.
+- **The Node escape-hatch fuses are OFF** (`runAsNode`, `enableNodeOptionsEnvironmentVariable`,
+  `enableNodeCliInspectArguments`): the packaged exe ignores `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`,
+  `NODE_EXTRA_CA_CERTS` and `--inspect`. So main never spawns a child Node process, and all outbound
+  HTTP goes through Electron's `net` (`test/main-ipc-surface.test.js` checks both).
+  `--remote-debugging-port` is Chromium's switch, not Node's, so CDP on a packaged build still works.
+- **Every Electron bump:** users skip versions (updates are user-triggered), so any old release can
+  update straight to the new one. Check that the new Chromium still migrates v23, which is what
+  `cookie-migration.js` leaves for anyone arriving from an Electron 30 release, and extend the
+  migration first if it does not. Prove it on a copy of a real pre-upgrade profile by counting
+  cookies before and after.
+
+### Verification
 
 "Tested" here means, in order of cost:
 
+**1. Syntax, one file per call.** `node --check` parses only its first operand; the rest become
+`process.argv`, so `node --check main.js preload.js` never looks at preload.js. Both loops feed the
+file on stdin with an explicit `--input-type`, because a file operand leaves the parse to Node's
+module-syntax detection: that passes `import`/`export` in a CommonJS file, and a sandboxed preload
+cannot load ESM, so the preload fails, `window.api` is undefined, and the check passed. Pinned, the
+result also does not depend on package.json's `"type"`. `--input-type` applies only to stdin or
+`--eval` (with a file operand it is refused outright), and errors read from stdin say `[stdin]`,
+which is why each loop names the file. Bash (Git Bash on Windows); PowerShell has no `<` redirection.
+
 ```bash
-node --check main.js preload.js              # CommonJS
-node --input-type=module --check < src/x.js  # ES modules
-npm start                                    # then read the activity console / stdout
+bad=0
+# CommonJS and plain scripts, pinned like the ES-module loop: a file operand leaves
+# the parse to module-syntax detection, which passes import/export in a CommonJS
+# file (and a sandboxed preload cannot load ESM).
+for f in main.js preload.js main/*.js src/twitch-preload.js extension/*.js; do
+  node --input-type=commonjs --check < "$f" || { echo "SYNTAX: $f"; bad=1; }
+done
+# ES modules. Errors read from stdin say [stdin], which is why the loop names the file.
+for f in renderer.js src/*.js; do
+  [ "$f" = src/twitch-preload.js ] && continue   # plain-script preload, checked above
+  node --input-type=module --check < "$f" || { echo "SYNTAX: $f"; bad=1; }
+done
+[ "$bad" = 0 ]
 ```
 
-For pure logic (date maths, cookie matching, parsing), write a throwaway harness in the scratchpad
-and run the real cases through it. Do not claim something works because it parses.
+**2. `npm test`.** The `node:test` gate tests in `test/**/*.test.js`, in plain Node with no Electron:
+the `main/` modules, the extension's connector, the renderer modules and page scripts, plus static
+guards over `main.js`, `preload.js` and `index.html`. No pre-commit hook runs them; run them before
+every commit. A behavior fix ships with its test here, so logic stuck inside `main.js` gets pulled
+into a `main/` module first.
+
+**3. A dev build, on a copy of the profile.** Never run unreleased code on the live profile. `npm
+start` without a switch uses it: while the app is running the lock just hands off to it and exits,
+and with the app closed your build runs on the real cookies and config. Electron 44 honors
+`--user-data-dir`: `app.getPath('userData')` returns it and the single-instance lock is keyed on it,
+so the copy runs next to the real app without handing off.
+
+Electron ignores an empty `--user-data-dir`, and one it cannot create, and runs on
+`%APPDATA%/stream-lurker`, so run the block as **one** bash invocation (save it to a file and
+`bash file.sh` if the harness refuses it), never line by line, because `SL_PROFILE` does not survive
+between tool calls. Every step is chained into the launch, and the launch line checks for a finished
+copy itself, so a failed step, the placeholder left in, or the last line run alone starts nothing.
+`npx electron` returns only when the dev build quits, so run the whole invocation in the background.
+
+```bash
+# Quit the app first (tray > Quit Stream Lurker): a copy taken mid-write can be torn.
+SL_PROFILE="<your scratchpad>/sl-profile"   # <- a path that does not exist yet, never under %APPDATA%
+# The copy keeps launchOnStartup, and a dev build that sees it on registers
+# node_modules' electron.exe as a Windows sign-in entry, so it is switched off.
+# The marker is written only after that, and the launch refuses a folder without
+# it; the check shares the launch's line so no split of this block runs it bare.
+# (npx electron . is the same as npm start --)
+mkdir "$SL_PROFILE" && cp -r "$APPDATA/stream-lurker/." "$SL_PROFILE" &&
+node -e "const f=process.argv[1],fs=require('fs'),c=JSON.parse(fs.readFileSync(f,'utf8'));c.launchOnStartup=false;fs.writeFileSync(f,JSON.stringify(c,null,2))" "$SL_PROFILE/config.json" &&
+touch "$SL_PROFILE/.sl-dev-copy" &&
+[ -n "$SL_PROFILE" ] && [ -f "$SL_PROFILE/.sl-dev-copy" ] && npx electron . --user-data-dir="$SL_PROFILE"
+```
+
+The copy keeps the streamer list and Auto-Open, so it scans and opens streams like the real app. It
+also keeps the pairing code: with the real app closed, the browser extension's 30-minute re-sync
+lands in the copy.
+
+Running the block again stops at `mkdir`, because the copy exists. To start the same copy again, run
+the `SL_PROFILE=` line and the last line, together in one invocation. The marker check refuses an
+empty path, the live profile, and a copy the block did not finish (delete that one and run the block
+again).
+
+For pure logic, a test in `test/` beats a throwaway harness; a harness in the scratchpad is fine
+for exploring real cases first. Do not claim something works because it parses.
 
 ### Releasing
 
 ```bash
+# 0. both syntax loops and npm test pass, and a dev build ran on a copy of a real profile
 # 1. bump version in package.json, then:
 npm install --package-lock-only
 git commit && git tag -a vX.Y.Z-beta && git push origin main && git push origin vX.Y.Z-beta
@@ -477,11 +623,24 @@ gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --
 
 `build.publish.releaseType` is `release`, so it publishes live — there is no draft step to clean up.
 
+- **Electron never goes backwards** between releases (see "The profile").
+- **A release reaches only users who click Check for Updates**, whenever they get to it. There is no
+  recalling a bad one from anyone who installed it, and a fix does not reach anyone who does not
+  check, so when a fix matters, say so in the release notes.
+- **Windows only.** `npm run release` publishes the NSIS installer and `latest.yml`. Do not run
+  `release-linux`: it puts an untested AppImage and `latest-linux.yml` on the same tag. Linux needs
+  its own tested release step first.
+- **The extension ships inside the installer** (`build.extraResources`, loaded unpacked), and a
+  browser can keep running an older copy of it long after the app updates. A release must keep
+  working with older extension versions: that is why the receiver still takes `body.pairingCode`
+  and why ports 47100-47104 stay first on both sides.
+
 ### Windows / Git Bash gotchas
 
 - `taskkill /PID` must run through **PowerShell**. Git Bash rewrites `/PID` into a filesystem path.
 - `gh api` endpoints take **no leading slash** (`gh api markdown`, not `gh api /markdown`).
 - Python reading the config must pass `encoding='utf-8'` — stream titles contain emoji.
+- The syntax loops in "Verification" are bash; PowerShell has no `<` redirection.
 
 ### Three rules learned the hard way
 
@@ -493,13 +652,22 @@ gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --
 - **Never point a second Electron process at the live user profile.** Two processes sharing one
   Chromium profile (`%APPDATA%/stream-lurker`) can wipe the cookie store — a full set of platform
   logins was destroyed this way by a throwaway test script overlapping the running app. Copy the
-  profile to the scratchpad and point the script at the copy, and close the app first either way.
-  Note that loose scripts otherwise default to `%APPDATA%/Electron`, a profile with none of the
-  app's cookies, so results from one are meaningless unless `app.setPath('userData', ...)` is set.
+  profile to the scratchpad and start the script with `--user-data-dir=<the copy>`, and close the
+  app first either way. The single-instance lock does not save you here: a script that never asks
+  for it is never refused. Without the switch, a loose script uses `%APPDATA%/<its package.json
+  productName or name>` (`%APPDATA%/Electron` for a bare script), a profile with none of the app's
+  cookies, so its results are meaningless. Electron ignores an empty `--user-data-dir`, and one it
+  cannot create, exactly as if the switch were missing, and `electron .` from this repo then runs on
+  `%APPDATA%/stream-lurker`, the live profile. So set the path and launch in **one** bash
+  invocation (a file run with `bash file.sh` if the harness refuses the block), with the launch
+  guarded as in Verification step 3, never across tool calls: a variable does not survive between
+  them.
 
 ### Miscellany
 
 - Rumble is scaffolded but force-disabled (`config.rumbleEnabled = false` on every load). Don't
   advertise it as working.
 - Comments explain *why*, not *what*, and match the density of the surrounding file.
-- The app is beta and ships to real users on auto-update. A bad release reaches them immediately.
+- The app is beta and ships to real users. Updates are user-triggered (System Settings → Check for
+  Updates), so a bad release reaches everyone who checks and cannot be taken back, and a fix
+  reaches only those who check again. Get it right before it ships.

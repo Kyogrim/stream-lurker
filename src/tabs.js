@@ -1,18 +1,18 @@
 // Tab switching for both static nav tabs and dynamic per-stream tabs.
 
-import { appendLogMessage } from './state.js';
+import { appendLogMessage, gridCellIdForTab } from './state.js';
 
 export function switchTab(tabName) {
   document.querySelectorAll('.nav-btn, .stream-tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector(`[data-tab="${tabName}"]`)?.classList.add('active');
+  // Stream tab names embed a username, which may contain a quote.
+  document.querySelector(`[data-tab="${CSS.escape(tabName)}"]`)?.classList.add('active');
 
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
   const gridContainer = document.getElementById('multi-lurk-grid');
 
   if (tabName.startsWith('stream-')) {
-    const [, platform, username] = tabName.split('-');
-    const cellId = `grid-cell-${platform}-${username}`;
+    const cellId = gridCellIdForTab(tabName);
 
     document.getElementById('tab-multi-lurk')?.classList.add('active');
 

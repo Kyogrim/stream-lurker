@@ -1,6 +1,6 @@
 // Manage Streamers panel: monitored list per platform, with drag & arrow reorder.
 
-import { PLATFORMS, state, appendLogMessage, getPlatformSVG, platformColorVar, isPlatformEnabled } from './state.js';
+import { PLATFORMS, state, appendLogMessage, getPlatformSVG, platformColorVar, isPlatformEnabled, escapeHtml, monitoredStreamers } from './state.js';
 import { renderStreamsGrid, updateStats } from './dashboard.js';
 
 function monitoredListEl() { return document.getElementById('monitored-channels-list'); }
@@ -28,17 +28,25 @@ function getStreamMode(streamer) {
   return STREAM_MODES.includes(streamer.mode) ? streamer.mode : 'auto';
 }
 
+// A malformed entry is skipped (see monitoredStreamers) rather than throwing
+// out of every render.
 function groupByPlatform() {
   const groups = Object.fromEntries(PLATFORMS.map(p => [p, []]));
-  for (const s of state.currentConfig.streamers) {
+  for (const s of monitoredStreamers()) {
     const p = s.platform.toLowerCase();
-    if (groups[p]) groups[p].push(s);
+    // Own keys only: a platform named "constructor" must not reach Object's.
+    if (Object.hasOwn(groups, p)) groups[p].push(s);
   }
   return groups;
 }
 
+// Entries no group holds (an unknown platform) are kept, after the rest: a
+// reorder must never drop a streamer, whose watch time is keyed by it.
 function persistGroups(groups) {
-  state.currentConfig.streamers = PLATFORMS.flatMap(p => groups[p]);
+  const list = Array.isArray(state.currentConfig.streamers) ? state.currentConfig.streamers : [];
+  const grouped = PLATFORMS.flatMap(p => groups[p]);
+  const placed = new Set(grouped);
+  state.currentConfig.streamers = [...grouped, ...list.filter(s => !placed.has(s))];
   return window.api.saveConfig(state.currentConfig);
 }
 
@@ -82,11 +90,11 @@ function buildRow(streamer, index, listLength) {
 
   row.innerHTML = `
     <div class="list-item-identity">
-      <div class="platform-badge ${streamer.platform}">${getPlatformSVG(streamer.platform)}</div>
-      <span class="list-item-name">${streamer.username}</span>
+      <div class="platform-badge ${escapeHtml(streamer.platform)}">${getPlatformSVG(streamer.platform)}</div>
+      <span class="list-item-name">${escapeHtml(streamer.username)}</span>
     </div>
     <div class="priority-controls">
-      <button class="mode-btn mode-${mode}" title="${MODE_META[mode].title}">
+      <button class="mode-btn mode-${escapeHtml(mode)}" title="${escapeHtml(MODE_META[mode].title)}">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MODE_META[mode].icon}</svg>
       </button>
       <button class="priority-btn up-btn" title="Move Up" ${isFirst ? 'disabled' : ''}>▲</button>
@@ -187,8 +195,8 @@ function renderPlatformGroup(platformKey, list) {
     justify-content: space-between;
   `;
   groupHeader.innerHTML = `
-    <span style="color: ${accentColor}; font-weight: 700;">${platformName.toUpperCase()} CHANNELS</span>
-    <span style="font-size: 0.75rem; opacity: 0.6;">${list.length} Monitored</span>
+    <span style="color: ${accentColor}; font-weight: 700;">${escapeHtml(platformName.toUpperCase())} CHANNELS</span>
+    <span style="font-size: 0.75rem; opacity: 0.6;">${escapeHtml(list.length)} Monitored</span>
   `;
   host.appendChild(groupHeader);
 
@@ -201,7 +209,7 @@ export function renderMonitoredList() {
   host.innerHTML = '';
 
   const cfg = state.currentConfig;
-  if (!cfg || cfg.streamers.length === 0) {
+  if (!cfg || monitoredStreamers(cfg).length === 0) {
     host.innerHTML = `
       <div class="no-extensions-message" style="height: 120px;">
         <p>No channels added to monitor list. Add channels using the form on the left.</p>

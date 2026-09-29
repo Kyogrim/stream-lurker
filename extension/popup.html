@@ -109,6 +109,7 @@
       background: var(--danger-color);
       box-shadow: 0 0 8px var(--danger-color);
     }
+    .dot.idle { background: var(--text-muted); box-shadow: none; }
     .dot.ok {
       background: var(--cyan-color);
       box-shadow: 0 0 8px var(--cyan-color);
@@ -120,7 +121,7 @@
       100% { transform: scale(0.95); box-shadow: 0 0 0 0 hsla(188, 86%, 53%, 0); }
     }
 
-    label {
+    label, .section-label {
       display: block;
       font-size: 10px;
       font-weight: 700;
@@ -137,13 +138,15 @@
       background: rgba(0, 0, 0, 0.35);
       color: var(--cyan-color);
       font-family: var(--font-mono);
-      font-size: 13px;
+      /* Sized so a whole 32-character code stays visible (new installs get
+         one): at 13px with 2px spacing the last four or five were cut off. */
+      font-size: 12px;
       font-weight: 500;
-      letter-spacing: 2px;
+      letter-spacing: 0.5px;
       text-transform: uppercase;
       transition: var(--transition);
     }
-    input::placeholder { color: var(--text-muted); letter-spacing: 2px; }
+    input::placeholder { color: var(--text-muted); letter-spacing: 0; text-transform: none; font-family: var(--font-sans); }
     input:focus {
       outline: none;
       border-color: var(--cyan-color);
@@ -171,6 +174,8 @@
     button:hover:not(:disabled) { transform: translateY(-1px); }
     button:active:not(:disabled) { transform: translateY(0); }
     button:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+    /* button's display:flex would otherwise beat the UA's [hidden] rule. */
+    [hidden] { display: none !important; }
 
     .tw { background: var(--twitch-color); border-color: var(--twitch-color); box-shadow: 0 0 10px var(--twitch-glow); }
     .yt { background: var(--youtube-color); border-color: var(--youtube-color); box-shadow: 0 0 10px var(--youtube-glow); }
@@ -189,6 +194,66 @@
     }
     .result.ok { color: var(--success-color); }
     .result.err { color: var(--danger-color); }
+
+    /* Auto-sync panel: what the background worker last did, per platform. */
+    .sync {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--panel-border);
+    }
+    .sync-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .sync-head .section-label { margin: 0; }
+    .sync-summary {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-secondary);
+    }
+    .sync-rows { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .sync-rows:empty { display: none; }
+    .sync-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--panel-glass);
+      border: 1px solid var(--panel-border);
+      border-radius: var(--radius-sm);
+      padding: 7px 8px 7px 10px;
+    }
+    .sync-name { flex: 0 0 54px; font-size: 11px; font-weight: 700; }
+    .sync-name.twitch { color: var(--twitch-color); }
+    .sync-name.youtube { color: var(--youtube-color); }
+    .sync-name.kick { color: var(--kick-color); }
+    .sync-text {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-size: 10.5px;
+      line-height: 1.4;
+      color: var(--text-secondary);
+      word-break: break-word;
+    }
+    .sync-summary.err, .sync-text.err { color: var(--danger-color); }
+    .sync-text.ok { color: var(--success-color); }
+    button.ghost {
+      width: auto;
+      flex: 0 0 auto;
+      padding: 4px 9px;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: transparent;
+      border-color: var(--panel-border);
+    }
+    button.ghost:hover:not(:disabled) {
+      color: var(--cyan-color);
+      border-color: var(--cyan-color);
+      box-shadow: 0 0 8px var(--cyan-glow);
+    }
 
     .hint {
       font-size: 10px;
@@ -212,7 +277,7 @@
   <div class="status-line"><span class="dot" id="dot"></span><span id="conn">Looking for Stream Lurker…</span></div>
 
   <label for="code">Pairing code (from the app)</label>
-  <input id="code" placeholder="XXXXXXXX" maxlength="16" autocomplete="off" spellcheck="false">
+  <input id="code" placeholder="Paste the code from Platform Logins" maxlength="64" autocomplete="off" spellcheck="false">
 
   <div class="btns">
     <button class="tw" data-platform="twitch">
@@ -231,8 +296,18 @@
 
   <div class="result" id="result"></div>
 
+  <div class="sync">
+    <div class="sync-head">
+      <span class="section-label">Auto-sync</span>
+      <button id="sync-now" class="ghost" hidden>Sync now</button>
+    </div>
+    <div class="sync-summary idle" id="sync-summary"></div>
+    <div class="sync-rows" id="sync-rows"></div>
+  </div>
+
   <p class="hint">Log in to a platform in this browser, then click its button to send that session to the desktop app.</p>
 
+  <script src="connector.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
