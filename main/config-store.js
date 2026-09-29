@@ -1,6 +1,7 @@
 // Reads config.json (falling back to config.json.bak) and decides what
-// loadConfig may do with the result. Tested against real temp directories in
-// test/main-config-store.test.js.
+// loadConfig may do with the result, and writes it so that a crash always
+// leaves a whole config on disk (saveConfigFile). Tested against real temp directories and
+// a simulated crash in test/main-config-store.test.js.
 //
 // Why: every read error used to look like "no config yet". With config.json
 // and .bak briefly locked by a backup, sync or antivirus tool, or AppData
@@ -85,14 +86,19 @@ function decideConfigSource({ main, backup, salvaged, dirReachable }) {
 }
 
 // Keeps the bytes that were read as <file>.corrupt-<stamp>.json. The bytes
-// from the first read are reused rather than reading the file again. The
-// damaged config.json is then moved out of the way, so saveConfig cannot
-// roll it over a good .bak. Returns the salvage path, or null.
+// from the first read are reused rather than reading the file again. The copy
+// is flushed before the damaged config.json is moved out of the way (so
+// saveConfig cannot roll it over a good .bak): once the original is gone, the
+// copy is the only one left. Returns the salvage path, or null.
 function preserveDamaged(filePath, raw, stamp, { fs: fsImpl = fs, unlink = false } = {}) {
   const salvagePath = `${filePath}.corrupt-${stamp}.json`;
   try {
-    fsImpl.writeFileSync(salvagePath, raw, { flag: 'wx' });
+    writeFileDurably(salvagePath, raw, fsImpl, 'wx');
   } catch (e) {
+    // 'wx' created the file unless it already existed: never leave half a copy.
+    if (!e || e.code !== 'EEXIST') {
+      try { fsImpl.unlinkSync(salvagePath); } catch (e2) { /* never created */ }
+    }
     return null;
   }
   if (unlink) {
@@ -101,10 +107,109 @@ function preserveDamaged(filePath, raw, stamp, { fs: fsImpl = fs, unlink = false
   return salvagePath;
 }
 
+// Writes data and forces it to disk before returning. NTFS journals a rename
+// but not the data behind it: after an unexpected shutdown, a file renamed
+// into place moments earlier can come back at the right size and all zeros.
+// A real config.json was lost that way (24,099 zero bytes after a crash), and
+// the .bak copied next to it without a flush is exposed to the same thing.
+// A volume that cannot flush at all (some network shares; Node reports it as
+// EISDIR, EINVAL or ENOTSUP) still gets the write: failing every save there
+// would be worse than saving unflushed, as every release before this did.
+// Returns false in that case, so the caller can say so once.
+const FLUSH_UNSUPPORTED = new Set(['EISDIR', 'EINVAL', 'ENOTSUP']);
+function flushFd(fd, fsImpl) {
+  try {
+    fsImpl.fsyncSync(fd);
+    return true;
+  } catch (e) {
+    if (!e || !FLUSH_UNSUPPORTED.has(e.code)) throw e;
+    return false;
+  }
+}
+function writeFileDurably(filePath, data, fsImpl = fs, flags = 'w') {
+  const fd = fsImpl.openSync(filePath, flags);
+  try {
+    fsImpl.writeFileSync(fd, data);
+    return flushFd(fd, fsImpl);
+  } finally {
+    fsImpl.closeSync(fd);
+  }
+}
+
+// Flushes a file that is already written, without changing it ('r+': write
+// access, which Windows needs to flush, but no truncation).
+function flushExisting(filePath, fsImpl = fs) {
+  const fd = fsImpl.openSync(filePath, 'r+');
+  try {
+    return flushFd(fd, fsImpl);
+  } finally {
+    fsImpl.closeSync(fd);
+  }
+}
+
+// POSIX needs the directory flushed for a rename to survive a crash. On
+// Windows the directory opens but flushing it fails (EPERM), which is
+// ignored: NTFS journals the rename, and a crash before the journal reaches
+// the disk costs at most that one save.
+function syncDir(dir, fsImpl = fs) {
+  let fd;
+  try {
+    fd = fsImpl.openSync(dir, 'r');
+    fsImpl.fsyncSync(fd);
+  } catch (e) {
+    /* not supported here */
+  } finally {
+    if (fd !== undefined) { try { fsImpl.closeSync(fd); } catch (e) { /* closed */ } }
+  }
+}
+
+// Saves config.json so that a crash at any moment leaves a whole config on
+// disk for loadConfigFromDisk, even when the config.json already there was
+// never flushed (every release up to v0.14.0-beta saved without flushing, so
+// the first save after an update starts from exactly that):
+//   1. the current config.json is read, and kept only if it reads as a
+//      config (a damaged file never replaces a good backup);
+//   2. the new config goes to .tmp, is flushed and renamed over config.json:
+//      from here config.json is whole on disk;
+//   3. the bytes from step 1 go to .bak.tmp, are flushed and renamed over
+//      .bak. The old .bak is never truncated, so it stays whole until the
+//      new one is. That flush also commits step 2's rename to the journal;
+//   4. when there was no .bak to write (a fresh install, or the first save
+//      after recovering from .bak) or it failed, config.json itself is
+//      flushed instead, because nothing else would commit the rename (a
+//      directory cannot be flushed on Windows).
+// Once it returns, the new config survives a crash.
+// Returns { backupError, flushSkipped }: backupError when only step 3 failed
+// (the save itself worked); flushSkipped when the volume cannot flush.
+// Throws when the new config could not be written, renamed or committed;
+// the caller logs it.
+function saveConfigFile(configPath, json, { fs: fsImpl = fs } = {}) {
+  const current = readConfigFileResult(configPath, fsImpl);
+  const tmpPath = `${configPath}.tmp`;
+  let flushed = writeFileDurably(tmpPath, json, fsImpl);
+  fsImpl.renameSync(tmpPath, configPath);
+  let backupError = null;
+  let backupWritten = false;
+  if (current.status === 'ok') {
+    const bakTmp = `${configPath}.bak.tmp`;
+    try {
+      flushed = writeFileDurably(bakTmp, current.raw, fsImpl) && flushed;
+      fsImpl.renameSync(bakTmp, `${configPath}.bak`);
+      backupWritten = true;
+    } catch (e) {
+      backupError = e;
+    }
+  }
+  if (!backupWritten) flushed = flushExisting(configPath, fsImpl) && flushed;
+  syncDir(path.dirname(configPath), fsImpl);
+  return { backupError, flushSkipped: !flushed };
+}
+
 // Everything loadConfig needs to know, without touching the app's state.
 // Returns { status, data?, reason?, error? }:
 //   'loaded'    config.json read fine
-//   'recovered' config.json unusable, .bak read fine
+//   'recovered' config.json unusable, .bak read fine (or, with both gone, a
+//               whole temp file a save left behind)
 //   'defaults'  nothing on disk: a fresh install (or both files damaged and
 //               preserved), so starting from defaults loses nothing
 //   'locked'    something exists that could not be read: run on defaults in
@@ -136,6 +241,22 @@ function loadConfigFromDisk(configPath, opts = {}) {
     if (kept) log(`[Config] config.json.bak was unreadable too — preserved a copy as ${path.basename(kept)}.`);
   }
 
+  // Both gone, but not locked: a save's own temp files are flushed before
+  // they are renamed, so one that is still there and reads as a config is
+  // whole. On a volume without a journal (FAT32, exFAT: a profile on a USB
+  // drive) a crash can leave the data there and neither name pointing at it.
+  // .tmp is the newer of the two.
+  const unreadable = (s) => s === 'missing' || s === 'corrupt';
+  if (unreadable(main.status) && unreadable(backup.status)) {
+    for (const name of [`${configPath}.tmp`, `${configPath}.bak.tmp`]) {
+      const leftover = readConfigFileResult(name, fsImpl);
+      if (leftover.status === 'ok') {
+        log(`[Config] config.json and its backup were unusable; recovered your settings from ${path.basename(name)}.`);
+        return { status: 'recovered', data: leftover.data, from: main.status };
+      }
+    }
+  }
+
   const dirReachable = main.status === 'missing' ? isDirReachable(path.dirname(configPath), fsImpl) : true;
   const decision = decideConfigSource({ main: main.status, backup: backup.status, salvaged: !!salvaged, dirReachable });
   if (decision.source === 'defaults') return { status: 'defaults' };
@@ -153,4 +274,6 @@ module.exports = {
   decideConfigSource,
   preserveDamaged,
   loadConfigFromDisk,
+  writeFileDurably,
+  saveConfigFile,
 };

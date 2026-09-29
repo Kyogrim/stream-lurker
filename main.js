@@ -24,7 +24,7 @@ const { createStreamLiveness } = require('./main/stream-liveness');
 const { applyScanResults } = require('./main/scan-planner');
 const { createSingleFlight } = require('./main/scan-runner');
 const { createFatalReporter, createLoadGuard, formatConsoleMessage } = require('./main/app-log');
-const { loadConfigFromDisk, readConfigFileResult } = require('./main/config-store');
+const { loadConfigFromDisk, readConfigFileResult, saveConfigFile, writeFileDurably } = require('./main/config-store');
 const { syncLoginItem } = require('./main/login-item');
 const { createAlertKeeper, createPendingOpens } = require('./main/live-alerts');
 const { spoofedChromeVersion, normalizeUserAgent, applyClientHints } = require('./main/ua-spoof');
@@ -163,6 +163,8 @@ let configWriteLocked = false;
 let configLoadAttempted = false;
 let configLockReason = '';
 let configSkipLogged = false;
+let configBackupWarned = false;
+let configFlushWarned = false;
 let configPromptOpen = false;
 let config = {
   streamers: [],
@@ -400,9 +402,9 @@ function retryConfigLoad() {
 
 // Save configuration
 // config.json holds everything the user can't get back — monitored streamers,
-// watch history, streaks, credentials, calendar. Write it atomically (temp file
-// + rename) and keep the previous good copy as .bak, so a crash or kill during
-// a write can never leave a truncated file behind.
+// watch history, streaks, credentials, calendar. saveConfigFile flushes the
+// new file and the previous good copy (.bak) to disk and swaps each in by
+// rename, so a crash or power cut at any point leaves a whole config behind.
 function saveConfig(newConfig) {
   if (newConfig) config = newConfig;
   // Before .tmp, .bak or config.json is touched: defaults in memory must never
@@ -422,16 +424,16 @@ function saveConfig(newConfig) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const json = JSON.stringify(config, null, 2);
-    const tmpPath = `${configPath}.tmp`;
-    fs.writeFileSync(tmpPath, json, 'utf8');
-
-    // Roll the current file to .bak only once the replacement is safely on disk.
-    if (fs.existsSync(configPath)) {
-      try { fs.copyFileSync(configPath, `${configPath}.bak`); } catch (e) { /* best effort */ }
+    const { backupError, flushSkipped } = saveConfigFile(configPath, JSON.stringify(config, null, 2));
+    // Saved, but the fallback copy is stale. Once per run: it repeats every save.
+    if (backupError && !configBackupWarned) {
+      configBackupWarned = true;
+      addLog(`[Config] Saved, but config.json.bak could not be updated (${backupError.code || backupError.message}). The backup copy is older than your settings.`);
     }
-
-    fs.renameSync(tmpPath, configPath); // atomic replace
+    if (flushSkipped && !configFlushWarned) {
+      configFlushWarned = true;
+      addLog('[Config] The drive holding your settings cannot flush files to disk, so a crash or power cut right after a save could lose that save.');
+    }
   } catch (err) {
     addLog(`Error saving config: ${err.message}`);
   }
@@ -453,7 +455,7 @@ function sanitizeIncomingConfig(cfg, source, alreadyDropped = []) {
   const salvagePath = `${getConfigPath()}.dropped-streamers-${stamp}.json`;
   let salvageFile = null;
   try {
-    fs.writeFileSync(salvagePath, JSON.stringify({ source, dropped }, null, 2), 'utf8');
+    writeFileDurably(salvagePath, JSON.stringify({ source, dropped }, null, 2));
     salvageFile = path.basename(salvagePath);
     addLog(`[Config] Set aside ${dropped.length} unusable monitored-streamer entr${dropped.length === 1 ? 'y' : 'ies'} from ${source}; preserved in ${salvageFile}.`);
   } catch (e) {
@@ -3608,7 +3610,8 @@ ipcMain.handle('export-config', async () => {
     // Without the pairing code (the one secret a local process needs to write
     // cookies into the app) and this machine's cookie-jar markers. Import
     // never takes them from a file either.
-    fs.writeFileSync(filePath, JSON.stringify(exportableConfig(config), null, 2), 'utf8');
+    // Flushed: a backup that comes back as zeros after a crash is no backup.
+    writeFileDurably(filePath, JSON.stringify(exportableConfig(config), null, 2));
     addLog(`[Config] Exported settings to ${filePath}`);
     return { success: true, filePath };
   } catch (err) {
@@ -3656,7 +3659,7 @@ ipcMain.handle('import-config', async () => {
     const configPath = getConfigPath();
     if (fs.existsSync(configPath)) {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      try { fs.copyFileSync(configPath, `${configPath}.preimport-${stamp}.json`); } catch (e) { /* best effort */ }
+      try { writeFileDurably(`${configPath}.preimport-${stamp}.json`, fs.readFileSync(configPath)); } catch (e) { /* best effort */ }
     }
 
     const source = path.basename(filePaths[0]);

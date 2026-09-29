@@ -79,7 +79,7 @@ test('issue-10: nothing can start the runtime before the config is loaded or wri
   // And saveConfig writes nothing before a load was attempted.
   const save = block('function saveConfig(');
   assert.ok(save.indexOf('if (!configLoadAttempted) return;') > 0);
-  assert.ok(save.indexOf('if (!configLoadAttempted) return;') < save.indexOf('writeFileSync'));
+  assert.ok(save.indexOf('if (!configLoadAttempted) return;') < save.indexOf('saveConfigFile('));
 });
 
 test('G2.1/G2.3: a startup failure cannot leave a process with no window or tray', () => {
@@ -170,9 +170,15 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   const save = block('function saveConfig(');
   const lockCheck = save.indexOf('if (configWriteLocked)');
   assert.ok(lockCheck > 0, 'lock check present');
-  for (const touch of ['writeFileSync', 'copyFileSync', 'renameSync', 'mkdirSync']) {
+  for (const touch of ['saveConfigFile(', 'mkdirSync']) {
     assert.ok(lockCheck < save.indexOf(touch), `checked before ${touch}`);
   }
+  // Every write goes through saveConfigFile, which flushes before it renames
+  // (a crash once turned config.json into zeros; see config-store.js).
+  assert.doesNotMatch(save, /writeFileSync|copyFileSync|renameSync/);
+  // What the save could not do is said once, not on every save.
+  assert.match(save, /if \(backupError && !configBackupWarned\) \{\s*configBackupWarned = true;/);
+  assert.match(save, /if \(flushSkipped && !configFlushWarned\) \{\s*configFlushWarned = true;/);
   assert.match(save, /if \(configWriteLocked\) \{[\s\S]*?return;\s*\}/);
   const load = block('function loadConfig(');
   assert.match(load, /loadConfigFromDisk\(configPath/);
@@ -181,6 +187,10 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   assert.match(load, /catch \(err\) \{[\s\S]*lockConfigWrites\(/, 'an unexpected throw also locks');
   assert.match(block('function startRuntime('), /if \(configWriteLocked\) promptConfigUnreadable\(\);/);
   assert.match(block("ipcMain.handle('import-config'"), /if \(configWriteLocked\) \{\s*return \{ success: false/);
+  // The recovery copies are flushed like the config itself.
+  assert.match(block("ipcMain.handle('import-config'"), /writeFileDurably\(`\$\{configPath\}\.preimport-/);
+  assert.match(block("ipcMain.handle('export-config'"), /writeFileDurably\(filePath, /);
+  assert.match(block('function sanitizeIncomingConfig('), /writeFileDurably\(salvagePath, /);
   // Issue 12: exporting in-memory defaults would be an empty "backup".
   const exp = block("ipcMain.handle('export-config'");
   assert.match(exp, /^ipcMain\.handle\('export-config', async \(\) => \{\s*(\/\/[^\n]*\n\s*)*if \(configWriteLocked\) \{\s*return \{ success: false, error: '[^']*nothing to export[^']*' \};/);

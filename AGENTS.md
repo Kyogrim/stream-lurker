@@ -467,7 +467,11 @@ the background, so a release reaches only the users who click, whenever they cli
 ### The config is irreplaceable
 
 `%APPDATA%/stream-lurker/config.json` holds the monitored list and thousands of hours of watch
-history. It is written atomically (temp file → rename) with a rolling `.bak`. Recovery copies sit
+history. It is written atomically (temp file → rename) with a rolling `.bak`, and both are flushed to
+disk (`fsync`) before the rename (`saveConfigFile`, `main/config-store.js`). A rename without the flush
+is not crash-safe on NTFS: after an unexpected shutdown, a real config.json came back as 24,099 zero
+bytes, and the unflushed `.bak` beside it was lost too. So any file holding config data goes through
+`saveConfigFile` or `writeFileDurably`, never a bare `writeFileSync`/`copyFileSync`. Recovery copies sit
 next to it as `config.json.<kind>-<stamp>.json`, where `<stamp>` is the ISO 8601 time with `:` and `.`
 turned into `-`, e.g. `config.json.corrupt-2026-09-27T14-03-11-123Z.json`:
 
