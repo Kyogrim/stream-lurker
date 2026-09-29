@@ -120,10 +120,21 @@ function applyScanResults(results, ctx) {
   // Sort results in the order of config.streamers priority, so the
   // higher-priority stream claims a free slot first.
   const priorities = buildPriorityMap(config.streamers);
+  // One result per key, the one liveness observed: the sort is stable, so a
+  // key's first result here is its first in `results`. Acting on every
+  // result, a streamer listed twice logged each offline line twice, and a
+  // duplicate that disagreed with the first could close its cell and reopen
+  // it in the same scan.
+  const planned = new Set();
   const ordered = [...results].sort((a, b) => {
     const idxA = priorities.get(streamKey(a.platform, a.username)) ?? Infinity;
     const idxB = priorities.get(streamKey(b.platform, b.username)) ?? Infinity;
     return idxA - idxB;
+  }).filter((stream) => {
+    const key = streamKey(stream.platform, stream.username);
+    if (planned.has(key)) return false;
+    planned.add(key);
+    return true;
   });
 
   // Auto-close. An errored check never closes anything: a timeout or a 403

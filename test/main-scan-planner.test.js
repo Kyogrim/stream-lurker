@@ -445,9 +445,41 @@ test('F25: a streamer listed twice adds one offline observation per scan, not tw
   w.scan([live('kick', 'dup', { liveSince: 's' }), live('kick', 'DUP', { liveSince: 's' })], T0);
   w.scan([offline('kick', 'dup'), offline('kick', 'DUP')], T0 + INTERVAL);
   assert.equal(w.liveness.offlineStreak('kick:dup'), 1);
-  // Both entries still get a line (the close loop runs per result), but each says 1/2.
-  const lines = w.logs.filter(l => l.includes('reported offline'));
-  assert.ok(lines.length > 0 && lines.every(l => l.includes('reported offline (1/2)')), lines.join('\n'));
+  // One line per scan, not one per entry.
+  assert.deepEqual(w.logs.filter(l => l.includes('reported offline')),
+    ['[Lurk] dup on KICK reported offline (1/2). Closing it if the next scan agrees.']);
+  w.scan([offline('kick', 'dup'), offline('kick', 'DUP')], T0 + 2 * INTERVAL);
+  assert.deepEqual(w.logs.filter(l => l.includes('went offline')),
+    ['[Lurk] Streamer dup on KICK went offline. Auto-closing container.']);
+  assert.deepEqual(w.closed, ['kick:dup']);
+});
+
+// The close check reads the result liveness observed, the key's first. A
+// duplicate that disagrees with it says nothing, so it must not log a
+// "reported offline (0/2)" for a stream the scan just saw live.
+test('a duplicate entry that disagrees with the first result neither logs nor closes', () => {
+  const w = makeWorld([{ platform: 'kick', username: 'dup' }, { platform: 'kick', username: 'DUP' }]);
+  w.scan([live('kick', 'dup', { liveSince: 's' })], T0);
+  for (let i = 1; i <= 3; i++) w.scan([live('kick', 'dup', { liveSince: 's' }), offline('kick', 'DUP')], T0 + i * INTERVAL);
+  assert.deepEqual(w.logs.filter(l => l.includes('offline')), []);
+  assert.deepEqual(w.closed, []);
+  // An errored first result says nothing either, so its duplicate is not asked.
+  for (let i = 4; i <= 6; i++) w.scan([errored('kick', 'dup'), offline('kick', 'DUP')], T0 + i * INTERVAL);
+  assert.deepEqual(w.logs.filter(l => l.includes('offline')), []);
+  assert.deepEqual(w.closed, []);
+});
+
+// The go-live pass reads the same one result per key. Read per result, an
+// offline first result closed the cell and a live duplicate reopened it in
+// the same scan: a flap, a fresh liveness entry and a second session.
+test('a duplicate entry cannot reopen a cell the first result just closed', () => {
+  const w = makeWorld([{ platform: 'kick', username: 'dup' }, { platform: 'kick', username: 'DUP' }]);
+  w.scan([live('kick', 'dup', { liveSince: 's' })], T0);
+  w.scan([offline('kick', 'dup')], T0 + INTERVAL);
+  w.scan([offline('kick', 'dup'), live('kick', 'DUP', { liveSince: 's' })], T0 + 2 * INTERVAL);
+  assert.deepEqual(w.closed, ['kick:dup']);
+  assert.deepEqual(w.spawned, ['kick:dup'], 'not reopened by the duplicate in the same scan');
+  assert.equal(w.activeWindows.has('kick:dup'), false);
 });
 
 // liveness.retain: a streamer the scan no longer covers (removed from the

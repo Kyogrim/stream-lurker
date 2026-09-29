@@ -75,6 +75,25 @@ test('G3.4: the dashboard is served from app://bundle, never file://', () => {
   assert.equal(pkg.build.electronFuses.enableCookieEncryption, undefined, 'one-way; must be a deliberate separate change');
 });
 
+// Off, the packaged exe cannot be run as plain Node (ELECTRON_RUN_AS_NODE),
+// preloaded through NODE_OPTIONS, or opened to a debugger with --inspect.
+// Safe only while the app itself never needs them: no child Node process,
+// and all HTTP through Electron's net (the nodeOptions fuse also drops
+// NODE_EXTRA_CA_CERTS). --remote-debugging-port is Chromium's switch, not
+// Node's, so the CDP checks on a packaged build still work.
+test('the Node escape-hatch fuses are off and nothing in main relies on them', () => {
+  const fuses = JSON.parse(read('package.json')).build.electronFuses;
+  assert.equal(fuses.runAsNode, false);
+  assert.equal(fuses.enableNodeOptionsEnvironmentVariable, false);
+  assert.equal(fuses.enableNodeCliInspectArguments, false);
+  const mainSources = [mainJs, ...fs.readdirSync(path.join(REPO, 'main')).filter(f => f.endsWith('.js')).map(f => read(`main/${f}`))];
+  for (const src of mainSources) {
+    assert.doesNotMatch(src, /require\(['"](?:node:)?child_process['"]\)|ELECTRON_RUN_AS_NODE|utilityProcess/);
+    // Outbound only: the cookie receiver's loopback server is Node http.
+    assert.doesNotMatch(src, /require\(['"](?:node:)?https['"]\)|\bhttps?\.(?:request|get)\(/, 'outbound HTTP goes through Electron net');
+  }
+});
+
 test('G1.1-G1.3: both sessions are locked down before extensions or any window load', () => {
   const ready = mainJs.indexOf('app.whenReady()');
   const extensions = mainJs.indexOf('await loadExtensions();', ready);

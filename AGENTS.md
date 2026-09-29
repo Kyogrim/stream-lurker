@@ -511,6 +511,11 @@ get back.
   are lost. The dashboard is safe either way because an `app://` page cannot read `file://`
   (verified: fetch, XHR and iframe all refused). It only shows in a packaged build, so test it with
   `npm run package` and `dist/win-unpacked/Stream Lurker.exe --user-data-dir=<copy of a profile>`.
+- **The Node escape-hatch fuses are OFF** (`runAsNode`, `enableNodeOptionsEnvironmentVariable`,
+  `enableNodeCliInspectArguments`): the packaged exe ignores `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS`,
+  `NODE_EXTRA_CA_CERTS` and `--inspect`. So main never spawns a child Node process, and all outbound
+  HTTP goes through Electron's `net` (`test/main-ipc-surface.test.js` checks both).
+  `--remote-debugging-port` is Chromium's switch, not Node's, so CDP on a packaged build still works.
 - **Every Electron bump:** users skip versions (updates are user-triggered), so any old release can
   update straight to the new one. Check that the new Chromium still migrates v23, which is what
   `cookie-migration.js` leaves for anyone arriving from an Electron 30 release, and extend the

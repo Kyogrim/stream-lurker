@@ -2,7 +2,6 @@ const { app, BrowserWindow, ipcMain, session, dialog, net, Notification, Tray, M
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { exec } = require('child_process');
 const { autoUpdater } = require('electron-updater');
 const { extractZipBuffer } = require('./main/safe-unzip');
 const { migrateProfileCookies } = require('./main/cookie-migration');
