@@ -467,22 +467,25 @@ the background, so a release reaches only the users who click, whenever they cli
 ### The config is irreplaceable
 
 `%APPDATA%/stream-lurker/config.json` holds the monitored list and thousands of hours of watch
-history. `saveConfigFile` (`main/config-store.js`) keeps three copies: `config.json`, a rolling `.bak`
-(the previous save) and `config.json.daily.bak` (rewritten at most once a day). Each is replaced with
+history. `saveConfigFile` (`main/config-store.js`) keeps four copies: `config.json`, a rolling `.bak`
+(the previous save), `config.json.daily.bak` (at most once a day) and `config.json.daily.prev.bak` (the
+daily copy it replaced, moved there by a rename, which rewrites no data). Each is replaced with
 `replaceFileDurably`: write `<file>.tmp`, flush it to disk (`fsync`), rename it over the file, flush
 again. Nothing is truncated in place. A rename without the flush is not crash-safe on NTFS: after
 an unexpected shutdown, a real config.json came back as 24,099 zero bytes, and the unflushed `.bak`
-beside it was lost too. The daily copy covers a drive that acknowledges flushes it has not done:
-`config.json` and `.bak` are both rewritten every minute, a day-old copy has reached the disk. The
-loader reads `config.json`, then `.bak`, then the daily copy, the last only where it would otherwise
-start from defaults. So any file holding config data goes through `saveConfigFile`,
+beside it was lost too. The daily copies cover a drive that acknowledges flushes it has not done:
+`config.json` and `.bak` are both rewritten on every save (about once a minute while streams are
+open), while a daily copy a day old has reached the disk, even on the save that refreshes
+`.daily.bak`. The loader reads `config.json`, then `.bak`, then the two daily copies, those only where
+it would otherwise start from defaults. So any file holding config data goes through `saveConfigFile`,
 `replaceFileDurably` or `writeFileDurably`, never a bare `writeFileSync`/`copyFileSync`, and
 `test/main-config-store.test.js` crashes every save at every step to prove it. Recovery copies sit
 next to it as `config.json.<kind>-<stamp>.json`, where `<stamp>` is the ISO 8601 time with `:` and `.`
 turned into `-`, e.g. `config.json.corrupt-2026-09-27T14-03-11-123Z.json`:
 
 - `corrupt`: a config.json that read but is not a JSON object, moved aside before the app falls
-  back to `.bak` (a damaged `.bak` is copied to `config.json.bak.corrupt-<stamp>.json`).
+  back to `.bak` (a damaged `.bak` or daily copy is copied to `config.json.bak.corrupt-<stamp>.json`
+  or `config.json.daily.bak.corrupt-<stamp>.json`).
 - `dropped-streamers`: monitored-streamer entries the app could not use.
 - `preimport`: the config as it was just before a backup import replaced it.
 

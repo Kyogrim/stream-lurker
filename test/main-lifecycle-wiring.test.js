@@ -181,7 +181,7 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   assert.match(save, /if \(flushSkipped && !configFlushWarned\) \{\s*configFlushWarned = true;/);
   // A failing save is logged once per distinct error, not every minute.
   assert.match(save, /if \(err\.message !== lastSaveError\) \{\s*lastSaveError = err\.message;/);
-  assert.match(save, /= saveConfigFile\(configPath, JSON\.stringify\(config, null, 2\)\);\s*lastSaveError = '';/, 'cleared once a save lands');
+  assert.match(save, /= saveConfigFile\(configPath, json, \{ previous: lastSavedJson \}\);\s*lastSavedJson = json;\s*lastSaveError = '';/, '.bak from the last save; cleared once a save lands');
   assert.match(save, /if \(configWriteLocked\) \{[\s\S]*?return;\s*\}/);
   const load = block('function loadConfig(');
   assert.match(load, /loadConfigFromDisk\(configPath/);
@@ -193,6 +193,10 @@ test('F29: saveConfig refuses to write while the config is locked; loadConfig ne
   // The recovery copies are flushed like the config itself.
   assert.match(block("ipcMain.handle('import-config'"), /writeFileDurably\(`\$\{configPath\}\.preimport-/);
   assert.match(block("ipcMain.handle('export-config'"), /replaceFileDurably\(filePath, /, 'never truncated in place');
+  // The recovery message names the copy it came from.
+  const loadFn = block('function loadConfig(');
+  assert.match(loadFn, /result\.source === 'daily' \? 'the daily copy \(config\.json\.daily\.bak\)'/);
+  assert.match(loadFn, /result\.source === 'daily\.prev' \? 'the previous daily copy \(config\.json\.daily\.prev\.bak\)'/);
   assert.match(block('function sanitizeIncomingConfig('), /writeFileDurably\(salvagePath, /);
   // Issue 12: exporting in-memory defaults would be an empty "backup".
   const exp = block("ipcMain.handle('export-config'");

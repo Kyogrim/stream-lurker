@@ -166,6 +166,7 @@ let configSkipLogged = false;
 let configBackupWarned = false;
 let configFlushWarned = false;
 let lastSaveError = '';
+let lastSavedJson = null; // what the last successful save wrote
 let configPromptOpen = false;
 let config = {
   streamers: [],
@@ -251,7 +252,8 @@ function readConfigFile(filePath) {
 }
 
 // Load configuration, preferring config.json and falling back to the .bak copy
-// written by saveConfig. A damaged file is always preserved as
+// written by saveConfig, then the daily copies (config.json.daily.bak, then
+// config.json.daily.prev.bak). A damaged file is always preserved as
 // config.json.corrupt-<timestamp>.json, the timestamp being ISO 8601 with ':'
 // and '.' turned into '-' (config.json.corrupt-2026-09-27T14-03-11-123Z.json;
 // a damaged .bak becomes config.json.bak.corrupt-<timestamp>.json). Defaults
@@ -302,7 +304,9 @@ function loadConfig() {
       if (repaired.length) addLog(`[Config] Corrected ${repaired.length} longest-session record(s) that were longer than the watch time behind them.`);
 
       if (recovered) {
-        const from = result.source === 'daily' ? 'the daily copy (config.json.daily.bak)' : 'config.json.bak';
+        const from = result.source === 'daily' ? 'the daily copy (config.json.daily.bak)'
+          : result.source === 'daily.prev' ? 'the previous daily copy (config.json.daily.prev.bak)'
+            : 'config.json.bak';
         addLog(`[Config] Recovered configuration from ${from}; watch history and streamers are as of that copy.`);
         saveConfig(); // rewrite a healthy config.json from the recovered data
       } else {
@@ -427,7 +431,11 @@ function saveConfig(newConfig) {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const { backupError, flushSkipped } = saveConfigFile(configPath, JSON.stringify(config, null, 2));
+    // .bak gets the JSON this run last saved, so it does not depend on
+    // reading config.json back (briefly locked by antivirus, say).
+    const json = JSON.stringify(config, null, 2);
+    const { backupError, flushSkipped } = saveConfigFile(configPath, json, { previous: lastSavedJson });
+    lastSavedJson = json;
     lastSaveError = '';
     // Saved, but a fallback copy is stale. Once per run: it repeats every save.
     if (backupError && !configBackupWarned) {

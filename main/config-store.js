@@ -1,7 +1,7 @@
-// Reads config.json (falling back to config.json.bak) and decides what
-// loadConfig may do with the result, and writes it so that a crash always
-// leaves a whole config on disk (saveConfigFile). Tested against real temp directories and
-// a simulated crash in test/main-config-store.test.js.
+// Reads config.json (falling back to config.json.bak, then the daily copies)
+// and decides what loadConfig may do with the result, and writes it so that a
+// crash always leaves a whole config on disk (saveConfigFile). Tested against
+// real temp directories and a simulated crash in test/main-config-store.test.js.
 //
 // Why: every read error used to look like "no config yet". With config.json
 // and .bak briefly locked by a backup, sync or antivirus tool, or AppData
@@ -89,8 +89,8 @@ function decideConfigSource({ main, backup, salvaged, dirReachable }) {
 // from the first read are reused rather than reading the file again. The copy
 // is flushed before the damaged config.json is moved out of the way (so
 // saveConfig cannot roll it over a good .bak): once the original is gone, the
-// copy is the only one left. Returns the salvage path, or null when there is
-// no whole copy on disk, and the original then stays where it is.
+// copy is the only one left. Returns the salvage path, or null when no whole
+// copy could be written, and the original then stays where it is.
 function preserveDamaged(filePath, raw, stamp, { fs: fsImpl = fs, unlink = false } = {}) {
   const salvagePath = `${filePath}.corrupt-${stamp}.json`;
   let fd;
@@ -99,19 +99,18 @@ function preserveDamaged(filePath, raw, stamp, { fs: fsImpl = fs, unlink = false
   } catch (e) {
     return null; // created nothing, so an earlier copy of that name stays as it is
   }
-  let flush;
   try {
     fsImpl.writeFileSync(fd, raw);
-    flush = flushFd(fd, fsImpl);
+    // Flushed where the volume allows. Where it fails, the copy is as safe as
+    // any other write there, and keeping the damaged original back instead
+    // would leave the app unable to start saving again on such a volume.
+    flushFd(fd, fsImpl);
   } catch (e) {
     try { fsImpl.closeSync(fd); } catch (e2) { /* closed */ }
     try { fsImpl.unlinkSync(salvagePath); } catch (e2) { /* gone */ } // our own half copy
     return null;
   }
   fsImpl.closeSync(fd);
-  // A copy that may not have reached the disk must not replace the original.
-  // A volume that cannot flush at all is the exception: it could never recover.
-  if (flush === 'failed') return null;
   if (unlink) {
     try { fsImpl.unlinkSync(filePath); } catch (e) { /* the copy is what matters */ }
   }
@@ -201,35 +200,46 @@ function syncDir(dir, fsImpl = fs) {
 }
 
 const DAILY_MS = 24 * 60 * 60 * 1000;
+// Due when there is none, when it is a day old, or when it is dated in the
+// future (the clock was set forward once): otherwise it would stay frozen
+// until the real date caught up.
 function dailyIsDue(dailyPath, now, fsImpl) {
+  let age;
   try {
-    return !(now - fsImpl.statSync(dailyPath).mtimeMs < DAILY_MS);
+    age = now - fsImpl.statSync(dailyPath).mtimeMs;
   } catch (e) {
     return true; // none yet
   }
+  return !(age >= 0 && age < DAILY_MS);
 }
 
 // Saves config.json so that a crash at any moment leaves at least what was
 // on disk before (a config.json an older release wrote and never flushed
 // included), and once it returns the new config survives a crash:
-//   1. the current config.json is read; only one that reads as a config goes
-//      on (a damaged file never replaces a good backup);
+//   1. the previous config: `previous`, the JSON the caller last saved, or
+//      else config.json as read now, and only if it reads as a config (a
+//      damaged file never replaces a good backup);
 //   2. it replaces .bak. First, so that a volume without a journal (FAT32,
 //      exFAT), where a crash can land between config.json being removed and
 //      the new one renamed into place, still finds the previous config;
 //   3. the new config replaces config.json;
-//   4. at most once a day it also replaces config.json.daily.bak. config.json
-//      and .bak are rewritten on every save, so on a drive that acknowledges
+//   4. at most once a day it also becomes config.json.daily.bak, the one it
+//      replaces moving to config.json.daily.prev.bak first. config.json and
+//      .bak are rewritten on every save, so on a drive that acknowledges
 //      flushes it has not done, both can be lost together, as they were in
-//      the incident; a copy a day old has long reached the disk.
+//      the incident. The daily copies are older: on the save that refreshes
+//      .daily.bak, .daily.prev.bak still holds one a day old, moved by a
+//      rename, which rewrites no data.
 // Every replace is replaceFileDurably, so no file is truncated in place.
 // Returns { backupError, flushSkipped }: backupError when a backup copy could
 // not be written, or config.json could not be read to make one (the save
 // itself worked); flushSkipped when something was saved without being forced
 // to disk. Throws when the new config could not be written or renamed; the
 // caller logs it.
-function saveConfigFile(configPath, json, { fs: fsImpl = fs, now = Date.now() } = {}) {
-  const current = readConfigFileResult(configPath, fsImpl);
+function saveConfigFile(configPath, json, { fs: fsImpl = fs, now = Date.now(), previous = null } = {}) {
+  const current = typeof previous === 'string'
+    ? { status: 'ok', raw: Buffer.from(previous) }
+    : readConfigFileResult(configPath, fsImpl);
   let flushed = true;
   let backupError = current.status === 'ioerror' ? current.err : null;
   if (current.status === 'ok') {
@@ -243,6 +253,7 @@ function saveConfigFile(configPath, json, { fs: fsImpl = fs, now = Date.now() } 
   const dailyPath = `${configPath}.daily.bak`;
   if (dailyIsDue(dailyPath, now, fsImpl)) {
     try {
+      if (readConfigFileResult(dailyPath, fsImpl).status === 'ok') fsImpl.renameSync(dailyPath, `${configPath}.daily.prev.bak`);
       flushed = replaceFileDurably(dailyPath, json, fsImpl) && flushed;
     } catch (e) {
       backupError = backupError || e;
@@ -256,7 +267,7 @@ function saveConfigFile(configPath, json, { fs: fsImpl = fs, now = Date.now() } 
 // Returns { status, data?, source?, reason?, error? }:
 //   'loaded'    config.json read fine
 //   'recovered' config.json unusable; source says what was read instead:
-//               'bak', or 'daily' when .bak was unusable too
+//               'bak', or 'daily' / 'daily.prev' when .bak was unusable too
 //   'defaults'  nothing on disk: a fresh install (or every copy damaged and
 //               preserved), so starting from defaults loses nothing
 //   'locked'    something exists that could not be read: run on defaults in
@@ -267,7 +278,6 @@ function loadConfigFromDisk(configPath, opts = {}) {
   const stamp = opts.stamp || new Date().toISOString().replace(/[:.]/g, '-');
   const readOpts = { fs: fsImpl, attempts: opts.attempts, delayMs: opts.delayMs, sleep: opts.sleep };
   const backupPath = `${configPath}.bak`;
-  const dailyPath = `${configPath}.daily.bak`;
 
   const main = readConfigWithRetry(configPath, readOpts);
   if (main.status === 'ok') return { status: 'loaded', data: main.data };
@@ -293,16 +303,16 @@ function loadConfigFromDisk(configPath, opts = {}) {
   const decision = decideConfigSource({ main: main.status, backup: backup.status, salvaged: !!salvaged, dirReachable });
   if (decision.source === 'defaults') {
     // Only where defaults would load anyway, so a file that is locked, or
-    // damaged without a copy, is never bypassed.
-    const daily = readConfigWithRetry(dailyPath, readOpts);
-    if (daily.status === 'ok') {
-      log('[Config] config.json and config.json.bak were both unusable; recovered your settings from the daily copy (config.json.daily.bak).');
-      return { status: 'recovered', data: daily.data, from: main.status, source: 'daily' };
+    // damaged without a copy, is never bypassed. Newer daily copy first.
+    for (const [name, source] of [['daily.bak', 'daily'], ['daily.prev.bak', 'daily.prev']]) {
+      const copyPath = `${configPath}.${name}`;
+      const copy = readConfigWithRetry(copyPath, readOpts);
+      if (copy.status === 'ok') return { status: 'recovered', data: copy.data, from: main.status, source };
+      if (copy.status === 'ioerror') {
+        return { status: 'locked', reason: `config.json.${name} exists but could not be read`, error: copy.err && (copy.err.code || copy.err.message) };
+      }
+      if (copy.status === 'corrupt') preserveDamaged(copyPath, copy.raw, stamp, { fs: fsImpl });
     }
-    if (daily.status === 'ioerror') {
-      return { status: 'locked', reason: 'config.json.daily.bak exists but could not be read', error: daily.err && (daily.err.code || daily.err.message) };
-    }
-    if (daily.status === 'corrupt') preserveDamaged(dailyPath, daily.raw, stamp, { fs: fsImpl });
     return { status: 'defaults' };
   }
   const err = main.err || backup.err;

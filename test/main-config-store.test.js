@@ -234,7 +234,11 @@ test('isDirReachable: existing folder yes, a file no, a creatable folder yes', (
 // failOpen(path, flags) makes that open fail with EPERM.
 // splitRename: a volume without a journal (FAT32, exFAT), where renaming over
 // an existing file is two separate updates: remove the old one, then rename.
-function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRename = false } = {}) {
+// lying: a drive that acknowledges flushes it has not done: fsync commits the
+// journal but leaves the data unwritten.
+// mtimeMs: what statSync reports (0: the daily copy is due; Date.now(): it is
+// not). failRead(path) makes that read fail with EBUSY.
+function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRename = false, lying = false, mtimeMs = 0, failRead = () => false } = {}) {
   let nextIno = 1;
   const inode = (data, durable) => ({ id: nextIno++, data: Buffer.from(data), durable: durable ? Buffer.from(data) : null, dirty: !durable });
   const live = new Map();
@@ -292,8 +296,10 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRenam
     fsyncSync(fd) {
       step();
       const ino = fds.get(fd);
-      ino.durable = Buffer.from(ino.data);
-      ino.dirty = false;
+      if (!lying) {
+        ino.durable = Buffer.from(ino.data);
+        ino.dirty = false;
+      }
       if (commit === 'all') {
         for (const e of pending.splice(0)) e.apply(committed);
       } else {
@@ -314,6 +320,7 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRenam
     },
     closeSync(fd) { fds.delete(fd); },
     readFileSync(p) {
+      if (failRead(p)) throw err('EBUSY', p);
       if (!live.has(p)) throw err('ENOENT', p);
       return Buffer.from(live.get(p).data);
     },
@@ -339,7 +346,7 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRenam
       pending.push({ ino, names: [p], apply: (ns) => ns.delete(p) });
     },
     statSync(p) {
-      if (live.has(p)) return { isDirectory: () => false, mtimeMs: 0 }; // old: the daily copy is always due
+      if (live.has(p)) return { isDirectory: () => false, mtimeMs };
       throw err('ENOENT', p);
     },
     crashAfter(n) { budget = n; },
@@ -380,7 +387,8 @@ function crashAtEveryStep(save, initial, model = {}) {
     for (let prefix = 0; prefix <= disk.pendingCount(); prefix++) {
       const booted = disk.rebootInto(tempDir(), prefix);
       const r = loadConfigFromDisk(booted, { sleep: noSleep, stamp: 'S' });
-      outcomes.push({ k, prefix, all: prefix === disk.pendingCount(), finished, status: r.status, data: r.data, bak: readConfigFileResult(`${booted}.bak`) });
+      outcomes.push({ k, prefix, all: prefix === disk.pendingCount(), finished, status: r.status, data: r.data, source: r.source,
+        bak: readConfigFileResult(`${booted}.bak`), daily: readConfigFileResult(`${booted}.daily.bak`) });
     }
     if (finished) return outcomes;
   }
@@ -524,11 +532,14 @@ const START_STATES = {
     [DISK_CONFIG]: { data: JSON.stringify(GOOD), durable: false },
     [`${DISK_CONFIG}.bak`]: { data: JSON.stringify(OLDER), durable: false },
   },
+  'an ordinary save, with a daily copy in place': {
+    [DISK_CONFIG]: JSON.stringify(GOOD), [`${DISK_CONFIG}.bak`]: JSON.stringify(OLDER), [`${DISK_CONFIG}.daily.bak`]: JSON.stringify(OLDER),
+  },
 };
-for (const [name, initial] of Object.entries(START_STATES)) for (const commit of ['all', 'own']) {
-  test(`saveConfigFile from ${name} (fsync commits ${commit === 'all' ? 'the whole journal' : 'only its own file'}): never worse than before mid-save, the new config once it returns`, () => {
+for (const [name, initial] of Object.entries(START_STATES)) for (const commit of ['all', 'own']) for (const due of [true, false]) {
+  test(`saveConfigFile from ${name} (fsync commits ${commit === 'all' ? 'the whole journal' : 'only its own file'}; daily copy ${due ? 'due' : 'not due'}): never worse than before mid-save, the new config once it returns`, () => {
     const before = loadConfigFromDisk(crashDisk(initial).rebootInto(tempDir(), 0), { sleep: noSleep, stamp: 'S' });
-    const outcomes = crashAtEveryStep(newSave, initial, { commit });
+    const outcomes = crashAtEveryStep(newSave, initial, { commit, mtimeMs: due ? 0 : Date.now() });
     for (const o of outcomes) {
       assert.ok(rank(o) >= rank(before), `${at(o)}: ${o.status} ${JSON.stringify(o.data)} (before the save: ${before.status} ${JSON.stringify(before.data)})`);
     }
@@ -631,7 +642,12 @@ test('the daily copy is written on the first save and then at most once a day', 
   setAge(25);
   saveConfigFile(p, JSON.stringify(NEWER), { now: t0 });
   assert.deepEqual(JSON.parse(fs.readFileSync(daily, 'utf8')), NEWER, 'a day old: replaced with the new config');
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.bak', 'config.json.daily.bak']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.daily.prev.bak`, 'utf8')), OLDER, 'the one it replaced moved to .prev');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.bak', 'config.json.daily.bak', 'config.json.daily.prev.bak']);
+  // Dated in the future (a clock set forward once): due, or it would never refresh.
+  setAge(-24 * 365);
+  saveConfigFile(p, JSON.stringify(GOOD), { now: t0 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(daily, 'utf8')), GOOD, 'a future date counts as due');
 });
 
 // A drive that acknowledges flushes it has not done can lose config.json and
@@ -643,12 +659,10 @@ test('with config.json and .bak both unusable, the daily copy is recovered', () 
   fs.writeFileSync(p, Buffer.alloc(24099));
   fs.writeFileSync(`${p}.bak`, Buffer.alloc(24099));
   fs.writeFileSync(`${p}.daily.bak`, JSON.stringify(OLDER));
-  const logs = [];
-  const r = loadConfigFromDisk(p, { sleep: noSleep, stamp: 'S', log: (t) => logs.push(t) });
+  const r = loadConfigFromDisk(p, { sleep: noSleep, stamp: 'S' });
   assert.equal(r.status, 'recovered');
   assert.equal(r.source, 'daily');
   assert.deepEqual(r.data, OLDER);
-  assert.match(logs.join('\n'), /recovered your settings from the daily copy/);
   // .bak is still preferred when it is whole.
   fs.writeFileSync(`${p}.bak`, JSON.stringify(GOOD));
   assert.equal(loadConfigFromDisk(p, { sleep: noSleep, stamp: 'T' }).source, 'bak');
@@ -685,16 +699,19 @@ test('preserveDamaged deletes only a copy it made itself', () => {
   assert.equal(fs.readFileSync(p, 'utf8'), 'damaged');
 });
 
-test('a damaged config.json is kept when its copy could not be flushed, unless the volume cannot flush at all', () => {
-  const dir = tempDir();
-  const p = path.join(dir, 'config.json');
-  fs.writeFileSync(p, 'damaged');
-  const flushFails = (code) => ({ ...fs, fsyncSync: () => { throw Object.assign(new Error(code), { code }); } });
-  assert.equal(preserveDamaged(p, Buffer.from('damaged'), 'A', { fs: flushFails('EIO'), unlink: true }), null);
-  assert.equal(fs.readFileSync(p, 'utf8'), 'damaged', 'original kept');
-  assert.equal(fs.readFileSync(`${p}.corrupt-A.json`, 'utf8'), 'damaged', 'the whole copy stays too');
-  assert.ok(preserveDamaged(p, Buffer.from('damaged'), 'B', { fs: flushFails('EISDIR'), unlink: true }));
-  assert.equal(fs.existsSync(p), false, 'a volume that cannot flush still recovers');
+// Keeping the damaged original back when the copy's flush fails protected
+// nothing and, on a volume whose flushes always fail, left the app unable to
+// save for good.
+test('a damaged config.json is moved aside once a whole copy is written, even where flushing fails', () => {
+  for (const code of ['EIO', 'EISDIR']) {
+    const dir = tempDir();
+    const p = path.join(dir, 'config.json');
+    fs.writeFileSync(p, 'damaged');
+    const flushFails = { ...fs, fsyncSync: () => { throw Object.assign(new Error(code), { code }); } };
+    assert.ok(preserveDamaged(p, Buffer.from('damaged'), 'A', { fs: flushFails, unlink: true }), code);
+    assert.equal(fs.readFileSync(`${p}.corrupt-A.json`, 'utf8'), 'damaged');
+    assert.equal(fs.existsSync(p), false, code);
+  }
 });
 
 test('a save whose flush fails still lands, as every release saved, and says so', () => {
@@ -739,4 +756,108 @@ test('on a volume without a journal, a save never boots older than before', () =
     for (const o of outcomes) assert.ok(rank(o) >= 2, `${commit}: ${at(o)}: ${o.status} ${JSON.stringify(o.data)}`);
     for (const o of outcomes.filter(x => x.finished)) assert.deepEqual(o.data, NEWER, `${commit}: ${at(o)}`);
   }
+});
+
+// A drive that acknowledges flushes it has not done loses whatever was
+// written recently once the journal is on disk. config.json and .bak are
+// rewritten on every save; the daily copies must still hold something,
+// including on the save that refreshes .daily.bak (the old one moves to
+// .daily.prev.bak by a rename, which rewrites no data).
+test('on a drive that fakes its flushes, a daily copy survives a crash right after any save', () => {
+  const initial = { [DISK_CONFIG]: JSON.stringify(GOOD), [`${DISK_CONFIG}.bak`]: JSON.stringify(OLDER), [`${DISK_CONFIG}.daily.bak`]: JSON.stringify(OLDER) };
+  for (const due of [true, false]) {
+    const outcomes = crashAtEveryStep(newSave, initial, { lying: true, mtimeMs: due ? 0 : Date.now() });
+    const settled = outcomes.find(o => o.finished && o.all);
+    assert.ok(rank(settled) >= 1, `daily ${due ? 'due' : 'not due'}: ${settled.status} ${JSON.stringify(settled.data)}`);
+    assert.match(settled.source || '', /^daily/, 'it came from a daily copy');
+  }
+});
+
+// On an honest drive, a save that writes the daily copy leaves it whole.
+test('the daily copy a save writes is on disk once the save returns', () => {
+  for (const commit of ['all', 'own']) {
+    const outcomes = crashAtEveryStep(newSave, { [DISK_CONFIG]: JSON.stringify(GOOD) }, { commit });
+    for (const o of outcomes.filter(x => x.finished)) {
+      assert.equal(o.daily.status, 'ok', `${commit}: ${at(o)}`);
+      assert.deepEqual(o.daily.data, NEWER);
+    }
+  }
+});
+
+// .bak gets the JSON the app last saved when given one, so on a volume without
+// a journal a config.json that is briefly unreadable at save time does not
+// leave .bak a generation behind.
+test('on a volume without a journal, a save with an unreadable config.json still never boots older than before', () => {
+  const previousSave = (p, json, disk) => saveConfigFile(p, json, { fs: disk, previous: JSON.stringify(GOOD) });
+  for (const commit of ['all', 'own']) {
+    const outcomes = crashAtEveryStep(previousSave, { [DISK_CONFIG]: JSON.stringify(GOOD), [`${DISK_CONFIG}.bak`]: JSON.stringify(OLDER) },
+      { commit, splitRename: true, failRead: (p) => p === DISK_CONFIG });
+    for (const o of outcomes) assert.ok(rank(o) >= 2, `${commit}: ${at(o)}: ${o.status} ${JSON.stringify(o.data)}`);
+  }
+});
+
+test('with previous given, .bak is the previous save even when config.json on disk is damaged', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, Buffer.alloc(100));
+  const r = saveConfigFile(p, JSON.stringify(NEWER), { previous: JSON.stringify(GOOD) });
+  assert.equal(r.backupError, null);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.bak`, 'utf8')), GOOD);
+});
+
+// Each copy's flush and write failures are reported, not only config.json's.
+function failingFor(suffix, what) {
+  const byFd = new Map();
+  return { ...fs,
+    openSync: (f, flags, ...rest) => {
+      if (what === 'open' && String(f).endsWith(suffix)) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      const fd = fs.openSync(f, flags, ...rest);
+      byFd.set(fd, String(f));
+      return fd;
+    },
+    fsyncSync: (fd) => {
+      if (what === 'flush' && (byFd.get(fd) || '').endsWith(suffix)) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+      return fs.fsyncSync(fd);
+    },
+  };
+}
+test('a failed flush of .bak or the daily copy is reported, and a daily copy that cannot be written too', () => {
+  for (const suffix of ['config.json.bak.tmp', 'config.json.daily.bak.tmp']) {
+    const dir = tempDir();
+    const p = path.join(dir, 'config.json');
+    fs.writeFileSync(p, JSON.stringify(GOOD));
+    assert.equal(saveConfigFile(p, JSON.stringify(NEWER), { fs: failingFor(suffix, 'flush') }).flushSkipped, true, suffix);
+  }
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, JSON.stringify(GOOD));
+  const r = saveConfigFile(p, JSON.stringify(NEWER), { fs: failingFor('config.json.daily.bak.tmp', 'open') });
+  assert.equal(r.backupError && r.backupError.code, 'EPERM');
+  assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), NEWER);
+});
+
+test('the daily copies: a briefly locked one is waited for, a damaged one is preserved and .prev used', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(`${p}.daily.bak`, JSON.stringify(OLDER));
+  const r = loadConfigFromDisk(p, { fs: lockingFs([`${p}.daily.bak`], { failFirst: 2 }), sleep: noSleep });
+  assert.equal(r.status, 'recovered');
+  assert.equal(r.source, 'daily');
+
+  fs.writeFileSync(`${p}.daily.bak`, Buffer.alloc(64));
+  fs.writeFileSync(`${p}.daily.prev.bak`, JSON.stringify(OLDER));
+  const r2 = loadConfigFromDisk(p, { sleep: noSleep, stamp: 'D' });
+  assert.equal(r2.source, 'daily.prev');
+  assert.deepEqual(r2.data, OLDER);
+  assert.ok(fs.existsSync(`${p}.daily.bak.corrupt-D.json`), 'the damaged daily copy was kept');
+});
+
+test('a damaged daily copy is never rotated over a good previous one', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(`${p}.daily.bak`, Buffer.alloc(64));
+  fs.writeFileSync(`${p}.daily.prev.bak`, JSON.stringify(OLDER));
+  saveConfigFile(p, JSON.stringify(NEWER), { now: Date.now() + 2 * 24 * 3600000 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.daily.prev.bak`, 'utf8')), OLDER);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.daily.bak`, 'utf8')), NEWER);
 });
