@@ -169,38 +169,40 @@ function syncDir(dir, fsImpl = fs) {
 // the first save after an update starts from exactly that):
 //   1. the current config.json is read, and kept only if it reads as a
 //      config (a damaged file never replaces a good backup);
-//   2. the new config goes to .tmp, is flushed and renamed over config.json:
-//      from here config.json is whole on disk;
+//   2. the new config goes to .tmp, is flushed and renamed over config.json,
+//      and config.json is flushed again: that commits the rename itself (a
+//      directory cannot be flushed on Windows), so from here the new config
+//      is whole on disk under its own name;
 //   3. the bytes from step 1 go to .bak.tmp, are flushed and renamed over
 //      .bak. The old .bak is never truncated, so it stays whole until the
-//      new one is. That flush also commits step 2's rename to the journal;
-//   4. when there was no .bak to write (a fresh install, or the first save
-//      after recovering from .bak) or it failed, config.json itself is
-//      flushed instead, because nothing else would commit the rename (a
-//      directory cannot be flushed on Windows).
+//      new one is.
 // Once it returns, the new config survives a crash.
 // Returns { backupError, flushSkipped }: backupError when only step 3 failed
-// (the save itself worked); flushSkipped when the volume cannot flush.
-// Throws when the new config could not be written, renamed or committed;
-// the caller logs it.
+// (the save itself worked); flushSkipped when something could not be flushed
+// (a volume that cannot flush, or config.json held open by another program
+// right after the rename: the new config is in place, only not yet forced to
+// disk). Throws when the new config could not be written or renamed; the
+// caller logs it.
 function saveConfigFile(configPath, json, { fs: fsImpl = fs } = {}) {
   const current = readConfigFileResult(configPath, fsImpl);
   const tmpPath = `${configPath}.tmp`;
   let flushed = writeFileDurably(tmpPath, json, fsImpl);
   fsImpl.renameSync(tmpPath, configPath);
+  try {
+    flushed = flushExisting(configPath, fsImpl) && flushed;
+  } catch (e) {
+    flushed = false;
+  }
   let backupError = null;
-  let backupWritten = false;
   if (current.status === 'ok') {
     const bakTmp = `${configPath}.bak.tmp`;
     try {
       flushed = writeFileDurably(bakTmp, current.raw, fsImpl) && flushed;
       fsImpl.renameSync(bakTmp, `${configPath}.bak`);
-      backupWritten = true;
     } catch (e) {
       backupError = e;
     }
   }
-  if (!backupWritten) flushed = flushExisting(configPath, fsImpl) && flushed;
   syncDir(path.dirname(configPath), fsImpl);
   return { backupError, flushSkipped: !flushed };
 }
@@ -208,8 +210,7 @@ function saveConfigFile(configPath, json, { fs: fsImpl = fs } = {}) {
 // Everything loadConfig needs to know, without touching the app's state.
 // Returns { status, data?, reason?, error? }:
 //   'loaded'    config.json read fine
-//   'recovered' config.json unusable, .bak read fine (or, with both gone, a
-//               whole temp file a save left behind)
+//   'recovered' config.json unusable, .bak read fine
 //   'defaults'  nothing on disk: a fresh install (or both files damaged and
 //               preserved), so starting from defaults loses nothing
 //   'locked'    something exists that could not be read: run on defaults in
@@ -239,22 +240,6 @@ function loadConfigFromDisk(configPath, opts = {}) {
   if (backup.status === 'corrupt') {
     const kept = preserveDamaged(backupPath, backup.raw, stamp, { fs: fsImpl });
     if (kept) log(`[Config] config.json.bak was unreadable too — preserved a copy as ${path.basename(kept)}.`);
-  }
-
-  // Both gone, but not locked: a save's own temp files are flushed before
-  // they are renamed, so one that is still there and reads as a config is
-  // whole. On a volume without a journal (FAT32, exFAT: a profile on a USB
-  // drive) a crash can leave the data there and neither name pointing at it.
-  // .tmp is the newer of the two.
-  const unreadable = (s) => s === 'missing' || s === 'corrupt';
-  if (unreadable(main.status) && unreadable(backup.status)) {
-    for (const name of [`${configPath}.tmp`, `${configPath}.bak.tmp`]) {
-      const leftover = readConfigFileResult(name, fsImpl);
-      if (leftover.status === 'ok') {
-        log(`[Config] config.json and its backup were unusable; recovered your settings from ${path.basename(name)}.`);
-        return { status: 'recovered', data: leftover.data, from: main.status };
-      }
-    }
   }
 
   const dirReachable = main.status === 'missing' ? isDirReachable(path.dirname(configPath), fsImpl) : true;

@@ -432,7 +432,7 @@ function saveConfig(newConfig) {
     }
     if (flushSkipped && !configFlushWarned) {
       configFlushWarned = true;
-      addLog('[Config] The drive holding your settings cannot flush files to disk, so a crash or power cut right after a save could lose that save.');
+      addLog('[Config] Saved, but the settings file could not be forced to disk (the drive cannot flush, or another program had it open), so a crash or power cut right after a save could lose that save.');
     }
   } catch (err) {
     addLog(`Error saving config: ${err.message}`);
