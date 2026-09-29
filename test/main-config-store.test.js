@@ -12,16 +12,20 @@ const os = require('os');
 const path = require('path');
 const {
   readConfigFileResult, readConfigWithRetry, isDirReachable, decideConfigSource, loadConfigFromDisk,
-  saveConfigFile, writeFileDurably, preserveDamaged,
+  saveConfigFile, writeFileDurably, preserveDamaged, replaceFileDurably,
 } = require('../main/config-store');
 
 const GOOD = { streamers: [{ platform: 'kick', username: 'x' }], watchTime: { streamers: { 'kick:x': 12345 } } };
 const OLDER = { streamers: [{ platform: 'kick', username: 'x' }], watchTime: { streamers: { 'kick:x': 12000 } } };
 const noSleep = () => {};
 
+const madeDirs = [];
 function tempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'sl-config-store-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sl-config-store-'));
+  madeDirs.push(dir);
+  return dir;
 }
+test.after(() => { for (const d of madeDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 function snapshot(dir) {
   const out = {};
@@ -228,7 +232,9 @@ test('isDirReachable: existing folder yes, a file no, a creatable folder yes', (
 //     for the file it flushes.
 // Initial files are on disk unless given as { data, durable: false }.
 // failOpen(path, flags) makes that open fail with EPERM.
-function crashDisk(initial, { commit = 'all', failOpen = () => false } = {}) {
+// splitRename: a volume without a journal (FAT32, exFAT), where renaming over
+// an existing file is two separate updates: remove the old one, then rename.
+function crashDisk(initial, { commit = 'all', failOpen = () => false, splitRename = false } = {}) {
   let nextIno = 1;
   const inode = (data, durable) => ({ id: nextIno++, data: Buffer.from(data), durable: durable ? Buffer.from(data) : null, dirty: !durable });
   const live = new Map();
@@ -254,7 +260,7 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false } = {}) {
   const err = (code, p) => Object.assign(new Error(`${code}: '${p}'`), { code });
   const bind = (p, ino) => {
     live.set(p, ino);
-    pending.push({ ino, apply: (ns) => ns.set(p, ino) });
+    pending.push({ ino, names: [p], apply: (ns) => ns.set(p, ino) });
   };
   return Object.assign(disk, {
     openSync(p, flags) {
@@ -291,8 +297,19 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false } = {}) {
       if (commit === 'all') {
         for (const e of pending.splice(0)) e.apply(committed);
       } else {
-        for (const e of pending.filter(x => x.ino === ino)) e.apply(committed);
-        pending.splice(0, pending.length, ...pending.filter(x => x.ino !== ino));
+        // This file's entries, and every earlier entry on a name they touch:
+        // no file system makes an older rename or delete of a name durable
+        // after a newer one.
+        const take = new Set(pending.filter(x => x.ino === ino));
+        for (let grew = true; grew;) {
+          grew = false;
+          pending.forEach((x, i) => {
+            if (take.has(x)) return;
+            if (pending.slice(i + 1).some(y => take.has(y) && y.names.some(n => x.names.includes(n)))) { take.add(x); grew = true; }
+          });
+        }
+        for (const x of pending.filter(e => take.has(e))) x.apply(committed);
+        pending.splice(0, pending.length, ...pending.filter(e => !take.has(e)));
       }
     },
     closeSync(fd) { fds.delete(fd); },
@@ -309,19 +326,20 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false } = {}) {
       step();
       if (!live.has(a)) throw err('ENOENT', a);
       const ino = live.get(a);
+      if (splitRename && live.has(b)) pending.push({ ino, names: [b], apply: (ns) => ns.delete(b) });
       live.delete(a);
       live.set(b, ino);
-      pending.push({ ino, apply: (ns) => { ns.delete(a); ns.set(b, ino); } });
+      pending.push({ ino, names: [a, b], apply: (ns) => { ns.delete(a); ns.set(b, ino); } });
     },
     unlinkSync(p) {
       step();
       if (!live.has(p)) throw err('ENOENT', p);
       const ino = live.get(p);
       live.delete(p);
-      pending.push({ ino, apply: (ns) => ns.delete(p) });
+      pending.push({ ino, names: [p], apply: (ns) => ns.delete(p) });
     },
     statSync(p) {
-      if (live.has(p)) return { isDirectory: () => false };
+      if (live.has(p)) return { isDirectory: () => false, mtimeMs: 0 }; // old: the daily copy is always due
       throw err('ENOENT', p);
     },
     crashAfter(n) { budget = n; },
@@ -342,6 +360,9 @@ function crashDisk(initial, { commit = 'all', failOpen = () => false } = {}) {
 const DISK_CONFIG = 'D:/profile/config.json';
 const NEWER = { streamers: [{ platform: 'kick', username: 'x' }], watchTime: { streamers: { 'kick:x': 13000 } } };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Generations, oldest first; defaults (nothing recovered) is 0.
+const GEN = new Map([[JSON.stringify(OLDER), 1], [JSON.stringify(GOOD), 2], [JSON.stringify(NEWER), 3]]);
+const rank = (o) => (o.data ? (GEN.get(JSON.stringify(o.data)) ?? -1) : 0);
 
 // Crashes the save after 0, 1, 2 ... disk operations and, at each, boots the
 // real loader on every journal prefix that can have reached the disk.
@@ -397,7 +418,7 @@ test('saveConfigFile: the first save after an update from an unflushed config.js
   });
   for (const o of outcomes) {
     assert.ok(o.status === 'loaded' || o.status === 'recovered', `${at(o)}: ${o.status}`);
-    assert.ok(same(o.data, OLDER) || same(o.data, NEWER), `${at(o)}: ${JSON.stringify(o.data)}`);
+    assert.ok(rank(o) >= 1, `${at(o)}: ${JSON.stringify(o.data)} is older than the .bak it started with`);
   }
   for (const o of outcomes.filter(x => x.finished)) assert.deepEqual(o.data, NEWER, at(o));
   const settled = outcomes.find(o => o.finished && o.all);
@@ -418,17 +439,18 @@ test('the unflushed save this replaced ends in defaults after a crash (regressio
   assert.equal(settled.status, 'defaults', 'config.json and .bak both came back as zeros');
 });
 
-test('saveConfigFile on a real folder: new config in place, previous one in .bak, no temp files left', () => {
+test('saveConfigFile on a real folder: new config in place, previous one in .bak, the daily copy, no temp files left', () => {
   const dir = tempDir();
   const p = path.join(dir, 'config.json');
   saveConfigFile(p, JSON.stringify(OLDER));
-  assert.deepEqual(fs.readdirSync(dir), ['config.json'], 'first save: nothing to roll to .bak');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.daily.bak'], 'first save: nothing to roll to .bak');
   saveConfigFile(p, JSON.stringify(GOOD));
   const r = saveConfigFile(p, JSON.stringify(NEWER));
   assert.equal(r.backupError, null);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.bak']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.bak', 'config.json.daily.bak']);
   assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), NEWER);
   assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.bak`, 'utf8')), GOOD);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.daily.bak`, 'utf8')), OLDER, 'rewritten once a day, not on every save');
 });
 
 test('saveConfigFile never rolls a damaged config.json over a good .bak', () => {
@@ -459,7 +481,7 @@ test('writeFileDurably flushes before it closes, and closes even when the write 
     fsyncSync: (fd) => { calls.push(`fsync ${fd}`); },
     closeSync: (fd) => { calls.push(`close ${fd}`); },
   };
-  writeFileDurably('x', 'data', spy);
+  assert.equal(writeFileDurably('x', 'data', spy), 'flushed');
   assert.deepEqual(calls, ['open w', 'write 7', 'fsync 7', 'close 7']);
   calls.length = 0;
   const failing = { ...spy, writeFileSync: () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); } };
@@ -467,15 +489,16 @@ test('writeFileDurably flushes before it closes, and closes even when the write 
   assert.deepEqual(calls, ['open w', 'close 7']);
 });
 
-// Some network shares cannot flush at all. Failing every save there would be
-// worse than saving unflushed; a real I/O error still fails the save.
-test('writeFileDurably: a volume that cannot flush still gets the write; a real flush error does not pass', () => {
-  const fsyncFails = (code) => ({
-    openSync: () => 7, writeFileSync: () => {}, closeSync: () => {},
-    fsyncSync: () => { throw Object.assign(new Error(code), { code }); },
-  });
-  for (const code of ['EISDIR', 'EINVAL', 'ENOTSUP']) assert.doesNotThrow(() => writeFileDurably('x', 'd', fsyncFails(code)), code);
-  for (const code of ['EIO', 'EPERM', 'ENOSPC']) assert.throws(() => writeFileDurably('x', 'd', fsyncFails(code)), new RegExp(code));
+// A flush that fails never fails the write: every release before this one
+// saved without flushing at all, and failing every save on such a volume
+// would lose changes instead. The result says which kind it was.
+const fsyncFails = (code) => ({
+  openSync: () => 7, writeFileSync: () => {}, closeSync: () => {},
+  fsyncSync: () => { throw Object.assign(new Error(code), { code }); },
+});
+test('writeFileDurably: a volume that cannot flush and a failed flush are reported, never thrown', () => {
+  for (const code of ['EISDIR', 'EINVAL', 'ENOTSUP']) assert.equal(writeFileDurably('x', 'd', fsyncFails(code)), 'unsupported', code);
+  for (const code of ['EIO', 'EPERM', 'ENOSPC', 'UNKNOWN']) assert.equal(writeFileDurably('x', 'd', fsyncFails(code)), 'failed', code);
 });
 
 // The copy of a damaged config.json is the only one once the original is
@@ -507,8 +530,7 @@ for (const [name, initial] of Object.entries(START_STATES)) for (const commit of
     const before = loadConfigFromDisk(crashDisk(initial).rebootInto(tempDir(), 0), { sleep: noSleep, stamp: 'S' });
     const outcomes = crashAtEveryStep(newSave, initial, { commit });
     for (const o of outcomes) {
-      const asBefore = o.status === before.status && same(o.data, before.data);
-      assert.ok(asBefore || same(o.data, NEWER), `${at(o)}: ${o.status} ${JSON.stringify(o.data)} (before the save: ${before.status})`);
+      assert.ok(rank(o) >= rank(before), `${at(o)}: ${o.status} ${JSON.stringify(o.data)} (before the save: ${before.status} ${JSON.stringify(before.data)})`);
     }
     for (const o of outcomes.filter(x => x.finished)) assert.deepEqual(o.data, NEWER, at(o));
   });
@@ -534,6 +556,7 @@ test('saveConfigFile throws when the new config cannot be put in place, and the 
   } };
   assert.throws(() => saveConfigFile(p, JSON.stringify(NEWER), { fs: busy }), /EBUSY/);
   assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), GOOD);
+  assert.equal(fs.existsSync(`${p}.tmp`), false, 'no temp file left behind');
 });
 
 test('saveConfigFile reports a volume that cannot flush, and still saves there', () => {
@@ -575,4 +598,145 @@ test('saveConfigFile: a config.json it cannot reopen to flush is reported, and t
   assert.equal(r.backupError, null);
   assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), NEWER);
   assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.bak`, 'utf8')), GOOD);
+});
+
+// A released build's unflushed save can still be in the journal when this
+// build starts, and loading from the incident state (a zeroed config.json and
+// a good .bak) deletes config.json before the first save. Load then save,
+// crashing at every step of both.
+test('load then save from the incident state: never older than the .bak, the new config once the save returns', () => {
+  const initial = { [DISK_CONFIG]: '\0'.repeat(24099), [`${DISK_CONFIG}.bak`]: JSON.stringify(GOOD) };
+  const loadThenSave = (p, json, disk) => {
+    const r = loadConfigFromDisk(p, { fs: disk, sleep: noSleep, stamp: 'L' });
+    assert.equal(r.status, 'recovered');
+    saveConfigFile(p, json, { fs: disk });
+  };
+  for (const commit of ['all', 'own']) {
+    const outcomes = crashAtEveryStep(loadThenSave, initial, { commit });
+    for (const o of outcomes) assert.ok(rank(o) >= 2, `${commit}: ${at(o)}: ${o.status} ${JSON.stringify(o.data)}`);
+    for (const o of outcomes.filter(x => x.finished)) assert.deepEqual(o.data, NEWER, `${commit}: ${at(o)}`);
+  }
+});
+
+test('the daily copy is written on the first save and then at most once a day', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  const t0 = Date.parse('2026-09-28T12:00:00Z');
+  saveConfigFile(p, JSON.stringify(OLDER), { now: t0 });
+  const daily = `${p}.daily.bak`;
+  const setAge = (hours) => fs.utimesSync(daily, new Date(t0 - hours * 3600000), new Date(t0 - hours * 3600000));
+  setAge(23);
+  saveConfigFile(p, JSON.stringify(GOOD), { now: t0 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(daily, 'utf8')), OLDER, 'under a day old: left alone');
+  setAge(25);
+  saveConfigFile(p, JSON.stringify(NEWER), { now: t0 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(daily, 'utf8')), NEWER, 'a day old: replaced with the new config');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['config.json', 'config.json.bak', 'config.json.daily.bak']);
+});
+
+// A drive that acknowledges flushes it has not done can lose config.json and
+// .bak together, both rewritten within the last minute: the daily copy is old
+// enough to be on disk.
+test('with config.json and .bak both unusable, the daily copy is recovered', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, Buffer.alloc(24099));
+  fs.writeFileSync(`${p}.bak`, Buffer.alloc(24099));
+  fs.writeFileSync(`${p}.daily.bak`, JSON.stringify(OLDER));
+  const logs = [];
+  const r = loadConfigFromDisk(p, { sleep: noSleep, stamp: 'S', log: (t) => logs.push(t) });
+  assert.equal(r.status, 'recovered');
+  assert.equal(r.source, 'daily');
+  assert.deepEqual(r.data, OLDER);
+  assert.match(logs.join('\n'), /recovered your settings from the daily copy/);
+  // .bak is still preferred when it is whole.
+  fs.writeFileSync(`${p}.bak`, JSON.stringify(GOOD));
+  assert.equal(loadConfigFromDisk(p, { sleep: noSleep, stamp: 'T' }).source, 'bak');
+});
+
+test('the daily copy never bypasses a locked or unpreserved config.json, and a locked daily copy locks', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, JSON.stringify(GOOD));
+  fs.writeFileSync(`${p}.daily.bak`, JSON.stringify(OLDER));
+  assert.equal(loadConfigFromDisk(p, { fs: lockingFs([p]), sleep: noSleep }).status, 'locked', 'config.json locked');
+
+  fs.writeFileSync(p, 'damaged');
+  const noCopy = { ...fs, openSync: (f, flags, ...rest) => {
+    if (String(f).includes('.corrupt-')) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    return fs.openSync(f, flags, ...rest);
+  } };
+  assert.equal(loadConfigFromDisk(p, { fs: noCopy, sleep: noSleep, stamp: 'U' }).status, 'locked', 'damaged and no copy made');
+
+  const dir2 = tempDir();
+  const p2 = path.join(dir2, 'config.json');
+  fs.writeFileSync(`${p2}.daily.bak`, JSON.stringify(OLDER));
+  assert.equal(loadConfigFromDisk(p2, { fs: lockingFs([`${p2}.daily.bak`]), sleep: noSleep }).status, 'locked', 'daily copy locked');
+});
+
+test('preserveDamaged deletes only a copy it made itself', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, 'damaged');
+  fs.writeFileSync(`${p}.corrupt-S.json`, 'earlier copy');
+  const emfile = { ...fs, openSync: () => { throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); } };
+  assert.equal(preserveDamaged(p, Buffer.from('damaged'), 'S', { fs: emfile, unlink: true }), null);
+  assert.equal(fs.readFileSync(`${p}.corrupt-S.json`, 'utf8'), 'earlier copy');
+  assert.equal(fs.readFileSync(p, 'utf8'), 'damaged');
+});
+
+test('a damaged config.json is kept when its copy could not be flushed, unless the volume cannot flush at all', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, 'damaged');
+  const flushFails = (code) => ({ ...fs, fsyncSync: () => { throw Object.assign(new Error(code), { code }); } });
+  assert.equal(preserveDamaged(p, Buffer.from('damaged'), 'A', { fs: flushFails('EIO'), unlink: true }), null);
+  assert.equal(fs.readFileSync(p, 'utf8'), 'damaged', 'original kept');
+  assert.equal(fs.readFileSync(`${p}.corrupt-A.json`, 'utf8'), 'damaged', 'the whole copy stays too');
+  assert.ok(preserveDamaged(p, Buffer.from('damaged'), 'B', { fs: flushFails('EISDIR'), unlink: true }));
+  assert.equal(fs.existsSync(p), false, 'a volume that cannot flush still recovers');
+});
+
+test('a save whose flush fails still lands, as every release saved, and says so', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, JSON.stringify(GOOD));
+  const r = saveConfigFile(p, JSON.stringify(NEWER), { fs: { ...fs, fsyncSync: () => { throw Object.assign(new Error('UNKNOWN'), { code: 'UNKNOWN' }); } } });
+  assert.equal(r.flushSkipped, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), NEWER);
+  assert.deepEqual(JSON.parse(fs.readFileSync(`${p}.bak`, 'utf8')), GOOD);
+});
+
+test('a config.json that cannot be read at save time is reported as a stale backup', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'config.json');
+  fs.writeFileSync(p, JSON.stringify(GOOD));
+  const r = saveConfigFile(p, JSON.stringify(NEWER), { fs: lockingFs([p], { failFirst: 1 }) });
+  assert.equal(r.backupError && r.backupError.code, 'EBUSY');
+  assert.deepEqual(JSON.parse(fs.readFileSync(p, 'utf8')), NEWER);
+});
+
+test('replaceFileDurably: the old file stays whole and no temp file is left when the rename fails', () => {
+  const dir = tempDir();
+  const p = path.join(dir, 'export.json');
+  fs.writeFileSync(p, 'previous backup');
+  const busy = { ...fs, renameSync: () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); } };
+  assert.throws(() => replaceFileDurably(p, 'new backup', busy), /EPERM/);
+  assert.equal(fs.readFileSync(p, 'utf8'), 'previous backup');
+  assert.deepEqual(fs.readdirSync(dir), ['export.json']);
+  assert.equal(replaceFileDurably(p, 'new backup'), true);
+  assert.equal(fs.readFileSync(p, 'utf8'), 'new backup');
+});
+
+// On FAT32/exFAT a crash can land after the old config.json is removed and
+// before the new one is renamed into place: .bak must already hold the
+// previous config by then, so it is rolled first.
+test('on a volume without a journal, a save never boots older than before', () => {
+  for (const commit of ['all', 'own']) {
+    const outcomes = crashAtEveryStep(newSave, { [DISK_CONFIG]: JSON.stringify(GOOD), [`${DISK_CONFIG}.bak`]: JSON.stringify(OLDER) },
+      { commit, splitRename: true });
+    assert.ok(outcomes.some(o => o.status === 'recovered'), `${commit}: the split rename was reached`);
+    for (const o of outcomes) assert.ok(rank(o) >= 2, `${commit}: ${at(o)}: ${o.status} ${JSON.stringify(o.data)}`);
+    for (const o of outcomes.filter(x => x.finished)) assert.deepEqual(o.data, NEWER, `${commit}: ${at(o)}`);
+  }
 });

@@ -24,7 +24,7 @@ const { createStreamLiveness } = require('./main/stream-liveness');
 const { applyScanResults } = require('./main/scan-planner');
 const { createSingleFlight } = require('./main/scan-runner');
 const { createFatalReporter, createLoadGuard, formatConsoleMessage } = require('./main/app-log');
-const { loadConfigFromDisk, readConfigFileResult, saveConfigFile, writeFileDurably } = require('./main/config-store');
+const { loadConfigFromDisk, readConfigFileResult, saveConfigFile, writeFileDurably, replaceFileDurably } = require('./main/config-store');
 const { syncLoginItem } = require('./main/login-item');
 const { createAlertKeeper, createPendingOpens } = require('./main/live-alerts');
 const { spoofedChromeVersion, normalizeUserAgent, applyClientHints } = require('./main/ua-spoof');
@@ -165,6 +165,7 @@ let configLockReason = '';
 let configSkipLogged = false;
 let configBackupWarned = false;
 let configFlushWarned = false;
+let lastSaveError = '';
 let configPromptOpen = false;
 let config = {
   streamers: [],
@@ -301,7 +302,8 @@ function loadConfig() {
       if (repaired.length) addLog(`[Config] Corrected ${repaired.length} longest-session record(s) that were longer than the watch time behind them.`);
 
       if (recovered) {
-        addLog('[Config] Recovered configuration from config.json.bak — watch history and streamers are intact.');
+        const from = result.source === 'daily' ? 'the daily copy (config.json.daily.bak)' : 'config.json.bak';
+        addLog(`[Config] Recovered configuration from ${from}; watch history and streamers are as of that copy.`);
         saveConfig(); // rewrite a healthy config.json from the recovered data
       } else {
         addLog('Configuration loaded successfully.');
@@ -403,8 +405,9 @@ function retryConfigLoad() {
 // Save configuration
 // config.json holds everything the user can't get back — monitored streamers,
 // watch history, streaks, credentials, calendar. saveConfigFile flushes the
-// new file and the previous good copy (.bak) to disk and swaps each in by
-// rename, so a crash or power cut at any point leaves a whole config behind.
+// new file, the previous good copy (.bak) and a daily copy to disk and swaps
+// each in by rename, so a crash or power cut at any point leaves a whole
+// config behind.
 function saveConfig(newConfig) {
   if (newConfig) config = newConfig;
   // Before .tmp, .bak or config.json is touched: defaults in memory must never
@@ -425,17 +428,22 @@ function saveConfig(newConfig) {
     }
 
     const { backupError, flushSkipped } = saveConfigFile(configPath, JSON.stringify(config, null, 2));
-    // Saved, but the fallback copy is stale. Once per run: it repeats every save.
+    lastSaveError = '';
+    // Saved, but a fallback copy is stale. Once per run: it repeats every save.
     if (backupError && !configBackupWarned) {
       configBackupWarned = true;
-      addLog(`[Config] Saved, but config.json.bak could not be updated (${backupError.code || backupError.message}). The backup copy is older than your settings.`);
+      addLog(`[Config] Saved, but a backup copy (config.json.bak or config.json.daily.bak) could not be updated (${backupError.code || backupError.message}). It is older than your settings.`);
     }
     if (flushSkipped && !configFlushWarned) {
       configFlushWarned = true;
       addLog('[Config] Saved, but the settings file could not be forced to disk (the drive cannot flush, or another program had it open), so a crash or power cut right after a save could lose that save.');
     }
   } catch (err) {
-    addLog(`Error saving config: ${err.message}`);
+    // Once per distinct failure, not on every save of the minute timer.
+    if (err.message !== lastSaveError) {
+      lastSaveError = err.message;
+      addLog(`Error saving config: ${err.message}`);
+    }
   }
 }
 
@@ -3610,8 +3618,9 @@ ipcMain.handle('export-config', async () => {
     // Without the pairing code (the one secret a local process needs to write
     // cookies into the app) and this machine's cookie-jar markers. Import
     // never takes them from a file either.
-    // Flushed: a backup that comes back as zeros after a crash is no backup.
-    writeFileDurably(filePath, JSON.stringify(exportableConfig(config), null, 2));
+    // Flushed, and never truncated in place: re-exporting over the same file
+    // must not turn the previous backup into zeros if the PC goes down.
+    replaceFileDurably(filePath, JSON.stringify(exportableConfig(config), null, 2));
     addLog(`[Config] Exported settings to ${filePath}`);
     return { success: true, filePath };
   } catch (err) {
