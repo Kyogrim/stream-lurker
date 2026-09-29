@@ -437,6 +437,7 @@ the background, so a release reaches only the users who click, whenever they cli
 | `index.html` | One page, served from `app://bundle` (`main/dashboard-protocol.js`), never `file://`; one `<section class="tab-content">` per tab |
 | `style.css` | CSS custom properties, dark/cyan theme |
 | `extension/` | The "Stream Lurker Connector" browser extension (MV3). `connector.js` holds its protocol, shared by `popup.js`, the `background.js` worker and the tests; the app side is `main/cookie-receiver.js` |
+| `scripts/` | Release tooling run by hand: `check-release.mjs` checks a published release the way the in-app updater reads it (see "Releasing") |
 | `test/` | `node:test` gate tests, run by `npm test`: `main-*` (the `main/` modules, plus static guards that read `main.js` as text), `cookie-migration` and `safe-unzip` (two `main/` modules named before the prefix), `renderer-*`, `page-*` (scripts injected into platform pages), `extension-*` |
 
 ### Patterns to reuse
@@ -618,10 +619,22 @@ npm install --package-lock-only
 git commit && git tag -a vX.Y.Z-beta && git push origin main && git push origin vX.Y.Z-beta
 # 2. stop the running app first — the build hits file locks otherwise
 GH_TOKEN="$(gh auth token)" npm run release
+# 3. before anything else: must print "Ready", or the updater may read the wrong release
+node scripts/check-release.mjs
 gh release edit vX.Y.Z-beta --title "Stream Lurker vX.Y.Z-beta" --notes "..." --latest
 ```
 
 `build.publish.releaseType` is `release`, so it publishes live — there is no draft step to clean up.
+
+- **Check the release before announcing it.** electron-builder uploads the installer, its blockmap
+  and `latest.yml` in parallel, and on v0.15.0-beta two uploads each created a release on the same
+  tag: one with the installer and `latest.yml`, a newer one with only the blockmap, which GitHub then
+  called "latest". `scripts/check-release.mjs` fails on that and on anything else the updater reads
+  wrong. To fix a split: upload the stray asset to the release holding `latest.yml` (`gh api --method
+  POST -H "Content-Type: application/octet-stream"
+  "https://uploads.github.com/repos/Kyogrim/stream-lurker/releases/<id>/assets?name=<asset>" --input
+  <file in dist/>`), delete the other release by id (`gh api --method DELETE
+  repos/Kyogrim/stream-lurker/releases/<id>`, which keeps the tag), and run the check again.
 
 - **Electron never goes backwards** between releases (see "The profile").
 - **A release reaches only users who click Check for Updates**, whenever they get to it. There is no
