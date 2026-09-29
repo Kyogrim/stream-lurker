@@ -16,44 +16,67 @@ const EMPTY_NO_ENABLED = `
   </div>
 `;
 
-function createStreamerCardPlaceholder(platform, username) {
-  const card = document.createElement('div');
-  card.className = 'stream-card offline glass-panel';
-  card.innerHTML = `
+// badge: 'live' | 'checking' | anything else for OFFLINE. A state, not markup,
+// so only these three fixed badges can reach the parser.
+function cardHeader(platform, username, badge) {
+  return `
     <div class="card-header-row">
       <div class="streamer-identity">
         <div class="platform-badge ${escapeHtml(platform.toLowerCase())}">${getPlatformSVG(platform)}</div>
         <span class="streamer-username">${escapeHtml(username)}</span>
       </div>
-      <span class="live-badge offline">Checking...</span>
-    </div>
-    <div class="card-body">
-      <p class="stream-title">Initializing status check agent...</p>
-      <div class="stream-details"><div class="detail-item">--</div></div>
-    </div>
-    <div class="card-actions">
-      <button class="card-btn offline-btn" disabled>Open Container</button>
+      ${badge === 'live' ? '<span class="live-badge live">LIVE</span>'
+        : badge === 'checking' ? '<span class="live-badge offline">Checking...</span>'
+        : '<span class="live-badge offline">OFFLINE</span>'}
     </div>
   `;
+}
+
+function isContainerOpenFor(stream) {
+  return state.activeContainers.includes(`${stream.platform.toLowerCase()}:${stream.username.toLowerCase()}`);
+}
+
+// An offline card with nothing to act on or report is just its name and
+// badge: dozens of full-size "Stream is currently offline." cards, each with
+// a dead button, pushed the live ones and most of the list off screen. One
+// keeps its full card while its container is open (the button closes it) or
+// its check failed (the error says why).
+export function isCompactCard(stream, isContainerOpen = isContainerOpenFor(stream)) {
+  return !stream.isLive && !isContainerOpen && !stream.error;
+}
+
+// Before the first scan, compact too, so the grid does not jump from tall
+// placeholders to short cards when the answers arrive.
+function createStreamerCardPlaceholder(platform, username) {
+  const card = document.createElement('div');
+  card.className = 'stream-card offline compact glass-panel';
+  card.innerHTML = cardHeader(platform, username, 'checking');
   return card;
 }
 
 function createStreamerCard(stream) {
   const platformLower = stream.platform.toLowerCase();
-  const usernameLower = stream.username.toLowerCase();
   const isLive = stream.isLive;
-  const isContainerOpen = state.activeContainers.includes(`${platformLower}:${usernameLower}`);
+  const isContainerOpen = isContainerOpenFor(stream);
+
+  const badge = isLive ? 'live' : 'offline';
 
   const card = document.createElement('div');
+  if (isCompactCard(stream, isContainerOpen)) {
+    card.className = 'stream-card offline compact glass-panel';
+    card.innerHTML = cardHeader(platformLower, stream.username, badge);
+    return card;
+  }
   card.className = `stream-card ${isLive ? `live-${platformLower}` : 'offline'} glass-panel`;
 
-  const liveBadgeHTML = isLive ? `<span class="live-badge live">LIVE</span>` : `<span class="live-badge offline">OFFLINE</span>`;
-
+  // One line: the viewer count and separator keep their size and only the
+  // category gives way (style.css .detail-category), so a long game name no
+  // longer wraps and drops this card's button below its neighbours'.
   const detailsHTML = isLive
-    ? `<div class="detail-item"><span class="viewers-dot"></span>${formatViewerCount(stream.viewerCount)} Lurkers</div>
-       <div class="detail-item">|</div>
-       <div class="detail-item">${escapeHtml(stream.category)}</div>`
-    : `<div class="detail-item">${stream.error ? `Error: ${escapeHtml(stream.error)}` : 'Offline'}</div>`;
+    ? `<div class="detail-item detail-viewers"><span class="viewers-dot"></span>${formatViewerCount(stream.viewerCount)} Lurkers</div>
+       <div class="detail-item detail-sep">|</div>
+       <div class="detail-item detail-category">${escapeHtml(stream.category)}</div>`
+    : `<div class="detail-item detail-category">${stream.error ? `Error: ${escapeHtml(stream.error)}` : 'Offline'}</div>`;
 
   const actionButtonText = isContainerOpen ? 'Close Container' : 'Open Container';
   const actionButtonClass = isContainerOpen
@@ -62,13 +85,7 @@ function createStreamerCard(stream) {
   const actionButtonDisabled = !isLive && !isContainerOpen;
 
   card.innerHTML = `
-    <div class="card-header-row">
-      <div class="streamer-identity">
-        <div class="platform-badge ${escapeHtml(platformLower)}">${getPlatformSVG(platformLower)}</div>
-        <span class="streamer-username">${escapeHtml(stream.username)}</span>
-      </div>
-      ${liveBadgeHTML}
-    </div>
+    ${cardHeader(platformLower, stream.username, badge)}
     <div class="card-body">
       <p class="stream-title">${isLive ? escapeHtml(stream.title) : 'Stream is currently offline.'}</p>
       <div class="stream-details">${detailsHTML}</div>
@@ -83,7 +100,7 @@ function createStreamerCard(stream) {
     </div>
   `;
 
-  card.querySelector('button').addEventListener('click', async () => {
+  card.querySelector('.card-actions button').addEventListener('click', async () => {
     if (isContainerOpen) {
       await window.api.closeStreamContainer(stream.platform, stream.username);
     } else {
@@ -117,12 +134,16 @@ export function renderStreamsGrid() {
     return;
   }
 
-  // Sort: Live first, then by user-defined priority order.
+  // Live first, then offline cards that still show something (an open
+  // container, an error), then the compact rest, each in the user's priority
+  // order. Compact cards start a row of their own (style.css), so they never
+  // sit beside a tall card over empty space.
   const priorityIndex = new Map();
   streamers.forEach((s, idx) => priorityIndex.set(`${s.platform.toLowerCase()}:${s.username.toLowerCase()}`, idx));
+  const tier = s => (s.isLive ? 0 : isCompactCard(s) ? 2 : 1);
 
   const sortedStatuses = [...state.currentStatuses].sort((a, b) => {
-    if (a.isLive !== b.isLive) return a.isLive ? -1 : 1;
+    if (tier(a) !== tier(b)) return tier(a) - tier(b);
     const idxA = priorityIndex.get(`${a.platform.toLowerCase()}:${a.username.toLowerCase()}`) ?? 0;
     const idxB = priorityIndex.get(`${b.platform.toLowerCase()}:${b.username.toLowerCase()}`) ?? 0;
     return idxA - idxB;

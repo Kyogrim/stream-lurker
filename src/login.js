@@ -1,9 +1,17 @@
 // Account login / re-auth / sign-out cards and the IPC handlers that flip
 // connected/disconnected card states.
 
-import { PLATFORMS, state, appendLogMessage } from './state.js';
+import { PLATFORMS, state, appendLogMessage, getPlatformSVG } from './state.js';
 import { renderFollowsList } from './follows.js';
 import { receiverStatus, extensionSyncNotice, folderOpenFailure } from './extension-status.js';
+
+// Each account card's title carries its platform's logo, the same SVG the
+// stream cards use (index.html leaves the badge empty for this).
+export function fillLoginCardLogos(root = document) {
+  for (const badge of root.querySelectorAll('.login-card-logo')) {
+    badge.innerHTML = getPlatformSVG(badge.getAttribute('data-logo'));
+  }
+}
 
 function setConnectionUI(platform, connected, username) {
   const disconnectedCard = document.getElementById(`${platform}-disconnected-state`);
@@ -18,6 +26,7 @@ function setConnectionUI(platform, connected, username) {
 
 export function setupLoginPortalListeners() {
   if (!state.currentConfig.accounts) state.currentConfig.accounts = {};
+  fillLoginCardLogos();
 
   PLATFORMS.forEach(platform => {
     const username = state.currentConfig.accounts[platform];

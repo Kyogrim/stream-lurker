@@ -23,6 +23,10 @@
   
   --danger-color: hsl(0, 84.2%, 60.2%);
   --success-color: hsl(142.1, 76.2%, 36.3%);
+  /* A signed-in platform, the same on every card (a red check on YouTube read
+     as an error); bright enough to read as "on" at the size of the icon. */
+  --connected-color: hsl(142, 71%, 45%);
+  --connected-glow: hsla(142, 71%, 45%, 0.35);
   
   --font-sans: 'Outfit', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
@@ -283,6 +287,24 @@ body {
   box-shadow: 0 0 15px var(--twitch-glow);
 }
 
+/* The secondary action beside a filled one (Sign Out beside Re-authenticate):
+   outlined, and red on hover when it signs something out. */
+.btn-quiet {
+  background-color: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--panel-border);
+}
+
+.btn-quiet:hover {
+  color: var(--text-primary);
+}
+
+.btn-quiet.logout-btn:hover {
+  color: var(--danger-color);
+  border-color: var(--danger-color);
+  background-color: hsla(0, 84.2%, 60.2%, 0.08);
+}
+
 .btn-glow {
   position: relative;
 }
@@ -371,6 +393,38 @@ body {
 }
 
 /* Toggle Switch */
+
+/* System Settings > Platform Service Toggles: one grouped panel split into
+   cells by dividers, so each switch sits in a cell with its own label (with
+   label and switch at the far ends of each half, Twitch's switch sat right
+   beside the word "Kick"). */
+.platform-toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background-color: hsla(240, 5.9%, 15%, 0.15);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.platform-toggle-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  min-width: 0;
+}
+
+.platform-toggle-cell:nth-child(even) { border-left: 1px solid var(--panel-border); }
+.platform-toggle-cell:nth-child(n + 3) { border-top: 1px solid var(--panel-border); }
+
+/* The switch keeps its size; in a narrow cell the label gives way instead,
+   and Rumble's COMING SOON drops below its name (at 1366 px the switch was
+   squeezed to a dot). */
+.platform-toggle-cell .switch { flex-shrink: 0; }
+.platform-toggle-cell .toggle-label { min-width: 0; flex-wrap: wrap; row-gap: 4px; }
+
 .switch {
   position: relative;
   display: inline-block;
@@ -443,11 +497,18 @@ input:checked + .slider:before {
 }
 
 /* Streams Grid and Cards */
+/* align-content: start, because the grid has a fixed height and its rows
+   stretched to fill whatever short cards left over; align-items: start, so a
+   card is only as tall as its content. overflow-x: a long name used to widen
+   the grid sideways (see .streamer-identity). */
 .streams-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 20px;
+  align-items: start;
+  align-content: start;
   overflow-y: auto;
+  overflow-x: hidden;
   flex-grow: 1;
   padding-bottom: 20px;
 }
@@ -477,7 +538,15 @@ input:checked + .slider:before {
   flex-direction: column;
   justify-content: space-between;
   min-height: 190px;
+  min-width: 0;
 }
+
+/* Offline with nothing to show: just the name and the badge (dashboard.js
+   isCompactCard). The first one starts a new row, so compact cards never sit
+   beside a tall card over empty space. */
+.stream-card.compact { min-height: 0; }
+.stream-card.compact .card-header-row { margin-bottom: 0; }
+.stream-card:not(.compact) + .stream-card.compact { grid-column-start: 1; }
 
 .stream-card:hover {
   transform: translateY(-4px);
@@ -531,16 +600,22 @@ input:checked + .slider:before {
 
 .card-header-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
 }
 
+/* min-width: 0 lets a long name end in "…" instead of pushing the badge past
+   the card's edge; the avatar never shrinks into an oval. */
 .streamer-identity {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
+.streamer-identity .platform-badge { flex-shrink: 0; }
 
 .platform-badge {
   width: 24px;
@@ -577,6 +652,10 @@ input:checked + .slider:before {
   font-size: 1.1rem;
   font-weight: 700;
   letter-spacing: -0.01em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .live-badge {
@@ -590,6 +669,7 @@ input:checked + .slider:before {
   border-radius: 20px;
   color: #fff;
   text-transform: uppercase;
+  flex-shrink: 0;
 }
 
 .live-badge.live {
@@ -632,12 +712,23 @@ input:checked + .slider:before {
   gap: 12px;
   font-size: 0.75rem;
   color: var(--text-secondary);
+  min-width: 0;
 }
 
+/* One line (dashboard.js): only the category gives way, with an ellipsis. */
 .detail-item {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.detail-item.detail-category {
+  display: block;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .viewers-dot {
@@ -645,6 +736,7 @@ input:checked + .slider:before {
   height: 6px;
   background-color: var(--danger-color);
   border-radius: 50%;
+  flex-shrink: 0;
 }
 
 .card-actions {
@@ -1383,6 +1475,12 @@ input:checked + .slider:before {
   background: hsla(240, 5.9%, 25%, 0.8);
 }
 
+/* Where a horizontal and a vertical scrollbar meet: the browser's default
+   was a white square. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* Sidebar divider and Active Stream Section styling */
 .sidebar-divider {
   height: 1px;
@@ -1505,9 +1603,14 @@ input:checked + .slider:before {
 }
 
 /* In-App Logins Tab View */
+/* Cards as tall as what they hold, three across when there is room: fixed at
+   650 px with about 120 px of content, they pushed YouTube below the fold.
+   300 px fits three across on a 1366 px screen and still holds the
+   Re-authenticate + Sign Out row. */
 .logins-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  align-items: start;
   gap: 24px;
   flex-grow: 1;
   min-height: 0;
@@ -1517,11 +1620,21 @@ input:checked + .slider:before {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  height: 650px;
-  min-height: 500px;
   border-radius: var(--radius-lg);
   padding: 20px;
 }
+
+/* The platform's logo beside the card title (login.js fills it in). A
+   glowing dot there read as a status light: a red one sat above "YouTube
+   Connected". */
+.login-card-logo {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+/* The account cards' short hints: no word left alone on the last line. */
+.account-state-container p { text-wrap: balance; }
 
 .login-card.twitch-login-card {
   border-color: hsla(261, 100%, 63%, 0.2);
@@ -1555,38 +1668,6 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.platform-icon-purple {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: var(--twitch-color);
-  box-shadow: 0 0 8px var(--twitch-color);
-}
-
-.platform-icon-green {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: var(--kick-color);
-  box-shadow: 0 0 8px var(--kick-color);
-}
-
-.platform-icon-red {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: var(--youtube-color);
-  box-shadow: 0 0 8px var(--youtube-color);
-}
-
-.platform-icon-lime {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background-color: var(--rumble-color);
-  box-shadow: 0 0 8px var(--rumble-color);
 }
 
 .webview-wrapper {
@@ -1736,18 +1817,26 @@ input:checked + .slider:before {
   padding: 0 12px;
   flex-shrink: 0;
   user-select: none;
+  container-type: inline-size;
 }
 
+/* min-width and overflow: the name and meta end before the buttons instead
+   of running underneath them in a narrow cell. */
 .stream-cell-identity {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0; /* let the meta ellipsis instead of shoving the buttons out */
   flex: 1 1 auto;
+  overflow: hidden;
 }
+.stream-cell-identity .platform-badge { flex-shrink: 0; }
 
 .stream-cell-name {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 0.85rem;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -1767,6 +1856,7 @@ input:checked + .slider:before {
   font-weight: 500;
   color: var(--text-secondary);
   white-space: nowrap;
+  overflow: hidden;
 }
 .stream-cell-meta:empty { display: none; }
 
@@ -1805,6 +1895,7 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .cell-action-btn {
@@ -1823,6 +1914,13 @@ input:checked + .slider:before {
 .cell-action-btn:hover {
   background-color: hsla(240, 5.9%, 15%, 0.5);
   color: var(--text-primary);
+}
+
+/* A narrow cell (three across on a laptop): the nine buttons sit closer so
+   the name keeps room to be read. After .cell-action-btn, which it overrides. */
+@container (max-width: 480px) {
+  .stream-cell-actions { gap: 1px; }
+  .cell-action-btn { padding: 3px; }
 }
 
 .cell-action-btn.mute-btn.muted {
@@ -3104,7 +3202,7 @@ webview:-webkit-full-screen {
   margin-left: 6px;
 }
 .ext-desc {
-  font-size: 0.82rem;
+  font-size: 0.9rem;
   color: var(--text-muted, #a1a1aa);
   margin: 8px 0;
 }
@@ -3114,7 +3212,7 @@ webview:-webkit-full-screen {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 0.82rem;
+  font-size: 0.9rem;
   line-height: 1.45;
 }
 .ext-steps code,
@@ -3127,7 +3225,7 @@ webview:-webkit-full-screen {
   border-radius: 5px;
   font-family: monospace;
 }
-.ext-conn { font-size: 0.75rem; margin-left: 4px; }
+.ext-conn { font-size: 0.8rem; margin-left: 4px; }
 /* New codes are 32 characters: the global user-select: none would leave
    typing it by hand as the only way to move it into the extension. */
 #ext-pairing-code {
@@ -3137,13 +3235,13 @@ webview:-webkit-full-screen {
 }
 .ext-code-btn {
   padding: 2px 8px;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   margin-left: 4px;
   vertical-align: middle;
 }
 .ext-note,
 .ext-sync {
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   margin: 6px 0 0;
   color: var(--text-muted, #a1a1aa);
   user-select: text;
@@ -3153,7 +3251,7 @@ webview:-webkit-full-screen {
 .ext-sync.warn { color: #f59e0b; }
 .ext-note.error { color: #ef4444; }
 .ext-fallback {
-  font-size: 0.76rem;
+  font-size: 0.85rem;
   color: var(--text-muted, #a1a1aa);
   margin: 6px 0 0;
 }
