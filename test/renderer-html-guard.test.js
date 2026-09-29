@@ -63,6 +63,7 @@ const SAFE_URL_CALLS = {
 // Local builders: allowed as calls because every `return` in them is checked
 // with the same rule (see verifyBuilders), so listing one grants nothing.
 const HTML_BUILDERS = {
+  'src/dashboard.js': ['cardHeader'],
   'src/leaderboard.js': ['statCard', 'buildHeatmap'],
   'src/multi-lurk.js': ['cellMetaHTML', 'buildCellHTML'],
 };

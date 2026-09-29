@@ -228,7 +228,7 @@
           <div class="glass-panel login-card twitch-login-card">
             <div class="login-card-header">
               <div class="platform-title-group">
-                <span class="platform-icon-purple"></span>
+                <span class="platform-badge twitch login-card-logo" data-logo="twitch"></span>
                 <h3>Twitch Account</h3>
               </div>
             </div>
@@ -244,14 +244,14 @@
 
               <!-- Connected State -->
               <div class="account-state-container connected-state" id="twitch-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
-                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--twitch-glow)); margin-bottom: 2px;">
-                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--twitch-color)" stroke-width="2.5">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--connected-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--connected-color)" stroke-width="2.5">
                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                     <polyline points="22 4 12 14.01 9 11.01"/>
                   </svg>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px;">
-                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--twitch-color); margin: 0;">Twitch Connected</h4>
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--connected-color); margin: 0;">Twitch Connected</h4>
                   <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="twitch-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
@@ -259,7 +259,7 @@
                     <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
                     Re-authenticate
                   </button>
-                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="twitch" style="padding: 6px 12px; font-size: 0.75rem;">
+                  <button class="btn btn-sm btn-quiet logout-btn" data-platform="twitch" style="padding: 6px 12px; font-size: 0.75rem;">
                     <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Sign Out
                   </button>
@@ -272,7 +272,7 @@
           <div class="glass-panel login-card kick-login-card">
             <div class="login-card-header">
               <div class="platform-title-group">
-                <span class="platform-icon-green"></span>
+                <span class="platform-badge kick login-card-logo" data-logo="kick"></span>
                 <h3>Kick Account</h3>
               </div>
             </div>
@@ -288,14 +288,14 @@
 
               <!-- Connected State -->
               <div class="account-state-container connected-state" id="kick-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
-                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--kick-glow)); margin-bottom: 2px;">
-                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--kick-color)" stroke-width="2.5">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--connected-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--connected-color)" stroke-width="2.5">
                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                     <polyline points="22 4 12 14.01 9 11.01"/>
                   </svg>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px;">
-                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--kick-color); margin: 0;">Kick Connected</h4>
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--connected-color); margin: 0;">Kick Connected</h4>
                   <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="kick-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
@@ -303,7 +303,7 @@
                     <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
                     Re-authenticate
                   </button>
-                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="kick" style="padding: 6px 12px; font-size: 0.75rem;">
+                  <button class="btn btn-sm btn-quiet logout-btn" data-platform="kick" style="padding: 6px 12px; font-size: 0.75rem;">
                     <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Sign Out
                   </button>
@@ -316,7 +316,7 @@
           <div class="glass-panel login-card youtube-login-card">
             <div class="login-card-header">
               <div class="platform-title-group">
-                <span class="platform-icon-red"></span>
+                <span class="platform-badge youtube login-card-logo" data-logo="youtube"></span>
                 <h3>YouTube Account</h3>
               </div>
             </div>
@@ -332,14 +332,14 @@
 
               <!-- Connected State -->
               <div class="account-state-container connected-state" id="youtube-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
-                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--youtube-glow)); margin-bottom: 2px;">
-                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--youtube-color)" stroke-width="2.5">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--connected-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--connected-color)" stroke-width="2.5">
                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                     <polyline points="22 4 12 14.01 9 11.01"/>
                   </svg>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px;">
-                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--youtube-color); margin: 0;">YouTube Connected</h4>
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--connected-color); margin: 0;">YouTube Connected</h4>
                   <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="youtube-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
@@ -347,7 +347,7 @@
                     <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
                     Re-authenticate
                   </button>
-                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="youtube" style="padding: 6px 12px; font-size: 0.75rem;">
+                  <button class="btn btn-sm btn-quiet logout-btn" data-platform="youtube" style="padding: 6px 12px; font-size: 0.75rem;">
                     <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Sign Out
                   </button>
@@ -362,7 +362,7 @@
           <div class="glass-panel login-card rumble-login-card hidden">
             <div class="login-card-header">
               <div class="platform-title-group">
-                <span class="platform-icon-lime"></span>
+                <span class="platform-badge rumble login-card-logo" data-logo="rumble"></span>
                 <h3>Rumble Account</h3>
               </div>
             </div>
@@ -378,14 +378,14 @@
 
               <!-- Connected State -->
               <div class="account-state-container connected-state" id="rumble-connected-state" style="display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; padding: 20px; width: 100%; height: 100%;">
-                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--rumble-glow)); margin-bottom: 2px;">
-                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--rumble-color)" stroke-width="2.5">
+                <div class="success-icon" style="filter: drop-shadow(0 0 10px var(--connected-glow)); margin-bottom: 2px;">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--connected-color)" stroke-width="2.5">
                     <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                     <polyline points="22 4 12 14.01 9 11.01"/>
                   </svg>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 4px;">
-                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--rumble-color); margin: 0;">Rumble Connected</h4>
+                  <h4 style="font-size: 1rem; font-weight: 700; color: var(--connected-color); margin: 0;">Rumble Connected</h4>
                   <p class="session-user" style="font-size: 0.82rem; color: var(--text-primary); margin: 0;">Logged in as: <span class="username-val" id="rumble-username-val" style="font-weight: 700; color: var(--cyan-color);">--</span></p>
                 </div>
                 <div style="display: flex; gap: 8px; justify-content: center; margin-top: 4px; flex-wrap: wrap;">
@@ -393,7 +393,7 @@
                     <svg class="btn-icon" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
                     Re-authenticate
                   </button>
-                  <button class="btn btn-sm btn-cyan logout-btn" data-platform="rumble" style="padding: 6px 12px; font-size: 0.75rem;">
+                  <button class="btn btn-sm btn-quiet logout-btn" data-platform="rumble" style="padding: 6px 12px; font-size: 0.75rem;">
                     <svg class="btn-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
                     Sign Out
                   </button>
@@ -408,7 +408,7 @@
       <section id="tab-streamers" class="tab-content">
         <div class="tab-header">
           <h2>Manage Streamers</h2>
-          <p>Add or remove Twitch and Kick streamers from your monitoring list.</p>
+          <p>Add or remove Twitch, Kick and YouTube streamers from your monitoring list.</p>
         </div>
 
         <div class="streamer-management-grid">
@@ -478,7 +478,7 @@
                 <button class="follows-tab-btn active" data-platform="twitch" style="background: none; border: none; font-family: var(--font-sans); font-size: 0.8rem; font-weight: 600; color: var(--twitch-color); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); border: 1px solid transparent; transition: var(--transition);">Twitch</button>
               </div>
               <div id="follows-list-container" class="follows-list-container" style="display: flex; flex-direction: column; gap: 8px; max-height: 250px; overflow-y: auto;">
-                <div class="no-follows-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 15px 0;">Click Scan to discover live followed channels.</div>
+                <div class="no-follows-message" style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 15px 0;">Click Scan Live to list the channels you follow that are live now.</div>
               </div>
             </div>
           </div>
@@ -579,7 +579,7 @@
                 </select>
               </div>
               <div class="form-group" style="display: flex; flex-direction: column; gap: 6px;">
-                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Start Time (24h format)</label>
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);">Start Time</label>
                 <input type="time" id="event-time" required style="
                   background-color: var(--panel-glass);
                   border: 1px solid var(--panel-border);
@@ -749,32 +749,32 @@
 
             <div class="settings-group">
               <label>Platform Service Toggles</label>
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background-color: hsla(240, 5.9%, 15%, 0.15); padding: 16px; border-radius: var(--radius-md); border: 1px solid var(--panel-border);">
-                <div style="display: flex; align-items: center; justify-content: space-between;">
+              <div class="platform-toggle-grid">
+                <div class="platform-toggle-cell">
                   <span class="toggle-label" style="font-size: 0.85rem;">Twitch</span>
                   <label class="switch">
                     <input type="checkbox" id="twitch-enabled-toggle" checked>
                     <span class="slider"></span>
                   </label>
                 </div>
-                <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div class="platform-toggle-cell">
                   <span class="toggle-label" style="font-size: 0.85rem;">Kick</span>
                   <label class="switch">
                     <input type="checkbox" id="kick-enabled-toggle" checked>
                     <span class="slider"></span>
                   </label>
                 </div>
-                <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div class="platform-toggle-cell">
                   <span class="toggle-label" style="font-size: 0.85rem;">YouTube</span>
                   <label class="switch">
                     <input type="checkbox" id="youtube-enabled-toggle" checked>
                     <span class="slider"></span>
                   </label>
                 </div>
-                <div style="display: flex; align-items: center; justify-content: space-between; opacity: 0.55;">
+                <div class="platform-toggle-cell" style="opacity: 0.55;">
                   <span class="toggle-label" style="font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
                     Rumble
-                    <span style="font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--cyan-color); background: var(--cyan-glow); border: 1px solid var(--cyan-color); padding: 1px 6px; border-radius: 10px;">Coming Soon</span>
+                    <span style="font-size: 0.6rem; font-weight: 700; text-transform: uppercase; white-space: nowrap; letter-spacing: 0.05em; color: var(--cyan-color); background: var(--cyan-glow); border: 1px solid var(--cyan-color); padding: 1px 6px; border-radius: 10px;">Coming Soon</span>
                   </span>
                   <label class="switch" title="Rumble support is coming soon" style="cursor: not-allowed;">
                     <input type="checkbox" id="rumble-enabled-toggle" disabled>
@@ -791,6 +791,30 @@
               </div>
               <input type="range" id="max-twitch-tabs-slider" min="1" max="10" value="2" class="slider-input">
               <span class="help-text">Maximum number of Twitch streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-kick-tabs-slider">Max Kick Lurk Tabs: <span id="max-kick-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-kick-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of Kick streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-label-row">
+                <label for="max-youtube-tabs-slider">Max YouTube Lurk Tabs: <span id="max-youtube-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-youtube-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of YouTube streams that can auto-open concurrently. Range: 1 to 10.</span>
+            </div>
+
+            <div class="settings-group hidden">
+              <div class="settings-label-row">
+                <label for="max-rumble-tabs-slider">Max Rumble Lurk Tabs: <span id="max-rumble-tabs-display-val">2</span></label>
+              </div>
+              <input type="range" id="max-rumble-tabs-slider" min="1" max="10" value="2" class="slider-input">
+              <span class="help-text">Maximum number of Rumble streams that can auto-open concurrently. Range: 1 to 10.</span>
             </div>
 
             <div class="settings-group">
@@ -818,30 +842,6 @@
                   </label>
                 </div>
               </div>
-            </div>
-
-            <div class="settings-group">
-              <div class="settings-label-row">
-                <label for="max-kick-tabs-slider">Max Kick Lurk Tabs: <span id="max-kick-tabs-display-val">2</span></label>
-              </div>
-              <input type="range" id="max-kick-tabs-slider" min="1" max="10" value="2" class="slider-input">
-              <span class="help-text">Maximum number of Kick streams that can auto-open concurrently. Range: 1 to 10.</span>
-            </div>
-
-            <div class="settings-group">
-              <div class="settings-label-row">
-                <label for="max-youtube-tabs-slider">Max YouTube Lurk Tabs: <span id="max-youtube-tabs-display-val">2</span></label>
-              </div>
-              <input type="range" id="max-youtube-tabs-slider" min="1" max="10" value="2" class="slider-input">
-              <span class="help-text">Maximum number of YouTube streams that can auto-open concurrently. Range: 1 to 10.</span>
-            </div>
-
-            <div class="settings-group">
-              <div class="settings-label-row">
-                <label for="max-rumble-tabs-slider">Max Rumble Lurk Tabs: <span id="max-rumble-tabs-display-val">2</span></label>
-              </div>
-              <input type="range" id="max-rumble-tabs-slider" min="1" max="10" value="2" class="slider-input">
-              <span class="help-text">Maximum number of Rumble streams that can auto-open concurrently. Range: 1 to 10.</span>
             </div>
 
             <div class="settings-group">

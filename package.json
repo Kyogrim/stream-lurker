@@ -1,6 +1,6 @@
 {
   "name": "stream-lurker",
-  "version": "0.14.0-beta",
+  "version": "0.15.0-beta",
   "description": "Desktop app that watches Twitch, Kick and YouTube channels and lurks them when they go live.",
   "main": "main.js",
   "scripts": {
